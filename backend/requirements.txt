@@ -1,0 +1,16 @@
+fastapi>=0.115.0
+uvicorn>=0.34.0
+pydantic>=2.10.0
+websockets>=14.0
+loguru>=0.7.3
+polars>=1.26.0
+numpy>=2.2.3
+scipy>=1.15.2
+scikit-learn>=1.6.1
+lightgbm>=4.6.0
+torch>=2.10.0
+pyarrow>=19.0.1
+talib>=0.6.4
+tqdm>=4.67.1
+tushare>=1.4.0
+alphalens-reloaded>=0.4.5

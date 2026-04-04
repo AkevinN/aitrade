@@ -1,0 +1,88 @@
+[project]
+name = "aitrade"
+dynamic = ["version"]
+description = "AI-driven stock price prediction platform with alpha research and CNN forecasting."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Kevin", email = "kevin@example.com"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Natural Language :: Chinese (Simplified)",
+    "Typing :: Typed",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+    "pydantic>=2.10.0",
+    "websockets>=14.0",
+    "loguru>=0.7.3",
+    "polars>=1.26.0",
+    "numpy>=2.2.3",
+    "scipy>=1.15.2",
+    "scikit-learn>=1.6.1",
+    "lightgbm>=4.6.0",
+    "torch>=2.10.0",
+    "pyarrow>=19.0.1",
+    "tqdm>=4.67.1",
+    "tushare>=1.4.0",
+    "python-dateutil>=2.9.0",
+    "python-multipart>=0.0.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+    "httpx>=0.28.0",
+    "ruff>=0.9.0",
+    "mypy>=1.15.0",
+]
+
+[project.scripts]
+aitrade = "aitrade.__main__:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "aitrade/__init__.py"
+pattern = "__version__ = ['\"](?P<version>[^'\"]+)['\"]"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aitrade"]
+
+[tool.ruff]
+target-version = "py310"
+output-format = "full"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "UP", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+
+[[tool.mypy.overrides]]
+module = ["polars", "lightgbm", "torch", "numpy", "scipy"]
+ignore_missing_imports = true
