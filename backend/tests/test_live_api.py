@@ -214,6 +214,73 @@ def test_get_decision_not_found_returns_404(client) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 归档式删除：决策 + trace 整体移入 archive/，解除幂等占位
+# ---------------------------------------------------------------------------
+def test_delete_decision_archives_decision_and_trace(client, monkeypatch, tmp_path) -> None:
+    from aitrade.live.decision_trace import DecisionTraceStore
+
+    test_client, store = client
+    trace_store = DecisionTraceStore(tmp_path / "decisions")
+    monkeypatch.setattr(live_api, "_trace_store", trace_store)
+
+    decision = _decision()
+    store.save(decision)
+    trace_store.save_if_absent(
+        decision.signal_id,
+        {
+            "schema_version": 1,
+            "run_id": "r1",
+            "signal_id": decision.signal_id,
+            "completed_sections": [],
+            "sections": {},
+        },
+    )
+
+    resp = test_client.delete(f"/api/live/decisions/{decision.signal_id}")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "signal_id": decision.signal_id,
+        "deleted": True,
+        "trace_archived": True,
+    }
+
+    # 幂等占位解除：get/list/trace 均不再可见，同 signal_id 可重新产出决策。
+    assert store.get(decision.signal_id) is None
+    assert trace_store.get(decision.signal_id) is None
+    assert test_client.get(f"/api/live/decisions/{decision.signal_id}").status_code == 404
+    assert test_client.get("/api/live/decisions").json()["signal_ids"] == []
+
+    # 审计痕迹保留：决策与 trace 各有一个带时间戳的归档文件。
+    archived = sorted(p.name for p in (tmp_path / "decisions" / "archive").glob("*.json"))
+    assert len(archived) == 2
+    assert any(".trace." in name for name in archived)
+
+
+def test_delete_decision_without_trace_still_archives_decision(client, monkeypatch, tmp_path) -> None:
+    from aitrade.live.decision_trace import DecisionTraceStore
+
+    test_client, store = client
+    monkeypatch.setattr(live_api, "_trace_store", DecisionTraceStore(tmp_path / "decisions"))
+    store.save(_decision())
+    signal_id = _decision().signal_id
+
+    resp = test_client.delete(f"/api/live/decisions/{signal_id}")
+    assert resp.status_code == 200
+    assert resp.json()["trace_archived"] is False
+    assert store.get(signal_id) is None
+
+
+def test_delete_decision_not_found_returns_404(client, monkeypatch, tmp_path) -> None:
+    from aitrade.live.decision_trace import DecisionTraceStore
+
+    test_client, _ = client
+    monkeypatch.setattr(live_api, "_trace_store", DecisionTraceStore(tmp_path / "decisions"))
+    resp = test_client.delete("/api/live/decisions/不存在的signal_id")
+    assert resp.status_code == 404
+    assert "决策不存在" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # 需求 7.3：接口文档标注无鉴权前置条件
 # ---------------------------------------------------------------------------
 def test_openapi_marks_no_auth_precondition(client) -> None:

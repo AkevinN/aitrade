@@ -4,9 +4,10 @@
 把既有实盘原语（`predict_cnn_signals` → `SignalService` → `RiskManager` →
 `Notifier` → `DecisionStore`）经 `LiveSignalOrchestrator` 串联后暴露为 HTTP 接口：
 
-- `POST /api/live/decision`：触发一次今日决策（异步任务，返回 task_id）。
-- `GET  /api/live/decisions`：列出已持久化决策的 signal_id 集合。
-- `GET  /api/live/decisions/{signal_id}`：单条决策详情。
+- `POST   /api/live/decision`：触发一次今日决策（异步任务，返回 task_id）。
+- `GET    /api/live/decisions`：列出已持久化决策的 signal_id 集合。
+- `GET    /api/live/decisions/{signal_id}`：单条决策详情。
+- `DELETE /api/live/decisions/{signal_id}`：归档式删除决策 + trace（解除幂等占位）。
 
 安全边界（v1）：本路由**不 import 也不调用任何券商网关 / 下单接口**，产出仅限
 Decision 落盘 + Notifier 提醒（Property 7）。当前后端无鉴权（TD-015），真实下单能力
@@ -207,6 +208,27 @@ async def get_decision_trace(signal_id: str) -> dict:
     if trace is None:
         raise HTTPException(404, f"决策过程档案不存在: {signal_id}")  # 满足 8.5
     return trace
+
+
+@router.delete(
+    "/decisions/{signal_id}",
+    description=(
+        "归档式删除单条决策及其过程档案：文件移入 archive/ 子目录（保留审计痕迹），"
+        "并解除该 signal_id 的幂等占位，使同一 Decision_Bar 可重新产出决策与提醒。"
+        "注意：若当日交易计划仍有未到期的触发时点，删除后会重新决策并再次提醒。"
+    ),
+)
+async def delete_decision(signal_id: str) -> dict:
+    """归档决策与 trace（整体处理，避免「新决策配旧档案」错位）；决策不存在则 404。"""
+    archived = _store.archive(signal_id)
+    if archived is None:
+        raise HTTPException(404, f"决策不存在: {signal_id}")
+    trace_archived = _trace_store.archive(signal_id)
+    return {
+        "signal_id": signal_id,
+        "deleted": True,
+        "trace_archived": trace_archived is not None,
+    }
 
 
 # =============================================================================

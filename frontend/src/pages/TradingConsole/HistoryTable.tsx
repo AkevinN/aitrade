@@ -1,18 +1,20 @@
 import React, { useEffect, useState } from 'react'
 import {
   Alert,
+  App,
   Button,
   Descriptions,
   Empty,
   Modal,
+  Popconfirm,
   Space,
   Table,
   Tag,
   Typography,
 } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 
 import { liveService } from '../../api/liveApi'
 import type { Task } from '../../types/alpha'
@@ -50,6 +52,7 @@ interface HistoryRow {
  * - 任务完成后自动刷新列表，使新决策即时出现。
  */
 const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
+  const { message } = App.useApp()
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   // 列表查询：signal_id 集合。
@@ -82,6 +85,18 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
     enabled: selectedId !== null,
   })
 
+  // 归档式删除：决策 + trace 整体移入 archive/，解除幂等占位（同一 bar 可重新决策与提醒）。
+  const deleteMutation = useMutation({
+    mutationFn: (signalId: string) => liveService.deleteDecision(signalId),
+    onSuccess: (_data, signalId) => {
+      message.success('决策已删除（归档），同一 bar 可重新产出决策')
+      if (selectedId === signalId) setSelectedId(null)
+      void refetchList()
+    },
+    onError: (e: unknown) =>
+      message.error(e instanceof Error ? e.message : '删除失败，请重试'),
+  })
+
   const rows: HistoryRow[] = (signalIds ?? []).map((id) => ({ signal_id: id }))
 
   const columns: ColumnsType<HistoryRow> = [
@@ -93,6 +108,38 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
         <Text code style={{ fontSize: 12 }}>
           {id}
         </Text>
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 72,
+      align: 'center',
+      render: (_, record) => (
+        // 冒泡屏障：Popconfirm 弹层经 React portal 沿组件树冒泡，需在单元格层
+        // 拦截 click，避免删除操作触发行点击（打开详情弹窗）。
+        <span onClick={(e) => e.stopPropagation()}>
+          <Popconfirm
+            title="删除该决策？"
+            description="决策与过程档案将移入归档；同一 bar 之后可重新产出决策与提醒。"
+            okText="确认删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => deleteMutation.mutate(record.signal_id)}
+          >
+            <Button
+              size="small"
+              type="text"
+              danger
+              aria-label={`删除决策 ${record.signal_id}`}
+              icon={<DeleteOutlined />}
+              loading={
+                deleteMutation.isPending &&
+                deleteMutation.variables === record.signal_id
+              }
+            />
+          </Popconfirm>
+        </span>
       ),
     },
   ]

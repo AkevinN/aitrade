@@ -35,6 +35,15 @@ export const liveService = {
       .get<DecisionTrace>(`/api/live/decisions/${signalId}/trace`)
       .then((r) => r.data),
 
+  // 归档式删除单条决策及其过程档案（文件移入 archive/，解除幂等占位，
+  // 同一 Decision_Bar 可重新产出决策与提醒）。
+  deleteDecision: (signalId: string) =>
+    api
+      .delete<{ signal_id: string; deleted: boolean; trace_archived: boolean }>(
+        `/api/live/decisions/${signalId}`,
+      )
+      .then((r) => r.data),
+
   // ===== 交易计划自动化（Trading Plan Automation）=====
 
   // 列出所有交易计划摘要

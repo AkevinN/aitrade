@@ -66,8 +66,25 @@ class DecisionStore:
     def list_ids(self) -> list[str]:
         # 仅纳入决策文件 {signal_id}.json，排除 sibling 的 {signal_id}.trace.json，
         # 避免 trace 文件的 stem（"{signal_id}.trace"）被误当成独立决策 id（需求 8.3）。
+        # glob 不递归，archive/ 子目录下的归档文件天然不在列表/幂等判定范围内。
         return sorted(
             p.stem
             for p in self.base_path.glob("*.json")
             if not p.name.endswith(".trace.json")
         )
+
+    def archive(self, signal_id: str) -> Optional[Path]:
+        """归档式删除：决策文件移入 archive/ 子目录（文件名追加时间戳）。
+
+        解除该 signal_id 的幂等占位——之后同一 Decision_Bar 可重新产出决策与提醒；
+        归档文件保留审计痕迹，不被 get/list_ids 纳入。不存在则返回 None。
+        """
+        path = self._path(signal_id)
+        if not path.exists():
+            return None
+        archive_dir = self.base_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        target = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
+        path.rename(target)
+        return target

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -80,3 +81,20 @@ class DecisionTraceStore:
             return False
         path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
+
+    def archive(self, signal_id: str) -> Optional[Path]:
+        """归档式删除：trace 文件移入 archive/ 子目录（文件名追加时间戳）。
+
+        必须与 `DecisionStore.archive` 成对调用——只删决策不删 trace 会使重新决策后
+        `save_if_absent` 因旧文件存在而不写，造成「决策是新的、档案是旧的」错位。
+        归档文件保留审计痕迹。不存在则返回 None。
+        """
+        path = self._path(signal_id)
+        if not path.exists():
+            return None
+        archive_dir = self.base_path / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        target = archive_dir / f"{path.stem}.{stamp}{path.suffix}"
+        path.rename(target)
+        return target
