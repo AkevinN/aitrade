@@ -10,13 +10,24 @@ import type {
   ModelDetail,
   SignalDetail,
   DataDownloadRequest,
+  DataAggregateRequest,
   DatasetCreateRequest,
   ModelTrainRequest,
   SignalGenerateRequest,
   BacktestRunRequest,
-  CNNTrainRequest,
   CsvPreviewResult,
   CsvImportResponse,
+  CsvSaveMode,
+  DataResourceList,
+  DataResourceDetail,
+  DataResourceMergeRequest,
+  DataResourceMergePreview,
+  DataResourceMergeResponse,
+  DataResourceKind,
+  RelocateBarIntervalResponse,
+  CsvInterval,
+  SymbolProfileRequest,
+  SymbolProfileResponse,
 } from '../types/alpha'
 
 export const alphaService = {
@@ -78,9 +89,58 @@ export const alphaService = {
   downloadData: (req: DataDownloadRequest) =>
     api.post<TaskStartResponse>('/api/alpha/data/download', req).then((r) => r.data),
 
+  aggregateData: (req: DataAggregateRequest) =>
+    api.post<TaskStartResponse>('/api/alpha/data/aggregate', req).then((r) => r.data),
+
+  // Symbol profiling
+  runProfiling: (req: SymbolProfileRequest) =>
+    api.post<SymbolProfileResponse>('/api/alpha/profiling', req).then((r) => r.data),
+
+  listProfilingArtifacts: () =>
+    api.get<string[]>('/api/alpha/profiling/artifacts').then((r) => r.data),
+
+  getProfilingArtifact: (artifactId: string) =>
+    api
+      .get<SymbolProfileResponse>(`/api/alpha/profiling/${encodeURIComponent(artifactId)}`)
+      .then((r) => r.data),
+
   // Contracts
   getContracts: () =>
     api.get<Record<string, unknown>>('/api/alpha/contracts').then((r) => r.data),
+
+  // Unified data resources
+  getDataResources: () =>
+    api.get<DataResourceList>('/api/alpha/data/resources').then((r) => r.data),
+
+  getDataResourceDetail: (kind: DataResourceKind, key: string, query?: BarDataDetailQuery) =>
+    api
+      .get<DataResourceDetail>(`/api/alpha/data/resources/${kind}/${encodeURIComponent(key)}`, {
+        params: query as Record<string, string>,
+      })
+      .then((r) => r.data),
+
+  deleteDataResource: (kind: DataResourceKind, key: string) =>
+    api
+      .delete<{ success: boolean; message: string }>(`/api/alpha/data/resources/${kind}/${encodeURIComponent(key)}`)
+      .then((r) => r.data),
+
+  relocateRawBarInterval: (key: string, interval: CsvInterval) =>
+    api
+      .patch<RelocateBarIntervalResponse>(
+        `/api/alpha/data/resources/raw_bar/${encodeURIComponent(key)}/interval`,
+        { interval },
+      )
+      .then((r) => r.data),
+
+  previewDataResourceMerge: (req: DataResourceMergeRequest) =>
+    api
+      .post<DataResourceMergePreview>('/api/alpha/data/resources/merge/preview', req)
+      .then((r) => r.data),
+
+  mergeDataResourceBatches: (req: DataResourceMergeRequest) =>
+    api
+      .post<DataResourceMergeResponse>('/api/alpha/data/resources/merge', req)
+      .then((r) => r.data),
 
   // Bar data
   getBarData: () =>
@@ -114,19 +174,50 @@ export const alphaService = {
 
   importCsvData: (
     file: File,
-    interval: 'd' | 'm',
+    interval: 'd' | '1m' | '5m' | '15m' | '30m' | '60m',
     import_mode: 'merge' | 'replace',
+    save_mode: CsvSaveMode = 'batch',
     field_mapping?: Record<string, string>,
   ) => {
     const formData = new FormData()
     formData.append('file', file)
     formData.append('interval', interval)
     formData.append('import_mode', import_mode)
+    formData.append('save_mode', save_mode)
     if (field_mapping) {
       formData.append('field_mapping', JSON.stringify(field_mapping))
     }
     return api
       .post<CsvImportResponse>('/api/alpha/bar-data/import', formData)
+      .then((r) => r.data)
+  },
+
+  previewTickCsvImport: (file: File, field_mapping?: Record<string, string>) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    if (field_mapping) {
+      formData.append('field_mapping', JSON.stringify(field_mapping))
+    }
+    return api
+      .post<CsvPreviewResult>('/api/alpha/ticks/import/preview', formData)
+      .then((r) => r.data)
+  },
+
+  importTickCsvData: (
+    file: File,
+    import_mode: 'merge' | 'replace',
+    save_mode: CsvSaveMode = 'batch',
+    field_mapping?: Record<string, string>,
+  ) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('import_mode', import_mode)
+    formData.append('save_mode', save_mode)
+    if (field_mapping) {
+      formData.append('field_mapping', JSON.stringify(field_mapping))
+    }
+    return api
+      .post<CsvImportResponse>('/api/alpha/ticks/import', formData)
       .then((r) => r.data)
   },
 }

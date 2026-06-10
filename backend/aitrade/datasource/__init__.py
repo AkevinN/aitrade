@@ -2,6 +2,7 @@
 Datasource module — exports.
 """
 
+from .akshare_provider import AkshareProvider, AkshareProviderError
 from .base import BaseProvider
 from .manager import DataSourceManager, datasource_manager
 from .mock_provider import MockProvider
@@ -14,6 +15,7 @@ from .types import (
     FundamentalRecord,
     ProviderInfo,
     ProviderStatus,
+    TickRecord,
 )
 
 __all__ = [
@@ -22,7 +24,10 @@ __all__ = [
     "datasource_manager",
     "MockProvider",
     "TushareProvider",
+    "AkshareProvider",
+    "AkshareProviderError",
     "BarRecord",
+    "TickRecord",
     "CalendarDay",
     "ContractInfo",
     "DataCategory",

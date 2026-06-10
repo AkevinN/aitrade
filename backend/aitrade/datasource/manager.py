@@ -25,6 +25,7 @@ from .types import (
     ProviderInfo,
     ContractInfo,
     BarRecord,
+    TickRecord,
     CalendarDay,
     FundamentalRecord,
 )
@@ -197,6 +198,7 @@ class DataSourceManager:
     ) -> list[BarRecord]:
         """Query historical K-line bars with fallback."""
         providers = self._resolve_providers(DataCategory.BAR_HISTORY, provider_name)
+        last_error: Exception | None = None
         for provider in providers:
             try:
                 result = provider.get_bar_history(symbol, exchange, interval, start, end)
@@ -204,7 +206,33 @@ class DataSourceManager:
                     logger.debug(f"get_bar_history: [{provider.name}] returned {len(result)} bars")
                     return result
             except Exception as e:
+                last_error = e
                 logger.warning(f"get_bar_history: [{provider.name}] failed - {e}")
+                # 用户显式指定数据源时，直接抛出真实错误，避免误报「无数据」。
+                if provider_name:
+                    raise
+        if provider_name and last_error is not None:
+            raise last_error
+        return []
+
+    def get_tick_history(
+        self,
+        symbol: str,
+        exchange: str,
+        start: datetime,
+        end: datetime | None = None,
+        provider_name: str = "",
+    ) -> list[TickRecord]:
+        """Query historical ticks with fallback."""
+        providers = self._resolve_providers(DataCategory.TICK_HISTORY, provider_name)
+        for provider in providers:
+            try:
+                result = provider.get_tick_history(symbol, exchange, start, end)
+                if result is not None:
+                    logger.debug(f"get_tick_history: [{provider.name}] returned {len(result)} ticks")
+                    return result
+            except Exception as e:
+                logger.warning(f"get_tick_history: [{provider.name}] failed - {e}")
         return []
 
     # ---- Trade calendar ----

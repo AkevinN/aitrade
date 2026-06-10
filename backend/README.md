@@ -120,18 +120,12 @@ backend/
 
 ## 数据存储布局
 
-数据默认存储在 `~/.aitrade/` 目录下：
+数据存储在项目根目录下的 `./.aitrade/`（可通过环境变量 `AITRADE_HOME` 覆盖）：
 
 ```
-~/.aitrade/
-├── data/                 # 股票数据缓存
-│   ├── daily/            # 日线数据
-│   └── minute/           # 分钟线数据
-├── factors/              # 因子数据
-├── models/               # 训练好的模型
-├── logs/                 # 日志文件
-│   └── aitrade.log
-└── config.json           # 本地配置
+${AITRADE_HOME}/
+├── alpha_lab/            # K线/数据集/模型存储（Parquet + pickle）
+└── cnn_models/          # CNN 模型（.pt + history）
 ```
 
 ## 故障排除

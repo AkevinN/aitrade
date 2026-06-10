@@ -12,7 +12,7 @@ export const taskStore = create<TaskState>((set) => ({
   tasks: {},
   addTask: (task) =>
     set((state) => ({
-      tasks: { ...state.tasks, [task.id]: task },
+      tasks: { ...state.tasks, [task.task_id]: task },
     })),
   updateTask: (taskId, updates) =>
     set((state) => ({
@@ -25,4 +25,3 @@ export const taskStore = create<TaskState>((set) => ({
 }))
 
 export const useTaskStore = () => taskStore()
-

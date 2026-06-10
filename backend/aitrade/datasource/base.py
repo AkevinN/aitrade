@@ -15,6 +15,7 @@ from .types import (
     ProviderInfo,
     ContractInfo,
     BarRecord,
+    TickRecord,
     CalendarDay,
     FundamentalRecord,
 )
@@ -78,6 +79,16 @@ class BaseProvider(ABC):
         end: datetime | None = None,
     ) -> list[BarRecord] | None:
         """Query historical K-line bars. Return None = not supported."""
+        return None
+
+    def get_tick_history(
+        self,
+        symbol: str,
+        exchange: str,
+        start: datetime,
+        end: datetime | None = None,
+    ) -> list[TickRecord] | None:
+        """Query historical ticks. Return None = not supported."""
         return None
 
     # ---- Real-time tick ----

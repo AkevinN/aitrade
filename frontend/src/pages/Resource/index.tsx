@@ -1,405 +1,355 @@
-import React, { useState, useCallback } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
-  Card, Row, Col, Typography, Space, Button, Tabs, Table, Tag, Popconfirm, message,
+  Button,
+  Card,
+  Col,
+  Empty,
+  List,
+  Popconfirm,
+  Row,
+  Space,
+  Statistic,
+  Tabs,
+  Tag,
+  Typography,
+  message,
 } from 'antd'
 import {
-  DatabaseOutlined, RobotOutlined, ThunderboltOutlined, DeleteOutlined, ReloadOutlined,
+  DeleteOutlined,
+  ExperimentOutlined,
+  FolderOpenOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useLocation, useNavigate } from 'react-router-dom'
 
 import { alphaService } from '../../api/alpha'
 import { cnnService } from '../../api/cnn'
+import type { DataResourceSummary } from '../../types/alpha'
+import type { CNNModelInfo } from '../../types/cnn'
 
-const { Text } = Typography
-
-interface DatasetItem {
-  name: string
-  created_at: string
-  size: number
-  num_samples: number
-  symbols: string[]
-  fields: string[]
-}
-
-interface ModelItem {
-  name: string
-  model_type: string
-  dataset_name: string
-  created_at: string
-  num_features: number
-  metrics?: Record<string, number>
-}
-
-interface SignalItem {
-  name: string
-  model_name: string
-  created_at: string
-  num_signals: number
-}
+const { Title, Text } = Typography
 
 const Resource: React.FC = () => {
+  const navigate = useNavigate()
+  const location = useLocation()
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState('datasets')
+  const initialTab = (location.state as { tab?: string } | null)?.tab || 'data'
+  const [activeTab, setActiveTab] = useState(initialTab)
 
-  const { data: datasets, refetch: refetchDatasets } = useQuery({
+  const { data: resources } = useQuery({
+    queryKey: ['alpha-data-resources'],
+    queryFn: () => alphaService.getDataResources(),
+  })
+
+  const { data: datasets } = useQuery({
     queryKey: ['alpha-datasets'],
     queryFn: () => alphaService.listDatasets(),
   })
 
-  const { data: models, refetch: refetchModels } = useQuery({
+  const { data: alphaModels } = useQuery({
     queryKey: ['alpha-models'],
     queryFn: () => alphaService.listModels(),
   })
 
-  const { data: signals, refetch: refetchSignals } = useQuery({
+  const { data: signals } = useQuery({
     queryKey: ['alpha-signals'],
     queryFn: () => alphaService.listSignals(),
   })
 
-  const { data: cnnModels, refetch: refetchCnnModels } = useQuery({
+  const { data: cnnModels } = useQuery({
     queryKey: ['cnn-models'],
     queryFn: () => cnnService.listModels(),
   })
 
-  const handleDeleteDataset = useCallback(async (name: string) => {
+  const allDataResources = useMemo(
+    () => [
+      ...(resources?.raw_bars || []),
+      ...(resources?.raw_ticks || []),
+      ...(resources?.derived_bars || []),
+    ],
+    [resources],
+  )
+
+  const deleteResource = async (resource: DataResourceSummary) => {
+    try {
+      await alphaService.deleteDataResource(resource.kind, resource.key)
+      message.success('资源已删除')
+      queryClient.invalidateQueries({ queryKey: ['alpha-data-resources'] })
+    } catch {
+      message.error('删除失败')
+    }
+  }
+
+  const deleteDataset = async (name: string) => {
     try {
       await alphaService.deleteDataset(name)
-      message.success('Dataset deleted')
-      refetchDatasets()
+      message.success('数据集已删除')
+      queryClient.invalidateQueries({ queryKey: ['alpha-datasets'] })
     } catch {
-      message.error('Delete failed')
+      message.error('删除失败')
     }
-  }, [refetchDatasets])
+  }
 
-  const handleDeleteModel = useCallback(async (name: string) => {
+  const deleteAlphaModel = async (name: string) => {
     try {
       await alphaService.deleteModel(name)
-      message.success('Model deleted')
-      refetchModels()
+      message.success('模型已删除')
+      queryClient.invalidateQueries({ queryKey: ['alpha-models'] })
     } catch {
-      message.error('Delete failed')
+      message.error('删除失败')
     }
-  }, [refetchModels])
+  }
 
-  const handleDeleteSignal = useCallback(async (name: string) => {
+  const deleteSignal = async (name: string) => {
     try {
       await alphaService.deleteSignal(name)
-      message.success('Signal deleted')
-      refetchSignals()
+      message.success('信号已删除')
+      queryClient.invalidateQueries({ queryKey: ['alpha-signals'] })
     } catch {
-      message.error('Delete failed')
+      message.error('删除失败')
     }
-  }, [refetchSignals])
+  }
 
-  const handleDeleteCnnModel = useCallback(async (name: string) => {
+  const deleteCnnModel = async (name: string) => {
     try {
       await cnnService.deleteModel(name)
-      message.success('CNN model deleted')
-      refetchCnnModels()
+      message.success('CNN 模型已删除')
+      queryClient.invalidateQueries({ queryKey: ['cnn-models'] })
     } catch {
-      message.error('Delete failed')
+      message.error('删除失败')
     }
-  }, [refetchCnnModels])
+  }
 
-  const datasetColumns = [
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 200,
-    },
-    {
-      title: 'Created',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 150,
-      render: (t: string) => new Date(t).toLocaleString(),
-    },
-    {
-      title: 'Size',
-      dataIndex: 'size',
-      key: 'size',
-      width: 100,
-      render: (v: number) => {
-        if (v > 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(2)} MB`
-        if (v > 1024) return `${(v / 1024).toFixed(2)} KB`
-        return `${v} B`
-      },
-    },
-    {
-      title: 'Samples',
-      dataIndex: 'num_samples',
-      key: 'num_samples',
-      width: 100,
-      render: (v: number) => v.toLocaleString(),
-    },
-    {
-      title: 'Symbols',
-      dataIndex: 'symbols',
-      key: 'symbols',
-      render: (arr: string[]) => arr.slice(0, 3).join(', ') + (arr.length > 3 ? '...' : ''),
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 100,
-      render: (_: unknown, record: { name: string }) => (
-        <Popconfirm title="Confirm delete?" onConfirm={() => handleDeleteDataset(record.name)}>
-          <Button size="small" danger icon={<DeleteOutlined />}>
-            Delete
-          </Button>
-        </Popconfirm>
-      ),
-    },
-  ]
+  const renderResourceList = () => (
+    allDataResources.length > 0 ? (
+      <List
+        itemLayout="vertical"
+        dataSource={allDataResources}
+        renderItem={(resource) => (
+          <List.Item
+            key={resource.key}
+            actions={[
+              resource.kind !== 'raw_tick'
+                ? (
+                  <Button
+                    key="train"
+                    type="link"
+                    onClick={() => navigate('/cnn-train', {
+                      state: {
+                        preset: {
+                          target_symbol: resource.vt_symbol,
+                          input_data_kind: resource.kind === 'raw_tick' ? 'tick' : 'bar',
+                          input_interval: resource.target_interval || resource.interval,
+                          symbols: [resource.vt_symbol],
+                        },
+                      },
+                    })}
+                  >
+                    用于 CNN 训练
+                  </Button>
+                )
+                : null,
+              <Popconfirm key="delete" title="确认删除这个资源？" onConfirm={() => deleteResource(resource)}>
+                <Button type="link" danger icon={<DeleteOutlined />}>删除</Button>
+              </Popconfirm>,
+            ]}
+          >
+            <List.Item.Meta
+              title={
+                <Space wrap>
+                  <Text strong>{resource.vt_symbol}</Text>
+                  <Tag color={resource.kind === 'raw_tick' ? 'gold' : resource.kind === 'derived_bar' ? 'purple' : 'blue'}>
+                    {resource.kind === 'raw_tick' ? 'Tick' : resource.kind === 'derived_bar' ? '派生K线' : '原始K线'}
+                  </Tag>
+                  <Tag>{resource.interval}</Tag>
+                </Space>
+              }
+              description={
+                <Space direction="vertical" size={2}>
+                  <Text type="secondary">
+                    {resource.start} ~ {resource.end}
+                  </Text>
+                  <Text type="secondary">
+                    {resource.row_count.toLocaleString()} 行 · {resource.file_size_kb.toFixed(1)} KB
+                    {resource.kind === 'derived_bar'
+                      ? ` · ${resource.source_kind}:${resource.source_interval} → ${resource.target_interval}`
+                      : ''}
+                  </Text>
+                </Space>
+              }
+            />
+          </List.Item>
+        )}
+      />
+    ) : (
+      <Empty description="还没有数据资源" />
+    )
+  )
 
-  const modelColumns = [
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 180,
-    },
-    {
-      title: 'Type',
-      dataIndex: 'model_type',
-      key: 'model_type',
-      width: 80,
-      render: (t: string) => <Tag>{t}</Tag>,
-    },
-    {
-      title: 'Dataset',
-      dataIndex: 'dataset_name',
-      key: 'dataset_name',
-      width: 150,
-    },
-    {
-      title: 'Features',
-      dataIndex: 'num_features',
-      key: 'num_features',
-      width: 80,
-    },
-    {
-      title: 'Created',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 150,
-      render: (t: string) => new Date(t).toLocaleString(),
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 100,
-      render: (_: unknown, record: { name: string }) => (
-        <Popconfirm title="Confirm delete?" onConfirm={() => handleDeleteModel(record.name)}>
-          <Button size="small" danger icon={<DeleteOutlined />}>
-            Delete
-          </Button>
-        </Popconfirm>
-      ),
-    },
-  ]
+  const renderNameList = (
+    items: string[] | undefined,
+    emptyText: string,
+    onDelete: (name: string) => void,
+    actionLabel: string,
+    onJump: (name: string) => void,
+  ) => (
+    items && items.length > 0 ? (
+      <List
+        dataSource={items}
+        renderItem={(name) => (
+          <List.Item
+            actions={[
+              <Button key="jump" type="link" onClick={() => onJump(name)}>{actionLabel}</Button>,
+              <Popconfirm key="delete" title="确认删除？" onConfirm={() => onDelete(name)}>
+                <Button type="link" danger>删除</Button>
+              </Popconfirm>,
+            ]}
+          >
+            <Text strong>{name}</Text>
+          </List.Item>
+        )}
+      />
+    ) : (
+      <Empty description={emptyText} />
+    )
+  )
 
-  const signalColumns = [
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 200,
-    },
-    {
-      title: 'Model',
-      dataIndex: 'model_name',
-      key: 'model_name',
-      width: 150,
-    },
-    {
-      title: 'Signals',
-      dataIndex: 'num_signals',
-      key: 'num_signals',
-      width: 100,
-      render: (v: number) => v.toLocaleString(),
-    },
-    {
-      title: 'Created',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 150,
-      render: (t: string) => new Date(t).toLocaleString(),
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 100,
-      render: (_: unknown, record: { name: string }) => (
-        <Popconfirm title="Confirm delete?" onConfirm={() => handleDeleteSignal(record.name)}>
-          <Button size="small" danger icon={<DeleteOutlined />}>
-            Delete
-          </Button>
-        </Popconfirm>
-      ),
-    },
-  ]
-
-  const cnnModelColumns = [
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 200,
-    },
-    {
-      title: 'Type',
-      key: 'type',
-      width: 80,
-      render: () => <Tag color="orange">CNN</Tag>,
-    },
-    {
-      title: 'Created',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 150,
-      render: (t: string) => new Date(t).toLocaleString(),
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 100,
-      render: (_: unknown, record: { name: string }) => (
-        <Popconfirm title="Confirm delete?" onConfirm={() => handleDeleteCnnModel(record.name)}>
-          <Button size="small" danger icon={<DeleteOutlined />}>
-            Delete
-          </Button>
-        </Popconfirm>
-      ),
-    },
-  ]
-
-  const tabItems = [
-    {
-      key: 'datasets',
-      label: (
-        <Space>
-          <DatabaseOutlined />
-          Datasets ({(datasets?.length || 0)})
-        </Space>
-      ),
-      children: (
-        <Table
-          size="small"
-          columns={datasetColumns}
-          dataSource={(datasets || []).map((name) => ({
-            name,
-            key: name,
-            created_at: new Date().toISOString(),
-            size: 0,
-            num_samples: 0,
-            symbols: [],
-            fields: [],
-          }))}
-          pagination={{ pageSize: 10 }}
-          locale={{ emptyText: 'No datasets' }}
-        />
-      ),
-    },
-    {
-      key: 'models',
-      label: (
-        <Space>
-          <RobotOutlined />
-          Models ({(models?.length || 0) + (cnnModels?.length || 0)})
-        </Space>
-      ),
-      children: (
-        <>
-          <Text strong style={{ display: 'block', marginBottom: 8 }}>ML Models</Text>
-          <Table
-            size="small"
-            columns={modelColumns}
-            dataSource={(models || []).map((name) => ({
-              name,
-              key: name,
-              model_type: 'ml',
-              dataset_name: '-',
-              num_features: 0,
-              created_at: new Date().toISOString(),
-            }))}
-            pagination={false}
-            locale={{ emptyText: 'No ML models' }}
-            style={{ marginBottom: 16 }}
-          />
-          <Text strong style={{ display: 'block', marginBottom: 8 }}>CNN Models</Text>
-          <Table
-            size="small"
-            columns={cnnModelColumns}
-            dataSource={(cnnModels || []).map((name) => ({
-              name,
-              key: name,
-              created_at: new Date().toISOString(),
-            }))}
-            pagination={false}
-            locale={{ emptyText: 'No CNN models' }}
-          />
-        </>
-      ),
-    },
-    {
-      key: 'signals',
-      label: (
-        <Space>
-          <ThunderboltOutlined />
-          Signals ({(signals?.length || 0)})
-        </Space>
-      ),
-      children: (
-        <Table
-          size="small"
-          columns={signalColumns}
-          dataSource={(signals || []).map((name) => ({
-            name,
-            key: name,
-            model_name: '-',
-            num_signals: 0,
-            created_at: new Date().toISOString(),
-          }))}
-          pagination={{ pageSize: 10 }}
-          locale={{ emptyText: 'No signals' }}
-        />
-      ),
-    },
-  ]
+  const renderCnnModels = (
+    cnnModels && cnnModels.length > 0 ? (
+      <List<CNNModelInfo>
+        dataSource={cnnModels}
+        renderItem={(model) => (
+          <List.Item
+            actions={[
+              <Button key="view" type="link" onClick={() => navigate('/cnn-train', { state: { modelName: model.name } })}>
+                查看训练详情
+              </Button>,
+              <Popconfirm key="delete" title="确认删除这个 CNN 模型？" onConfirm={() => deleteCnnModel(model.name)}>
+                <Button type="link" danger>删除</Button>
+              </Popconfirm>,
+            ]}
+          >
+            <List.Item.Meta
+              avatar={<ExperimentOutlined style={{ fontSize: 20, color: '#faad14' }} />}
+              title={
+                <Space wrap>
+                  <Text strong>{model.name}</Text>
+                  <Tag>{model.input_interval || 'd'}</Tag>
+                  <Tag color="purple">{model.group_count || 1} 组</Tag>
+                </Space>
+              }
+              description={
+                <Space direction="vertical" size={2}>
+                  <Text type="secondary">
+                    目标证券：{model.target_symbol || '-'} · 输入：{model.input_data_kind || 'bar'}
+                  </Text>
+                  <Text type="secondary">
+                    最佳验证损失：{model.best_val_loss?.toFixed(4) || '-'} · 创建时间：{new Date(model.created_at).toLocaleString()}
+                  </Text>
+                </Space>
+              }
+            />
+          </List.Item>
+        )}
+      />
+    ) : (
+      <Empty description="还没有 CNN 模型" />
+    )
+  )
 
   return (
     <div className="page-enter">
-      <Typography.Title level={4} style={{ marginBottom: 20 }}>
-        Resource Management
-      </Typography.Title>
+      <Space direction="vertical" size={20} style={{ width: '100%' }}>
+        <div>
+          <Title level={3} style={{ marginBottom: 4 }}>资源库</Title>
+          <Text type="secondary">
+            统一查看原始数据、派生周期、模型和信号，并从资源直接跳回下一步工作流。
+          </Text>
+        </div>
 
-      <Card
-        size="small"
-        extra={
-          <Space>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} sm={12} xl={6}>
+            <Card><Statistic title="数据资源" value={allDataResources.length} prefix={<FolderOpenOutlined />} /></Card>
+          </Col>
+          <Col xs={24} sm={12} xl={6}>
+            <Card><Statistic title="Alpha 数据集" value={datasets?.length || 0} /></Card>
+          </Col>
+          <Col xs={24} sm={12} xl={6}>
+            <Card><Statistic title="Alpha / CNN 模型" value={(alphaModels?.length || 0) + (cnnModels?.length || 0)} /></Card>
+          </Col>
+          <Col xs={24} sm={12} xl={6}>
+            <Card><Statistic title="交易信号" value={signals?.length || 0} /></Card>
+          </Col>
+        </Row>
+
+        <Card
+          extra={
             <Button
-              size="small"
               icon={<ReloadOutlined />}
               onClick={() => {
+                queryClient.invalidateQueries({ queryKey: ['alpha-data-resources'] })
                 queryClient.invalidateQueries({ queryKey: ['alpha-datasets'] })
                 queryClient.invalidateQueries({ queryKey: ['alpha-models'] })
                 queryClient.invalidateQueries({ queryKey: ['alpha-signals'] })
                 queryClient.invalidateQueries({ queryKey: ['cnn-models'] })
               }}
             >
-              Refresh All
+              刷新资源
             </Button>
-          </Space>
-        }
-      >
-        <Tabs
-          activeKey={activeTab}
-          onChange={setActiveTab}
-          items={tabItems}
-        />
-      </Card>
+          }
+        >
+          <Tabs
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            items={[
+              {
+                key: 'data',
+                label: `数据资源 (${allDataResources.length})`,
+                children: renderResourceList(),
+              },
+              {
+                key: 'datasets',
+                label: `Alpha 数据集 (${datasets?.length || 0})`,
+                children: renderNameList(
+                  datasets,
+                  '还没有 Alpha 数据集',
+                  deleteDataset,
+                  '去模型训练',
+                  (name) => navigate('/model-train', { state: { datasetName: name } }),
+                ),
+              },
+              {
+                key: 'alpha-models',
+                label: `Alpha 模型 (${alphaModels?.length || 0})`,
+                children: renderNameList(
+                  alphaModels,
+                  '还没有 Alpha 模型',
+                  deleteAlphaModel,
+                  '去信号生成',
+                  (name) => navigate('/signal', { state: { modelName: name } }),
+                ),
+              },
+              {
+                key: 'cnn-models',
+                label: `CNN 模型 (${cnnModels?.length || 0})`,
+                children: renderCnnModels,
+              },
+              {
+                key: 'signals',
+                label: `交易信号 (${signals?.length || 0})`,
+                children: renderNameList(
+                  signals,
+                  '还没有交易信号',
+                  deleteSignal,
+                  '去回测',
+                  (name) => navigate('/backtest', { state: { signalName: name } }),
+                ),
+              },
+            ]}
+          />
+        </Card>
+      </Space>
     </div>
   )
 }

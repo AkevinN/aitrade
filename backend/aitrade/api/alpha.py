@@ -20,26 +20,35 @@ API 分类：
 - v1.0 (2026-04-03): 适配 aitrade 后端，移除 vnpy 依赖
 """
 
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Callable, Optional
+import logging
+from datetime import datetime
+from typing import Any
 
+import polars as pl
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from pydantic import ValidationError
 
+from .. import __version__
+from ..alpha.lab_utils import normalize_vt_symbol
 from ..config import ALPHA_LAB_PATH
-from ..datasource import datasource_manager
-from ..datasource.types import DataCategory, ProviderStatus
 from ..models import (
     TaskType,
+    DataAggregateRequest,
     DataDownloadRequest,
+    DataResourceMergeRequest,
     DatasetCreateRequest,
     ModelTrainRequest,
+    RelocateBarIntervalRequest,
     SignalGenerateRequest,
     BacktestRunRequest,
+    SymbolProfileRequest,
 )
+from ..profiling import Profiler, ProfileStore
 from ..task import task_manager
-from .ws import ws_manager
 
+from . import alpha_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/alpha", tags=["Alpha AI"])
 
@@ -63,387 +72,62 @@ def _get_alpha_lab():
     return AlphaLab(ALPHA_LAB_PATH)
 
 
-def _pick_bar_provider() -> str:
-    """为 Alpha 研究数据选择最佳数据源（拒绝 mock）。"""
-    for name in ("tushare", "gateway"):
-        provider = datasource_manager.get_provider(name)
-        if provider and provider.get_info(0).status == ProviderStatus.AVAILABLE:
-            if DataCategory.BAR_HISTORY in provider.get_supported_categories():
-                return name
-    return ""
+# 业务逻辑已迁移至 alpha_service.py：
+#   _build_feature_dataset / _apply_default_preprocessing / _pick_bar_provider
+
+
+def _normalize_market_interval(interval: str | None) -> str:
+    """Normalize request intervals used by market data endpoints."""
+    raw = (interval or "").strip().lower()
+    mapping = {
+        "daily": "d",
+        "d": "d",
+        "minute": "1m",
+        "m": "1m",
+        "1m": "1m",
+        "5m": "5m",
+        "10m": "10m",
+        "15m": "15m",
+        "30m": "30m",
+        "60m": "60m",
+        "1h": "60m",
+        "weekly": "w",
+        "w": "w",
+    }
+    return mapping.get(raw, raw)
+
+
+def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
+    return list(dict.fromkeys(normalize_vt_symbol(item) for item in vt_symbols if item))
+
+
+def _normalize_optional_symbol(vt_symbol: str | None) -> str | None:
+    return normalize_vt_symbol(vt_symbol) if vt_symbol else vt_symbol
+
+
+# _load_required_local_bar_df 已迁移至 alpha_service.py
 
 
 # =============================================================================
 # Services (inlined, no separate files)
 # =============================================================================
 
-def _download_bar_data(
-    req: DataDownloadRequest,
-    on_progress: Optional[Callable[[float, str], None]] = None
-) -> dict[str, Any]:
-    """从数据源下载K线数据，保存到 AlphaLab。"""
-    lab = _get_alpha_lab()
+# _download_bar_data 已迁移至 alpha_service.py
 
-    interval_map = {"d": "d", "m": "1m", "w": "w"}
-    interval = interval_map.get(req.interval, "d")
 
-    provider_name = _pick_bar_provider()
-    if not provider_name:
-        raise RuntimeError(
-            "没有可用的真实数据源。请配置 Tushare token。"
-            "Alpha 研究需要真实历史数据，不支持 Mock 数据。"
-        )
+# _aggregate_data 已迁移至 alpha_service.py
 
-    total = len(req.vt_symbols)
-    success_count = 0
-    failed_symbols = []
 
-    for i, vt_symbol in enumerate(req.vt_symbols):
-        try:
-            symbol, exchange_str = vt_symbol.rsplit(".", 1)
+# _create_dataset 已迁移至 alpha_service.py
 
-            records = datasource_manager.get_bar_history(
-                symbol=symbol,
-                exchange=exchange_str,
-                interval=interval,
-                start=datetime.combine(req.start, datetime.min.time()),
-                end=datetime.combine(req.end, datetime.max.time()),
-                provider_name=provider_name,
-            )
 
-            if records:
-                from ..alpha.lab import BarData
-                bars = []
-                for r in records:
-                    bar = BarData(
-                        symbol=symbol,
-                        exchange=exchange_str,
-                        datetime=r.datetime,
-                        interval=interval,
-                        open_price=r.open_price,
-                        high_price=r.high_price,
-                        low_price=r.low_price,
-                        close_price=r.close_price,
-                        volume=r.volume,
-                        turnover=r.turnover,
-                        open_interest=r.open_interest,
-                    )
-                    bars.append(bar)
+# _train_model 已迁移至 alpha_service.py
 
-                lab.save_bar_data(bars)
-                success_count += 1
-            else:
-                failed_symbols.append(f"{vt_symbol}: 数据源无数据")
-        except Exception as e:
-            failed_symbols.append(f"{vt_symbol}: {str(e)}")
 
-        if on_progress:
-            progress = (i + 1) / total * 100
-            on_progress(progress, f"已下载 {vt_symbol} ({i + 1}/{total})")
+# _generate_signal 已迁移至 alpha_service.py
 
-    return {
-        "total": total,
-        "success": success_count,
-        "failed": len(failed_symbols),
-        "failed_symbols": failed_symbols,
-        "provider": provider_name,
-    }
 
-
-def _create_dataset(
-    req: DatasetCreateRequest,
-    on_progress: Optional[Callable[[float, str], None]] = None
-) -> dict[str, Any]:
-    """创建数据集（含特征计算）。"""
-    from ..alpha.dataset.datasets.alpha_158 import Alpha158
-
-    lab = _get_alpha_lab()
-
-    if req.start >= req.train_end:
-        raise ValueError(f"数据起始日期({req.start})必须早于训练截止日期({req.train_end})")
-    if req.train_end >= req.end:
-        raise ValueError(f"训练截止日期({req.train_end})必须早于数据结束日期({req.end})")
-
-    if on_progress:
-        on_progress(10, "加载K线数据...")
-
-    valid_end = req.valid_end or (req.train_end + timedelta(days=90))
-    if valid_end >= req.end:
-        valid_end = req.train_end + (req.end - req.train_end) // 2
-
-    df = lab.load_bar_df(
-        vt_symbols=req.vt_symbols,
-        interval="d",
-        start=req.start,
-        end=req.end,
-        extended_days=100
-    )
-
-    if df is None or df.is_empty():
-        raise ValueError("无法加载K线数据，请先下载数据")
-
-    if on_progress:
-        on_progress(30, "初始化数据集...")
-
-    train_period = (str(req.start), str(req.train_end))
-    valid_period = (str(req.train_end + timedelta(days=1)), str(valid_end))
-    test_period = (str(valid_end + timedelta(days=1)), str(req.end))
-
-    dataset = Alpha158(
-        df=df,
-        train_period=train_period,
-        valid_period=valid_period,
-        test_period=test_period
-    )
-
-    if on_progress:
-        on_progress(40, "设置标签...")
-
-    dataset.set_label(f"ts_delay(close, -{req.label_period}) / ts_delay(close, -1) - 1")
-
-    if on_progress:
-        on_progress(50, "计算特征（可能需要几分钟）...")
-
-    dataset.prepare_data()
-
-    if on_progress:
-        on_progress(80, "数据预处理...")
-
-    dataset.process_data()
-
-    if on_progress:
-        on_progress(90, "保存数据集...")
-
-    lab.save_dataset(req.name, dataset)
-
-    return {
-        "name": req.name,
-        "feature_count": len(dataset.feature_expressions),
-        "sample_count": len(dataset.df) if dataset.df is not None else 0
-    }
-
-
-def _train_model(
-    req: ModelTrainRequest,
-    on_progress: Optional[Callable[[float, str], None]] = None
-) -> dict[str, Any]:
-    """训练机器学习模型。"""
-    from ..alpha.model.models.lgb_model import LgbModel
-    from ..alpha.model.models.mlp_model import MlpModel
-    from ..alpha.model.models.lasso_model import LassoModel
-
-    lab = _get_alpha_lab()
-
-    if on_progress:
-        on_progress(10, "加载数据集...")
-
-    dataset = lab.load_dataset(req.dataset)
-    if dataset is None:
-        raise ValueError(f"数据集 {req.dataset} 不存在")
-
-    if on_progress:
-        on_progress(20, "初始化模型...")
-
-    model_classes = {
-        "lgb": LgbModel,
-        "mlp": MlpModel,
-        "lasso": LassoModel
-    }
-
-    model_class = model_classes.get(req.model_type, LgbModel)
-    model = model_class(**req.params)
-
-    if on_progress:
-        on_progress(30, "开始训练...")
-
-    try:
-        model.fit(dataset)
-    except Exception as e:
-        error_msg = str(e)
-        if "non empty" in error_msg or "empty" in error_msg.lower():
-            raise ValueError(
-                "训练数据为空。可能原因：\n"
-                "1. 数据集的时间范围设置不合理（start >= train_end）\n"
-                "2. 下载的K线数据量不足\n"
-                "3. 特征计算后有效样本被过滤掉\n"
-                "请检查数据集创建时的日期参数。"
-            ) from e
-        raise
-
-    if on_progress:
-        on_progress(90, "保存模型...")
-
-    lab.save_model(req.name, model)
-
-    return {
-        "name": req.name,
-        "model_type": req.model_type
-    }
-
-
-def _generate_signal(
-    req: SignalGenerateRequest,
-    on_progress: Optional[Callable[[float, str], None]] = None
-) -> dict[str, Any]:
-    """使用训练好的模型生成交易信号。"""
-    import polars as pl
-    from ..alpha.dataset.datasets.alpha_158 import Alpha158
-    from ..alpha.dataset import Segment
-
-    lab = _get_alpha_lab()
-
-    if on_progress:
-        on_progress(10, "加载模型...")
-
-    model = lab.load_model(req.model)
-    if model is None:
-        raise ValueError(f"模型 {req.model} 不存在")
-
-    if on_progress:
-        on_progress(20, "加载K线数据...")
-
-    df = lab.load_bar_df(
-        vt_symbols=req.vt_symbols,
-        interval="d",
-        start=req.start,
-        end=req.end,
-        extended_days=100
-    )
-
-    if df is None or df.is_empty():
-        raise ValueError("无法加载K线数据")
-
-    if on_progress:
-        on_progress(40, "准备数据集...")
-
-    train_period = (str(req.start), str(req.start))
-    valid_period = (str(req.start), str(req.start))
-    test_period = (str(req.start), str(req.end))
-
-    dataset = Alpha158(
-        df=df,
-        train_period=train_period,
-        valid_period=valid_period,
-        test_period=test_period
-    )
-
-    if on_progress:
-        on_progress(60, "计算特征...")
-
-    dataset.prepare_data()
-
-    if on_progress:
-        on_progress(80, "生成预测...")
-
-    predictions = model.predict(dataset, Segment.TEST)
-
-    base_df = df.filter(
-        (pl.col("datetime") >= datetime.combine(req.start, datetime.min.time())) &
-        (pl.col("datetime") <= datetime.combine(req.end, datetime.max.time()))
-    ).select(["datetime", "vt_symbol", "close"])
-
-    n_pred = len(predictions)
-    if n_pred < len(base_df):
-        base_df = base_df.tail(n_pred)
-    elif n_pred > len(base_df):
-        predictions = predictions[-len(base_df):]
-
-    signal_df = base_df.with_columns(
-        pl.Series(name="signal", values=predictions)
-    )
-
-    if on_progress:
-        on_progress(90, "保存信号...")
-
-    lab.save_signal(req.name, signal_df)
-
-    return {
-        "name": req.name,
-        "row_count": len(signal_df)
-    }
-
-
-def _run_backtest(
-    req: BacktestRunRequest,
-    on_progress: Optional[Callable[[float, str], None]] = None
-) -> dict[str, Any]:
-    """基于信号运行策略回测。"""
-    from ..alpha.strategy import BacktestingEngine
-
-    lab = _get_alpha_lab()
-
-    if on_progress:
-        on_progress(10, "加载信号...")
-
-    signal_df = lab.load_signal(req.signal)
-    if signal_df is None:
-        raise ValueError(f"信号 {req.signal} 不存在")
-
-    vt_symbols = signal_df["vt_symbol"].unique().to_list()
-
-    if on_progress:
-        on_progress(20, "初始化回测引擎...")
-
-    engine = BacktestingEngine(lab)
-    engine.set_parameters(
-        vt_symbols=vt_symbols,
-        interval="d",
-        start=datetime.combine(req.start, datetime.min.time()),
-        end=datetime.combine(req.end, datetime.max.time()),
-        capital=req.capital
-    )
-
-    for vt_symbol in vt_symbols:
-        if vt_symbol not in engine.sizes:
-            engine.sizes[vt_symbol] = 1
-            engine.priceticks[vt_symbol] = 0.01
-            engine.long_rates[vt_symbol] = 0.0003
-            engine.short_rates[vt_symbol] = 0.0003
-
-    if on_progress:
-        on_progress(40, "加载历史数据...")
-
-    engine.load_data()
-
-    if on_progress:
-        on_progress(60, "运行回测...")
-
-    engine.run_backtesting()
-
-    if on_progress:
-        on_progress(80, "计算结果...")
-
-    result = engine.calculate_result()
-
-    if result is None:
-        return {
-            "name": req.name,
-            "statistics": {
-                "start_date": str(req.start),
-                "end_date": str(req.end),
-                "total_days": 0,
-                "profit_days": 0,
-                "loss_days": 0,
-                "capital": req.capital,
-                "end_balance": req.capital,
-                "total_return": 0,
-                "annual_return": 0,
-                "max_drawdown": 0,
-                "max_ddpercent": 0,
-                "sharpe_ratio": 0,
-                "total_trade_count": 0,
-                "total_net_pnl": 0,
-                "total_commission": 0,
-                "error": "回测期间无成交记录，策略未产生交易信号",
-            },
-        }
-
-    statistics = engine.calculate_statistics()
-
-    return {
-        "name": req.name,
-        "statistics": statistics
-    }
+# _run_backtest 已迁移至 alpha_service.py
 
 
 # =============================================================================
@@ -466,6 +150,7 @@ async def get_alpha_status() -> dict:
     installed = _check_alpha_installed()
     return {
         "installed": installed,
+        "version": __version__,
         "lab_path": str(ALPHA_LAB_PATH),
         "lab_exists": ALPHA_LAB_PATH.exists() if installed else False,
     }
@@ -497,18 +182,106 @@ async def get_task(task_id: str) -> dict:
 
 @router.post("/data/download")
 async def start_data_download(req: DataDownloadRequest) -> dict:
-    """启动K线数据下载任务。"""
+    """启动原始市场数据下载任务。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
+    if req.data_kind != "bar":
+        raise HTTPException(400, "当前版本仅支持原始K线下载，历史 Tick 请通过导入功能准备")
 
-    task_id = task_manager.create_task(TaskType.DATA_DOWNLOAD, req.model_dump())
+    source_interval = _normalize_market_interval(req.source_interval or req.interval or "d")
+    if source_interval not in {"d", "1m", "5m", "15m", "30m", "60m", "w"}:
+        raise HTTPException(400, "source_interval 仅支持 d/1m/5m/15m/30m/60m/w")
+
+    task_id = task_manager.create_task(
+        TaskType.DATA_DOWNLOAD,
+        req.model_dump(),
+        title=f"下载 {source_interval} 原始K线",
+        entity_type="data",
+        entity_name=",".join(req.vt_symbols[:3]),
+    )
 
     def execute(on_progress=None):
-        return _download_bar_data(req, on_progress)
+        return alpha_service._download_bar_data(req, on_progress)
 
-    task_manager.run_async(task_id, execute, on_progress=True)
+    task_manager.run_async(task_id, execute, enable_progress=True)
 
     return {"task_id": task_id, "message": "下载任务已启动"}
+
+
+@router.post("/data/aggregate")
+async def start_data_aggregate(req: DataAggregateRequest) -> dict:
+    """启动本地数据聚合任务。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
+    if req.start > req.end:
+        raise HTTPException(400, "开始日期不能晚于结束日期")
+
+    task_id = task_manager.create_task(
+        TaskType.DATA_AGGREGATE,
+        req.model_dump(),
+        title=f"聚合 {req.target_interval} 派生K线",
+        entity_type="data",
+        entity_name=",".join(req.vt_symbols[:3]),
+    )
+
+    def execute(on_progress=None):
+        return alpha_service._aggregate_data(req, on_progress)
+
+    task_manager.run_async(task_id, execute, enable_progress=True)
+    return {"task_id": task_id, "message": "聚合任务已启动"}
+
+
+# =============================================================================
+# 标的画像（只读诊断）
+# =============================================================================
+
+@router.post("/profiling")
+async def create_symbol_profile(payload: dict[str, Any]) -> Any:
+    """生成标的画像。该端点只读，不进入任务队列。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    try:
+        req = SymbolProfileRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(400, f"画像参数非法: {exc.errors()[0]['msg']}")
+
+    interval = _normalize_market_interval(req.interval)
+    if interval not in {"d", "1m", "5m", "10m", "15m", "30m", "60m", "w"}:
+        raise HTTPException(400, "interval 仅支持 d/1m/5m/10m/15m/30m/60m/w")
+
+    lab = _get_alpha_lab()
+    profiler = Profiler(lab)
+    return profiler.profile(
+        vt_symbol=normalize_vt_symbol(req.vt_symbol),
+        interval=interval,
+        as_of=req.as_of,
+        lookback_days=req.lookback_days,
+        observation_symbols=_normalize_symbol_list(req.observation_symbols),
+        with_suggestion=req.with_suggestion,
+        persist=req.persist,
+    )
+
+
+@router.get("/profiling/artifacts")
+async def list_symbol_profile_artifacts() -> list[str]:
+    """列出已持久化的画像产物 id。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    return ProfileStore().list_ids()
+
+
+@router.get("/profiling/{artifact_id}")
+async def get_symbol_profile_artifact(artifact_id: str) -> Any:
+    """读取已持久化的画像产物。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    store = ProfileStore()
+    try:
+        return store.load(artifact_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
 
 
 # =============================================================================
@@ -534,10 +307,16 @@ async def get_dataset(name: str) -> dict:
     if dataset is None:
         raise HTTPException(404, f"数据集 {name} 不存在")
 
+    sample_count = 0
+    if hasattr(dataset, "learn_df") and dataset.learn_df is not None:
+        sample_count = len(dataset.learn_df)
+    elif hasattr(dataset, "df") and dataset.df is not None:
+        sample_count = len(dataset.df)
+
     return {
         "name": name,
         "feature_count": len(dataset.feature_expressions),
-        "sample_count": len(dataset.df) if hasattr(dataset, "df") and dataset.df is not None else 0,
+        "sample_count": sample_count,
         "label_expression": dataset.label_expression or "",
     }
 
@@ -547,13 +326,16 @@ async def start_create_dataset(req: DatasetCreateRequest) -> dict:
     """启动数据集创建任务。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
+    if not req.features:
+        raise HTTPException(400, "至少需要选择一个特征库")
 
     task_id = task_manager.create_task(TaskType.DATASET_CREATE, req.model_dump())
 
     def execute(on_progress=None):
-        return _create_dataset(req, on_progress)
+        return alpha_service._create_dataset(req, on_progress)
 
-    task_manager.run_async(task_id, execute, on_progress=True)
+    task_manager.run_async(task_id, execute, enable_progress=True)
 
     return {"task_id": task_id, "message": "数据集创建任务已启动"}
 
@@ -608,9 +390,9 @@ async def start_train_model(req: ModelTrainRequest) -> dict:
     task_id = task_manager.create_task(TaskType.MODEL_TRAIN, req.model_dump())
 
     def execute(on_progress=None):
-        return _train_model(req, on_progress)
+        return alpha_service._train_model(req, on_progress)
 
-    task_manager.run_async(task_id, execute, on_progress=True)
+    task_manager.run_async(task_id, execute, enable_progress=True)
 
     return {"task_id": task_id, "message": "模型训练任务已启动"}
 
@@ -671,13 +453,14 @@ async def start_generate_signal(req: SignalGenerateRequest) -> dict:
     """启动信号生成任务。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
 
     task_id = task_manager.create_task(TaskType.SIGNAL_GENERATE, req.model_dump())
 
     def execute(on_progress=None):
-        return _generate_signal(req, on_progress)
+        return alpha_service._generate_signal(req, on_progress)
 
-    task_manager.run_async(task_id, execute, on_progress=True)
+    task_manager.run_async(task_id, execute, enable_progress=True)
 
     return {"task_id": task_id, "message": "信号生成任务已启动"}
 
@@ -703,13 +486,14 @@ async def start_backtest(req: BacktestRunRequest) -> dict:
     """启动回测任务。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    req = req.model_copy(update={"benchmark": _normalize_optional_symbol(req.benchmark)})
 
     task_id = task_manager.create_task(TaskType.BACKTEST_RUN, req.model_dump())
 
     def execute(on_progress=None):
-        return _run_backtest(req, on_progress)
+        return alpha_service._run_backtest(req, on_progress)
 
-    task_manager.run_async(task_id, execute, on_progress=True)
+    task_manager.run_async(task_id, execute, enable_progress=True)
 
     return {"task_id": task_id, "message": "回测任务已启动"}
 
@@ -724,7 +508,7 @@ async def get_contract_settings() -> dict:
     if not _check_alpha_installed():
         return {}
     lab = _get_alpha_lab()
-    return lab.load_contract_setttings()
+    return lab.load_contract_settings()
 
 
 @router.post("/contracts")
@@ -738,156 +522,298 @@ async def add_contract_setting(
     """添加合约配置。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    vt_symbol = normalize_vt_symbol(vt_symbol)
     lab = _get_alpha_lab()
     lab.add_contract_setting(vt_symbol, long_rate, short_rate, size, pricetick)
     return {"success": True, "message": f"合约 {vt_symbol} 配置已保存"}
 
 
 # =============================================================================
-# K线数据列表
+# 统一数据资源
 # =============================================================================
 
-@router.get("/bar-data")
-async def get_bar_data_list() -> dict:
-    """
-    获取已有K线数据列表（含详情）。
+@router.get("/data/resources")
+async def get_data_resources() -> dict[str, Any]:
+    """获取原始K线、历史Tick与派生周期资源列表。"""
+    if not _check_alpha_installed():
+        return {"raw_bars": [], "raw_ticks": [], "derived_bars": []}
 
-    返回已下载的日线和分钟线数据文件列表，每个条目包含行数、时间范围、文件大小。
+    lab = _get_alpha_lab()
+    return lab.list_data_resources()
+
+
+@router.get("/data/resources/{kind}/{key}")
+async def get_data_resource_detail(
+    kind: str,
+    key: str,
+    limit: int = 100,
+    before: str | None = None,
+) -> dict[str, Any]:
+    """查看单个数据资源详情与预览。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    lab = _get_alpha_lab()
+    try:
+        return lab.get_data_resource_detail(kind, key, limit=limit, before=before)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.delete("/data/resources/{kind}/{key}")
+async def delete_data_resource(kind: str, key: str) -> dict[str, Any]:
+    """删除单个原始或派生数据资源。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    lab = _get_alpha_lab()
+    if lab.delete_data_resource(kind, key):
+        return {"success": True, "message": f"已删除 {kind}/{key}"}
+    raise HTTPException(404, f"资源不存在: {kind}/{key}")
+
+
+@router.patch("/data/resources/raw_bar/{key}/interval")
+async def relocate_raw_bar_interval(key: str, req: RelocateBarIntervalRequest) -> dict[str, Any]:
+    """更正原始 K 线资源的存储周期（移动文件到对应目录）。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    interval = _normalize_market_interval(req.interval)
+    if interval not in {"d", "1m", "5m", "15m", "30m", "60m"}:
+        raise HTTPException(400, "interval 仅支持 d/1m/5m/15m/30m/60m")
+
+    lab = _get_alpha_lab()
+    try:
+        return lab.relocate_raw_bar_interval(key, interval)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/data/resources/merge/preview")
+async def preview_data_resource_merge(req: DataResourceMergeRequest) -> dict[str, Any]:
+    """预检上传批次是否可以手动合并为正式原始资源。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    lab = _get_alpha_lab()
+    try:
+        return lab.preview_merge_import_batches(kind=req.kind, keys=req.keys)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/data/resources/merge")
+async def merge_data_resource_batches(req: DataResourceMergeRequest) -> dict[str, Any]:
+    """合并上传批次，写入正式原始资源。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    lab = _get_alpha_lab()
+    try:
+        result = lab.merge_import_batches(kind=req.kind, keys=req.keys)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not result.get("success"):
+        raise HTTPException(400, result.get("reason") or "批次不可合并")
+    return result
+
+
+# =============================================================================
+# K线数据列表（兼容旧前端）
+# =============================================================================
+
+@router.get("/bar-data", deprecated=True)
+async def get_bar_data_list() -> dict:
+    """[已废弃] 获取已有日线和 1 分钟原始K线列表（兼容旧前端）。
+
+    请改用 `GET /api/alpha/data/resources` 获取完整的原始/派生/批次资源列表。
     """
     if not _check_alpha_installed():
         return {"daily": [], "minute": []}
 
-    import polars as pl
-
     lab = _get_alpha_lab()
-    result: dict[str, list] = {"daily": [], "minute": []}
+    resources = lab.list_data_resources()
+    result: dict[str, list[dict[str, Any]]] = {"daily": [], "minute": []}
 
-    for key, folder in [("daily", lab.daily_path), ("minute", lab.minute_path)]:
-        if not folder.exists():
-            continue
-        for f in sorted(folder.glob("*.parquet")):
-            try:
-                df = pl.read_parquet(f, columns=["datetime"])
-                info = {
-                    "vt_symbol": f.stem,
-                    "row_count": len(df),
-                    "start": str(df["datetime"].min()),
-                    "end": str(df["datetime"].max()),
-                    "file_size_kb": round(f.stat().st_size / 1024, 1),
-                }
-            except Exception:
-                info = {
-                    "vt_symbol": f.stem,
-                    "row_count": 0,
-                    "start": "",
-                    "end": "",
-                    "file_size_kb": round(f.stat().st_size / 1024, 1),
-                }
-            result[key].append(info)
+    for item in resources["raw_bars"]:
+        summary = {
+            "vt_symbol": item["vt_symbol"],
+            "row_count": item["row_count"],
+            "start": item["start"],
+            "end": item["end"],
+            "file_size_kb": item["file_size_kb"],
+        }
+        if item["interval"] == "d":
+            result["daily"].append(summary)
+        elif item["interval"] == "1m":
+            result["minute"].append(summary)
 
     return result
 
 
 # =============================================================================
-# CSV 导入 (必须在动态路由 /bar-data/{interval}/{vt_symbol} 之前)
+# CSV 导入（新 Tick 路由 + 旧 bar 路由）
 # =============================================================================
+
+async def _preview_csv_upload(
+    file: UploadFile = File(...),
+    field_mapping: str | None = None,
+) -> tuple[bytes, dict[str, str] | None]:
+    """Validate CSV upload and decode custom mapping."""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(400, "仅支持 CSV 文件")
+
+    contents: bytes = await file.read()
+    if not contents:
+        raise HTTPException(400, "CSV 文件为空")
+
+    custom_mapping: dict[str, str] | None = None
+    if field_mapping:
+        try:
+            import json
+            custom_mapping = json.loads(field_mapping)
+        except Exception:
+            raise HTTPException(400, "field_mapping 格式错误，需为 JSON 对象")
+
+    return contents, custom_mapping
+
 
 @router.post("/bar-data/import/preview")
 async def preview_csv_import(
     file: UploadFile = File(...),
     field_mapping: str | None = None,
 ) -> dict[str, Any]:
-    """
-    预览CSV文件，自动识别字段映射。
-
-    上传CSV文件后，系统会自动匹配字段（支持中英文别名），
-    并返回预览信息供用户确认。
-    """
-    if not _check_alpha_installed():
-        raise HTTPException(503, "Alpha 模块未安装")
-
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "仅支持 CSV 文件")
-
-    contents: bytes = await file.read()
-    if not contents:
-        raise HTTPException(400, "CSV 文件为空")
-
-    custom_mapping: dict[str, str] | None = None
-    if field_mapping:
-        try:
-            import json
-            custom_mapping = json.loads(field_mapping)
-        except Exception:
-            raise HTTPException(400, "field_mapping 格式错误，需为 JSON 对象")
-
+    """预览 bar CSV 文件（兼容旧前端）。"""
+    contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
     lab = _get_alpha_lab()
     try:
-        result: dict[str, Any] = lab.preview_csv(contents, custom_mapping)
-        return result
-    except Exception as e:
-        raise HTTPException(500, f"CSV 解析失败: {str(e)}")
+        return lab.preview_csv(contents, custom_mapping, data_kind="bar")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # CSV 内容由用户上传，解析失败属可预期的客户端错误，返回 400 友好提示。
+        logger.warning("bar CSV 预览失败: %s", exc)
+        raise HTTPException(400, "K线 CSV 解析失败，请检查文件编码与列格式")
+
+
+@router.post("/ticks/import/preview")
+async def preview_tick_csv_import(
+    file: UploadFile = File(...),
+    field_mapping: str | None = None,
+) -> dict[str, Any]:
+    """预览历史 Tick CSV 文件。"""
+    contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
+    lab = _get_alpha_lab()
+    try:
+        return lab.preview_csv(contents, custom_mapping, data_kind="tick")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("tick CSV 预览失败: %s", exc)
+        raise HTTPException(400, "Tick CSV 解析失败，请检查文件编码与列格式")
 
 
 @router.post("/bar-data/import")
 async def import_csv_data(
-    interval: str = Form(default="d", description="d=日线, m=分钟"),
+    interval: str = Form(default="d", description="支持 d/1m/5m/15m/30m/60m"),
     import_mode: str = Form(default="merge", description="merge=追加, replace=替换"),
+    save_mode: str = Form(default="batch", description="batch=保存为待合并批次, official=写入正式资源"),
     field_mapping: str | None = Form(default=None, description="自定义字段映射 JSON"),
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
-    """
-    执行 CSV 数据导入。
-
-    支持追加(merge)和替换(replace)两种模式。
-    自动匹配字段（支持中英文别名），缺失字段使用默认值。
-    """
+    """执行 bar CSV 数据导入。"""
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
-
-    if interval not in {"d", "m"}:
-        raise HTTPException(400, "interval 参数必须是 d 或 m")
-
     if import_mode not in {"merge", "replace"}:
         raise HTTPException(400, "import_mode 参数必须是 merge 或 replace")
+    if save_mode not in {"official", "batch"}:
+        raise HTTPException(400, "save_mode 参数必须是 official 或 batch")
 
-    if not file.filename or not file.filename.lower().endswith(".csv"):
-        raise HTTPException(400, "仅支持 CSV 文件")
+    contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
+    interval = _normalize_market_interval(interval)
+    if interval not in {"d", "1m", "5m", "15m", "30m", "60m"}:
+        raise HTTPException(400, "interval 仅支持 d/1m/5m/15m/30m/60m")
 
-    contents: bytes = await file.read()
-    if not contents:
-        raise HTTPException(400, "CSV 文件为空")
+    lab = _get_alpha_lab()
+    try:
+        result = lab.import_csv(
+            csv_content=contents,
+            data_kind="bar",
+            interval=interval,
+            import_mode=import_mode,
+            save_mode=save_mode,
+            file_name=file.filename,
+            custom_mapping=custom_mapping,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("bar CSV 导入失败")
+        raise HTTPException(500, "K线 CSV 导入失败，请稍后重试")
+    # 服务端二次校验：缺少必填字段（不依赖前端拦截），直接 400。
+    if not result.get("success") and result.get("imported_count", 0) == 0:
+        raise HTTPException(400, result.get("message") or "K线 CSV 导入失败")
+    return result
 
-    custom_mapping: dict[str, str] | None = None
-    if field_mapping:
-        try:
-            import json
-            custom_mapping = json.loads(field_mapping)
-        except Exception:
-            raise HTTPException(400, "field_mapping 格式错误，需为 JSON 对象")
+
+@router.post("/ticks/import")
+async def import_tick_csv_data(
+    import_mode: str = Form(default="merge", description="merge=追加, replace=替换"),
+    save_mode: str = Form(default="batch", description="batch=保存为待合并批次, official=写入正式资源"),
+    field_mapping: str | None = Form(default=None, description="自定义字段映射 JSON"),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """执行历史 Tick CSV 数据导入。"""
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    if import_mode not in {"merge", "replace"}:
+        raise HTTPException(400, "import_mode 参数必须是 merge 或 replace")
+    if save_mode not in {"official", "batch"}:
+        raise HTTPException(400, "save_mode 参数必须是 official 或 batch")
+
+    contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
 
     lab = _get_alpha_lab()
     try:
         result: dict[str, Any] = lab.import_csv(
             csv_content=contents,
-            interval=interval,
+            data_kind="tick",
+            interval="tick",
             import_mode=import_mode,
+            save_mode=save_mode,
+            file_name=file.filename,
             custom_mapping=custom_mapping,
         )
-        return result
-    except Exception as e:
-        raise HTTPException(500, f"CSV 导入失败: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("tick CSV 导入失败")
+        raise HTTPException(500, "Tick CSV 导入失败，请稍后重试")
+    if not result.get("success") and result.get("imported_count", 0) == 0:
+        raise HTTPException(400, result.get("message") or "Tick CSV 导入失败")
+    return result
 
 
 # =============================================================================
 # K线数据动态路由 (必须在 CSV 导入路由之后)
 # =============================================================================
 
-@router.delete("/bar-data/{interval}/{vt_symbol}")
+@router.delete("/bar-data/{interval}/{vt_symbol}", deprecated=True)
 async def delete_bar_data(interval: str, vt_symbol: str) -> dict:
-    """删除单个合约的K线数据文件。"""
+    """[已废弃] 删除单个合约的K线数据文件。
+
+    请改用 `DELETE /api/alpha/data/resources/{kind}/{key}`。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    vt_symbol = normalize_vt_symbol(vt_symbol)
     lab = _get_alpha_lab()
     folder = lab.daily_path if interval == "daily" else lab.minute_path
     file_path = folder.joinpath(f"{vt_symbol}.parquet")
@@ -897,7 +823,7 @@ async def delete_bar_data(interval: str, vt_symbol: str) -> dict:
     return {"success": True, "message": f"{interval}/{vt_symbol} 数据已删除"}
 
 
-@router.get("/bar-data/{interval}/{vt_symbol}")
+@router.get("/bar-data/{interval}/{vt_symbol}", deprecated=True)
 async def get_bar_data_detail(
     interval: str,
     vt_symbol: str,
@@ -905,7 +831,8 @@ async def get_bar_data_detail(
     before: str | None = None,
 ) -> dict:
     """
-    获取单个合约K线数据详情。
+    [已废弃] 获取单个合约K线数据详情。请改用
+    `GET /api/alpha/data/resources/{kind}/{key}`。
 
     Args:
         interval: 周期（daily/minute）
@@ -918,9 +845,16 @@ async def get_bar_data_detail(
     """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
+    vt_symbol = normalize_vt_symbol(vt_symbol)
 
-    if interval not in {"daily", "minute"}:
-        raise HTTPException(400, "interval 参数必须是 daily 或 minute")
+    canonical_interval = _normalize_market_interval(interval)
+    supported_intervals = {"d", "1m", "5m", "10m", "15m", "30m", "60m", "w"}
+    if canonical_interval not in supported_intervals:
+        raise HTTPException(
+            400,
+            f"interval 参数不支持: {interval}，"
+            f"支持 daily/d/1m/5m/15m/30m/60m 等周期",
+        )
 
     if limit < 0:
         raise HTTPException(400, "limit 参数不能小于0")
@@ -937,13 +871,16 @@ async def get_bar_data_detail(
     import polars as pl
 
     lab = _get_alpha_lab()
-    folder = lab.daily_path if interval == "daily" else lab.minute_path
-    file_path = folder.joinpath(f"{vt_symbol}.parquet")
-
-    if not file_path.exists():
-        raise HTTPException(404, f"数据文件 {vt_symbol} 不存在")
-
-    df = pl.read_parquet(file_path)
+    df = lab.load_bar_frame_any_range(
+        vt_symbol,
+        canonical_interval,
+        include_derived=True,
+    )
+    if df is None or df.is_empty():
+        raise HTTPException(
+            404,
+            f"数据文件 {vt_symbol} ({canonical_interval}) 不存在",
+        )
 
     filtered_df = df
     if before_dt is not None:
@@ -978,7 +915,7 @@ async def get_bar_data_detail(
 
     return {
         "vt_symbol": vt_symbol,
-        "interval": interval,
+        "interval": canonical_interval,
         "row_count": len(df),
         "start": str(df["datetime"].min()),
         "end": str(df["datetime"].max()),

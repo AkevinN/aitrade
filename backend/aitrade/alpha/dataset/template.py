@@ -97,6 +97,7 @@ class AlphaDataset:
         Generate required data
         """
         results: list = []
+        max_workers = max(1, max_workers or 1)
 
         expressions: list[tuple[str, str | pl.expr.expr.Expr]] = list(self.feature_expressions.items())
 
@@ -107,13 +108,17 @@ class AlphaDataset:
 
         args: list[tuple] = [(self.df, name, expression) for name, expression in expressions]
 
-        context: BaseContext = get_context("spawn")
+        if max_workers == 1:
+            for arg in tqdm(args, total=len(args)):
+                results.append(calculate_feature(arg))
+        else:
+            context: BaseContext = get_context("spawn")
 
-        with context.Pool(processes=max_workers) as pool:
-            it = pool.imap(calculate_feature, args)
+            with context.Pool(processes=max_workers) as pool:
+                it = pool.imap(calculate_feature, args)
 
-            for result in tqdm(it, total=len(args)):
-                results.append(result)
+                for result in tqdm(it, total=len(args)):
+                    results.append(result)
 
         self.result_df = self.df.with_columns(results)
 
