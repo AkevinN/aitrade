@@ -120,7 +120,7 @@ class Alpha101(AlphaDataset):
         self.add_feature("alpha32", "cs_scale((ts_sum(close, 7) / 7 - close)) + (20 * cs_scale(ts_corr(vwap, ts_delay(close, 5), 230)))")
 
         # Alpha33
-        self.add_feature("alpha33", "cs_rank((-1) * (open / close * -1 + 1)))")
+        self.add_feature("alpha33", "cs_rank((-1) * (open / close * -1 + 1))")
 
         # Alpha34
         self.add_feature("alpha34", f"cs_rank((cs_rank(ts_std({returns_expr}, 2) / ts_std({returns_expr}, 5)) * -1 + 1) + (cs_rank(ts_delta(close, 1)) * -1 + 1))")
@@ -132,7 +132,7 @@ class Alpha101(AlphaDataset):
         self.add_feature("alpha36", f"((((2.21 * cs_rank(ts_corr((close - open), ts_delay(volume, 1), 15))) + (0.7 * cs_rank((open - close)))) + (0.73 * cs_rank(ts_rank(ts_delay((-1) * {returns_expr}, 6), 5)))) + cs_rank(abs(ts_corr(vwap, ts_mean(volume, 20), 6)))) + (0.6 * cs_rank(((ts_sum(close, 200) / 200 - open) * (close - open))))")
 
         # Alpha37
-        self.add_feature("alpha37", "cs_rank(ts_corr(ts_delay((open - close), 1), close, 200)) + cs_rank((open - close)))")
+        self.add_feature("alpha37", "cs_rank(ts_corr(ts_delay((open - close), 1), close, 200)) + cs_rank((open - close))")
 
         # Alpha38
         self.add_feature("alpha38", "((-1) * cs_rank(ts_rank(close, 10))) * cs_rank((close / open))")
@@ -258,7 +258,7 @@ class Alpha101(AlphaDataset):
         self.add_feature("alpha95", "quesval2(cs_rank(open - ts_min(open, 12)), ts_rank(pow1(cs_rank(ts_corr(ts_sum((high + low) / 2, 19), ts_sum(ts_mean(volume, 40), 19), 13)), 5), 12), 1, 0)")
 
         # Alpha96
-        self.add_feature("alpha96", "ts_greater(ts_rank(ts_decay_linear(ts_corr(cs_rank(vwap), cs_rank(volume), 4), 4), 8), ts_rank(ts_decay_linear(ts_argmax(ts_corr(ts_rank(close, 7), ts_rank(ts_mean(volume, 60), 4), 4), 13), 13)) * -1")
+        self.add_feature("alpha96", "ts_greater(ts_rank(ts_decay_linear(ts_corr(cs_rank(vwap), cs_rank(volume), 4), 4), 8), ts_rank(ts_decay_linear(ts_argmax(ts_corr(ts_rank(close, 7), ts_rank(ts_mean(volume, 60), 4), 4), 13), 13), 8)) * -1")
 
         # Alpha98
         self.add_feature("alpha98", "cs_rank(ts_decay_linear(ts_corr(vwap, ts_sum(ts_mean(volume, 5), 26), 5), 7)) - cs_rank(ts_decay_linear(ts_rank(ts_argmin(ts_corr(cs_rank(open), cs_rank(ts_mean(volume, 15)), 21), 9), 7), 8))")

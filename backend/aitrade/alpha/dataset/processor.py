@@ -107,6 +107,69 @@ def process_robust_zscore_norm(
     return df
 
 
+def fit_robust_zscore_stats(
+    df: pl.DataFrame,
+    names: list[str],
+    fit_start_time: datetime | str | None = None,
+    fit_end_time: datetime | str | None = None,
+) -> dict[str, dict[str, float]]:
+    """Fit robust z-score statistics on the requested feature columns."""
+    fit_df: pl.DataFrame = df.fill_nan(None)
+
+    if fit_start_time and fit_end_time:
+        fit_start_time = to_datetime(fit_start_time)
+        fit_end_time = to_datetime(fit_end_time)
+        fit_df = fit_df.filter((pl.col("datetime") >= fit_start_time) & (pl.col("datetime") <= fit_end_time))
+
+    if fit_df.is_empty():
+        raise ValueError("训练区间无可用样本，无法拟合标准化参数")
+
+    stats: dict[str, dict[str, float]] = {}
+    for name in names:
+        values = fit_df.select(name).to_numpy().reshape(-1)
+        median = float(np.nanmedian(values))
+        mad = float(np.nanmedian(np.abs(values - median)))
+        stats[name] = {
+            "median": median,
+            "scale": mad * 1.4826 + 1e-12,
+        }
+
+    return stats
+
+
+def apply_robust_zscore_stats(
+    df: pl.DataFrame,
+    stats: dict[str, dict[str, float]],
+    names: list[str],
+    clip_outlier: bool = True,
+) -> pl.DataFrame:
+    """Apply fitted robust z-score statistics."""
+    for name in names:
+        config = stats.get(name)
+        if config is None:
+            continue
+
+        normalized = (
+            (pl.col(name) - pl.lit(config["median"])) / pl.lit(config["scale"])
+        ).cast(pl.Float64)
+        if clip_outlier:
+            normalized = normalized.clip(-3, 3)
+        df = df.with_columns(normalized.alias(name))
+
+    return df
+
+
+def fill_feature_nan(
+    df: pl.DataFrame,
+    names: list[str],
+    fill_value: float = 0.0,
+) -> pl.DataFrame:
+    """Fill NaN/null values for feature columns only."""
+    return df.with_columns(
+        [pl.col(name).fill_nan(fill_value).fill_null(fill_value).alias(name) for name in names]
+    )
+
+
 def process_cs_rank_norm(df: pl.DataFrame, names: list[str]) -> pl.DataFrame:
     """Cross-sectional rank normalization"""
     _df: pl.DataFrame = df.fill_nan(None)

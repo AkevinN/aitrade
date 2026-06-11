@@ -12,6 +12,7 @@ class DataCategory(str, Enum):
     """Data category — identifies what a Provider can supply."""
     CONTRACT = "contract"
     BAR_HISTORY = "bar_history"
+    TICK_HISTORY = "tick_history"
     TICK_REALTIME = "tick_realtime"
     ACCOUNT = "account"
     POSITION = "position"
@@ -64,6 +65,24 @@ class BarRecord:
     volume: float = 0.0
     turnover: float = 0.0
     open_interest: float = 0.0
+    # 复权口径：none=不复权, qfq=前复权, hfq=后复权。
+    # 用于在写入本地时校验同一资源不混用不同口径（除权日价格跳变会污染回测）。
+    adjust_type: str = "none"
+
+
+@dataclass
+class TickRecord:
+    """Unified historical tick record."""
+    symbol: str
+    exchange: str
+    datetime: datetime
+    last_price: float
+    volume: float = 0.0
+    turnover: float = 0.0
+    bid_price_1: float = 0.0
+    ask_price_1: float = 0.0
+    bid_volume_1: float = 0.0
+    ask_volume_1: float = 0.0
 
 
 @dataclass

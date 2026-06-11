@@ -35,6 +35,7 @@ dependencies = [
     "pyarrow>=19.0.1",
     "tqdm>=4.67.1",
     "tushare>=1.4.0",
+    "akshare>=1.14.0",
     "python-dateutil>=2.9.0",
     "python-multipart>=0.0.20",
 ]
@@ -46,6 +47,7 @@ dev = [
     "httpx>=0.28.0",
     "ruff>=0.9.0",
     "mypy>=1.15.0",
+    "hypothesis>=6.116.0",
 ]
 
 [project.scripts]
@@ -86,3 +88,9 @@ warn_no_return = true
 [[tool.mypy.overrides]]
 module = ["polars", "lightgbm", "torch", "numpy", "scipy"]
 ignore_missing_imports = true
+
+# PyPI 镜像（清华源，加速国内下载）
+[[tool.uv.index]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

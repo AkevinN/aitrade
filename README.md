@@ -54,14 +54,16 @@ aitrade 是一个端到端的量化交易研究平台，融合机器学习与金
 ```bash
 cd aitrade/backend
 
-# 安装 Python 依赖
-pip install -r requirements.txt
+# 创建虚拟环境并安装依赖
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 
 # 配置 Tushare Token
 export TUSHARE_TOKEN=your_token_here
 
 # 启动服务
-python run.py
+uvicorn aitrade.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 后端服务将在 `http://localhost:8000` 启动，API 文档访问 `http://localhost:8000/docs`。
@@ -78,11 +80,11 @@ npm install
 npm run dev
 ```
 
-前端应用将在 `http://localhost:5173` 启动。
+前端应用将在 `http://localhost:3000` 启动。
 
 ### 3. 访问系统
 
-打开浏览器访问 `http://localhost:5173` 即可使用系统。
+打开浏览器访问 `http://localhost:3000` 即可使用系统。
 
 ## 功能特性
 
@@ -188,17 +190,12 @@ aitrade/
 
 ## 数据存储
 
-运行时数据存储在 `~/.aitrade/` 目录：
+运行时数据存储在项目根目录下的 `./.aitrade/`（可通过环境变量 `AITRADE_HOME` 覆盖）：
 
 ```
-~/.aitrade/
-├── data/           # 股票数据缓存
-│   ├── daily/      # 日线数据
-│   └── minute/    # 分钟线数据
-├── factors/        # 因子计算结果
-├── models/         # 训练好的模型
-├── logs/           # 日志文件
-└── config.json     # 配置文件
+${AITRADE_HOME}/
+├── alpha_lab/      # K线/数据集/模型存储（Parquet）
+└── cnn_models/     # CNN 模型（.pt + history）
 ```
 
 ## 环境变量

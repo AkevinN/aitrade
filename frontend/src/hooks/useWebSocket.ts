@@ -1,7 +1,8 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { taskStore } from '../stores/taskStore'
 
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const WS_URL = import.meta.env.VITE_WS_URL || API_BASE.replace(/^http/, 'ws') + '/ws'
 const RECONNECT_DELAY = 3000
 const HEARTBEAT_INTERVAL = 30000
 

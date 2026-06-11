@@ -314,6 +314,7 @@ class TushareProvider(BaseProvider):
                 volume=float(row.get("vol", 0)),
                 turnover=float(row.get("amount", 0)),
                 open_interest=float(row.get("oi", 0)),
+                adjust_type="none",  # pro_bar 未指定 adj，返回不复权价
             ))
 
         records.sort(key=lambda x: x.datetime)

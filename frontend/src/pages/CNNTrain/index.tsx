@@ -1,139 +1,388 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import {
-  Card, Row, Col, Typography, Space, Button, Tag, DatePicker,
-  Input, InputNumber, Table, message, Divider, Popconfirm,
+  Alert,
+  App,
+  Button,
+  Card,
+  Col,
+  Descriptions,
+  Divider,
+  Empty,
+  Form,
+  Input,
+  InputNumber,
+  List,
+  Popconfirm,
+  Row,
+  Segmented,
+  Select,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
 } from 'antd'
 import {
-  PlayCircleOutlined, DeleteOutlined, EyeOutlined, ReloadOutlined,
+  DeleteOutlined,
+  EyeOutlined,
+  PlayCircleOutlined,
+  ReloadOutlined,
+  DatabaseOutlined,
+  ExperimentOutlined,
 } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import dayjs from 'dayjs'
+import { useLocation } from 'react-router-dom'
+import dayjs, { type Dayjs } from 'dayjs'
 
-import { cnnService } from '../../api/cnn'
 import { alphaService } from '../../api/alpha'
+import { cnnService } from '../../api/cnn'
+import DateRangeSelector from '../../components/DateRangeSelector'
+import TaskStatusPanel from '../../components/TaskStatusPanel'
+import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import { useTask } from '../../hooks/useTask'
-import { taskStore } from '../../stores/taskStore'
-import type { CNNModelInfo } from '../../types/cnn'
+import type { CNNArchitecture, CNNHistoryItem, CNNModelDetail, CNNModelInfo } from '../../types/cnn'
+import type { ConfidenceLevel, ObservationGroup, SymbolProfileResponse } from '../../types/alpha'
+import { confidenceStyle } from '../../utils/profiling'
+import ProfilingPanel from './ProfilingPanel'
 
-const { Text } = Typography
-const { RangePicker } = DatePicker
+const { Title, Text } = Typography
+const GROUP_ROLE_OPTIONS = [
+  { label: '目标证券', value: 'target' },
+  { label: '大盘', value: 'market' },
+  { label: '板块', value: 'sector' },
+  { label: '龙头', value: 'leaders' },
+  { label: '自定义', value: 'custom' },
+]
 
-interface HistoryItem {
-  epoch: number
-  train_loss: number
-  val_loss: number
-  train_acc: number
-  val_acc: number
+const LABEL_MODE_OPTIONS = [
+  { label: '下一个周期', value: 'next_bar' },
+  { label: 'N 个周期后', value: 'horizon_bars' },
+  { label: '当日收盘', value: 'session_close' },
+  { label: '次日收盘', value: 'next_session_close' },
+  { label: 'OCO 止盈止损（路径依赖）', value: 'oco' },
+]
+
+const BAR_INPUT_OPTIONS = [
+  { label: 'K线', value: 'bar' },
+  { label: 'Tick', value: 'tick' },
+]
+
+const NEUTRAL_POLICY_OPTIONS = [
+  { label: '丢弃噪声样本（推荐）', value: 'drop' },
+  { label: '并入下跌类', value: 'negative' },
+]
+
+const PRICE_REF_OPTIONS = [
+  { label: '收盘→收盘（旧/研究口径）', value: 'close' },
+  { label: '次开盘→次开盘（对齐T+1开盘成交，推荐）', value: 'next_open' },
+  { label: '次收盘→次收盘（对齐T+1收盘价MOC成交）', value: 'next_close' },
+  { label: '次日均价→次日均价（对齐T+1全天VWAP成交）', value: 'next_vwap' },
+]
+
+// A 股每个交易日 240 分钟（9:30–11:30、13:00–15:00），各周期每交易日的 bar 数固定。
+// 用于「按时间窗口」自动推算 lookback(T) = 观测交易日数 × 每日 bar 数。
+// 派生/自定义周期不在表内（返回 undefined），此时回退到手填 bar 数。
+const BARS_PER_TRADING_DAY: Record<string, number> = {
+  d: 1,
+  '60m': 4,
+  '30m': 8,
+  '15m': 16,
+  '10m': 24,
+  '5m': 48,
+  '1m': 240,
 }
 
-const LossChart: React.FC<{ history: HistoryItem[] }> = ({ history }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+// 时间维(T)硬上限：防止「分钟周期 × 多交易日」误配出巨型张量（显存/训练时长爆炸）。
+const LOOKBACK_MAX = 1024
 
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || history.length === 0) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+const LOOKBACK_MODE_OPTIONS = [
+  { label: '按时间窗口（推荐）', value: 'window' },
+  { label: '按 bar 数手填', value: 'manual' },
+]
 
-    const W = canvas.width, H = canvas.height
-    const P = { t: 24, r: 50, b: 30, l: 50 }
-    const pW = W - P.l - P.r, pH = H - P.t - P.b
+const LOSS_WEIGHTING_OPTIONS = [
+  { label: '普通 BCE（不加权）', value: 'none' },
+  { label: '按收益幅度加权（推荐）', value: 'magnitude' },
+]
 
-    ctx.clearRect(0, 0, W, H)
+const OBJECTIVE_OPTIONS = [
+  { label: '方向分类（输出上涨概率）', value: 'classification' },
+  { label: '收益回归（直接预测涨跌幅）', value: 'regression' },
+]
 
-    const maxEp = Math.max(...history.map(h => h.epoch))
-    const allL = [...history.map(h => h.train_loss), ...history.map(h => h.val_loss)]
-    const minL = Math.min(...allL) * 0.95, maxL = Math.max(...allL) * 1.05
+const pct = (value?: number) => (value === undefined || value === null ? '-' : `${(value * 100).toFixed(1)}%`)
+const num3 = (value?: number | null) => (value === undefined || value === null ? '-' : value.toFixed(3))
 
-    const xS = (e: number) => P.l + (e / maxEp) * pW
-    const yL = (v: number) => P.t + pH - ((v - minL) / (maxL - minL)) * pH
-    const yA = (v: number) => P.t + pH - v * pH
-
-    ctx.strokeStyle = '#f0f0f0'
-    ctx.lineWidth = 1
-    for (let i = 0; i <= 4; i++) {
-      const y = P.t + (pH / 4) * i
-      ctx.beginPath()
-      ctx.moveTo(P.l, y)
-      ctx.lineTo(W - P.r, y)
-      ctx.stroke()
-    }
-
-    const draw = (pts: { x: number; y: number }[], color: string, dash: number[] = []) => {
-      if (pts.length < 2) return
-      ctx.strokeStyle = color
-      ctx.lineWidth = 2
-      ctx.setLineDash(dash)
-      ctx.beginPath()
-      ctx.moveTo(pts[0].x, pts[0].y)
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
-      ctx.stroke()
-      ctx.setLineDash([])
-    }
-
-    draw(history.map(h => ({ x: xS(h.epoch), y: yL(h.train_loss) })), '#1890ff')
-    draw(history.map(h => ({ x: xS(h.epoch), y: yL(h.val_loss) })), '#ff4d4f')
-    draw(history.map(h => ({ x: xS(h.epoch), y: yA(h.train_acc) })), '#1890ff', [4, 4])
-    draw(history.map(h => ({ x: xS(h.epoch), y: yA(h.val_acc) })), '#ff4d4f', [4, 4])
-
-    ctx.fillStyle = '#666'
-    ctx.font = '10px sans-serif'
-    ctx.fillText('Loss', P.l, P.t - 6)
-    ctx.fillText('Acc', W - P.r + 4, P.t - 6)
-    ctx.fillText('Epoch', P.l + pW / 2 - 15, H - 4)
-
-    const ly = H - 10
-    ;[['Train Loss', '#1890ff', false], ['Val Loss', '#ff4d4f', false],
-     ['Train Acc', '#1890ff', true], ['Val Acc', '#ff4d4f', true]].forEach(([l, c, d], i) => {
-      const lx = P.l + i * 90
-      ctx.strokeStyle = c as string
-      ctx.lineWidth = 2
-      ctx.setLineDash(d ? [3, 3] : [])
-      ctx.beginPath()
-      ctx.moveTo(lx, ly)
-      ctx.lineTo(lx + 16, ly)
-      ctx.stroke()
-      ctx.setLineDash([])
-      ctx.fillStyle = '#333'
-      ctx.fillText(l as string, lx + 20, ly + 3)
-    })
-  }, [history])
-
+const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = ({ history, objective }) => {
+  const isReg = objective === 'regression'
+  const columns = isReg
+    ? [
+        { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+        { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+        { title: 'IC', dataIndex: 'val_ic', width: 80, render: num3 },
+        { title: 'RankIC', dataIndex: 'val_rank_ic', width: 90, render: num3 },
+        { title: 'MAE', dataIndex: 'val_mae', width: 90, render: (v?: number) => (v === undefined ? '-' : v.toFixed(4)) },
+        { title: '方向准确率', dataIndex: 'val_dir_acc', width: 100, render: (v?: number) => pct(v) },
+        { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (v?: number) => pct(v) },
+      ]
+    : [
+        { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+        { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+        { title: 'Val Acc', dataIndex: 'val_acc', width: 90, render: (value: number) => pct(value) },
+        { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (value?: number) => pct(value) },
+        {
+          title: '超额',
+          dataIndex: 'val_excess_acc',
+          width: 90,
+          render: (value?: number) =>
+            value === undefined || value === null ? (
+              '-'
+            ) : (
+              <span style={{ color: value > 0 ? '#49aa19' : '#dc4446' }}>
+                {value > 0 ? '+' : ''}{(value * 100).toFixed(1)}%
+              </span>
+            ),
+        },
+        { title: 'AUC', dataIndex: 'val_auc', width: 80, render: num3 },
+        { title: 'F1', dataIndex: 'val_f1', width: 80, render: (value?: number) => (value === undefined ? '-' : value.toFixed(3)) },
+      ]
   return (
-    <canvas
-      ref={canvasRef}
-      width={480}
-      height={240}
-      style={{ width: '100%', height: 240, border: '1px solid #f0f0f0', borderRadius: 4 }}
+    <Table
+      size="small"
+      rowKey="epoch"
+      pagination={false}
+      scroll={{ y: 260, x: 720 }}
+      dataSource={history}
+      columns={columns}
     />
   )
 }
 
-const CNNTrain: React.FC = () => {
-  const queryClient = useQueryClient()
+const parseSymbols = (raw: string) => (
+  raw
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+)
 
-  const [modelName, setModelName] = useState('')
-  const [symbolsText, setSymbolsText] = useState('')
-  const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs]>([
-    dayjs().subtract(3, 'year'),
-    dayjs(),
-  ])
-  const [epochs, setEpochs] = useState(50)
-  const [batchSize, setBatchSize] = useState(32)
-  const [learningRate, setLearningRate] = useState(0.001)
-  const [lookback, setLookback] = useState(30)
-  const [dropout, setDropout] = useState(0.5)
-  const [trainRatio, setTrainRatio] = useState(0.7)
+const shapeText = (shape?: number[] | null) =>
+  Array.isArray(shape) ? `[${shape.join(', ')}]` : '-'
+
+function profilingConfidenceTag(confidence: ConfidenceLevel) {
+  const style = confidenceStyle(confidence)
+  return (
+    <Tooltip title={style.description}>
+      <Tag color={style.color} style={{ cursor: 'help' }}>
+        {style.text}
+      </Tag>
+    </Tooltip>
+  )
+}
+
+const profilingSummaryStyle: React.CSSProperties = {
+  marginTop: 8,
+  padding: 12,
+  border: '1px solid rgba(145, 202, 255, 0.16)',
+  borderRadius: 6,
+  background: '#111b26',
+}
+
+const profilingSummaryLabelStyle: React.CSSProperties = {
+  color: '#8c8c8c',
+  fontSize: 12,
+}
+
+const profilingSummaryValueStyle: React.CSSProperties = {
+  color: '#d6e4ff',
+  fontWeight: 600,
+}
+
+const ProfilingResultSummary: React.FC<{
+  result: SymbolProfileResponse
+  historical: boolean
+  onOpenDetail: () => void
+}> = ({ result, historical, onOpenDetail }) => {
+  return (
+    <section style={profilingSummaryStyle} aria-label="最近画像摘要">
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+          <Space wrap>
+            <Text strong style={{ color: '#f0f0f0' }}>最近画像</Text>
+            {profilingConfidenceTag(result.overall_confidence)}
+            {historical ? <Tag color="blue">历史画像</Tag> : <Tag color="green">本次评估</Tag>}
+            {result.available ? <Tag color="green">可用</Tag> : <Tag color="orange">数据不可用</Tag>}
+          </Space>
+          <Button size="small" type="link" onClick={onOpenDetail}>
+            查看详情
+          </Button>
+        </Space>
+        <Space wrap size={[16, 8]}>
+          <span>
+            <span style={profilingSummaryLabelStyle}>标的 </span>
+            <span style={profilingSummaryValueStyle}>{result.input.vt_symbol}</span>
+          </span>
+          <span>
+            <span style={profilingSummaryLabelStyle}>周期 </span>
+            <span style={profilingSummaryValueStyle}>{result.input.interval}</span>
+          </span>
+          <span>
+            <span style={profilingSummaryLabelStyle}>有效 bar </span>
+            <span style={profilingSummaryValueStyle}>{result.input.effective_bar_count}</span>
+          </span>
+          <span>
+            <span style={profilingSummaryLabelStyle}>实际右边界 </span>
+            <span style={profilingSummaryValueStyle}>{result.input.effective_right_bound || '-'}</span>
+          </span>
+          {result.artifact_id ? (
+            <span>
+              <span style={profilingSummaryLabelStyle}>artifact_id </span>
+              <Text code copyable>
+                {result.artifact_id}
+              </Text>
+            </span>
+          ) : null}
+        </Space>
+        {result.suggestion ? (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            已生成 {result.suggestion.items.length} 条方案建议，可在详情中查看并回填训练表单。
+          </Text>
+        ) : null}
+      </Space>
+    </section>
+  )
+}
+
+/** 真实网络结构卡片：模块树 + 逐层形状 + 参数量，数据全部来自后端加载权重后的真实实例 */
+const ArchitectureCard: React.FC<{ arch: CNNArchitecture | null; loading: boolean }> = ({ arch, loading }) => {
+  const layerColumns = [
+    { title: '#', width: 48, render: (_: unknown, __: unknown, idx: number) => idx + 1 },
+    { title: '层', dataIndex: 'name', width: 150, render: (v: string) => <Text code>{v}</Text> },
+    { title: '类型', dataIndex: 'type', width: 130 },
+    {
+      title: '输出形状',
+      dataIndex: 'output_shape',
+      width: 170,
+      render: (v: number[] | null) => <Text type={v ? undefined : 'secondary'}>{shapeText(v)}</Text>,
+    },
+    {
+      title: '参数量',
+      dataIndex: 'params_h',
+      width: 100,
+      align: 'right' as const,
+      render: (v: string, row: CNNArchitecture['layers'][number]) =>
+        row.params > 0 ? v : <Text type="secondary">0</Text>,
+    },
+  ]
+
+  return (
+    <Card
+      size="small"
+      title="网络结构（真实模型）"
+      style={{ marginBottom: 16 }}
+      extra={
+        arch ? (
+          <Space wrap size={4}>
+            <Tag color={arch.verified ? 'green' : 'red'}>
+              {arch.verified ? '结构已校验' : '结构未匹配'}
+            </Tag>
+            <Tag color="blue">{arch.total_params_h} 参数</Tag>
+            <Tag>{arch.param_dtype}</Tag>
+          </Space>
+        ) : null
+      }
+    >
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '24px 0' }}>
+          <Spin tip="正在加载真实模型并探查结构..." />
+        </div>
+      ) : !arch ? (
+        <Empty description="无法探查模型结构（PyTorch 未安装或模型读取失败）" />
+      ) : (
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {!arch.verified && arch.verify_message ? (
+            <Alert type="warning" showIcon message="权重与结构不完全一致" description={arch.verify_message} />
+          ) : (
+            <Alert
+              type="success"
+              showIcon
+              message="所见即真实：已用训练时保存的权重加载进重建的模型，结构与权重严格匹配"
+            />
+          )}
+          {arch.forward_error ? (
+            <Alert type="warning" showIcon message="逐层形状不可用" description={arch.forward_error} />
+          ) : null}
+
+          <Descriptions size="small" bordered column={2}>
+            <Descriptions.Item label="输入 x 形状">{shapeText(arch.input_shapes?.x)}</Descriptions.Item>
+            <Descriptions.Item label="掩码 group_mask">{shapeText(arch.input_shapes?.group_mask)}</Descriptions.Item>
+            <Descriptions.Item label="输出形状">{shapeText(arch.output_shape)}</Descriptions.Item>
+            <Descriptions.Item label="可训练参数">{arch.trainable_params_h}</Descriptions.Item>
+          </Descriptions>
+
+          <Table
+            size="small"
+            rowKey="name"
+            pagination={false}
+            scroll={{ y: 320, x: 560 }}
+            dataSource={arch.layers}
+            columns={layerColumns}
+          />
+
+          <details>
+            <summary style={{ cursor: 'pointer', color: '#1677ff' }}>PyTorch 原生模块树</summary>
+            <pre
+              style={{
+                marginTop: 8,
+                padding: 12,
+                background: 'rgba(0,0,0,0.04)',
+                borderRadius: 6,
+                fontSize: 12,
+                lineHeight: 1.5,
+                overflowX: 'auto',
+                whiteSpace: 'pre',
+              }}
+            >
+              {arch.module_repr}
+            </pre>
+          </details>
+        </Space>
+      )}
+    </Card>
+  )
+}
+
+const CNNTrain: React.FC = () => {
+  const { message } = App.useApp()
+  const location = useLocation()
+  const queryClient = useQueryClient()
+  const [form] = Form.useForm()
+  const [groupForm] = Form.useForm()
+  const [observationGroups, setObservationGroups] = useState<ObservationGroup[]>([])
   const [taskId, setTaskId] = useState<string | null>(null)
-  const [selectedDataset, setSelectedDataset] = useState('')
-  const [viewDetail, setViewDetail] = useState<CNNModelInfo | null>(null)
+  const [viewDetail, setViewDetail] = useState<CNNModelDetail | null>(null)
+  const [architecture, setArchitecture] = useState<CNNArchitecture | null>(null)
+  const [archLoading, setArchLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [profilingOpen, setProfilingOpen] = useState(false)
+  const [latestProfile, setLatestProfile] = useState<SymbolProfileResponse | null>(null)
+  const [latestProfileHistorical, setLatestProfileHistorical] = useState(false)
 
   const task = useTask(taskId)
+  const preset = (location.state as {
+    preset?: {
+      target_symbol?: string
+      input_data_kind?: 'bar' | 'tick'
+      input_interval?: string
+      symbols?: string[]
+    }
+    modelName?: string
+  } | null)?.preset
+  const focusModelName = (location.state as { modelName?: string } | null)?.modelName
 
-  const { data: datasets } = useQuery({
-    queryKey: ['alpha-datasets'],
-    queryFn: () => alphaService.listDatasets(),
+  const { data: resources } = useQuery({
+    queryKey: ['alpha-data-resources'],
+    queryFn: () => alphaService.getDataResources(),
   })
 
   const { data: models, refetch: refetchModels } = useQuery({
@@ -141,299 +390,971 @@ const CNNTrain: React.FC = () => {
     queryFn: () => cnnService.listModels(),
   })
 
-  const symbols = symbolsText
-    .split(/[\n,]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+  const barIntervals = useMemo(() => {
+    const values = new Set<string>([
+      ...(resources?.raw_bar_intervals || []),
+      ...(resources?.derived_intervals || []),
+      'd',
+      '1m',
+      '5m',
+      '10m',
+      '15m',
+      '30m',
+      '60m',
+    ])
+    return [...values].sort((a, b) => a.localeCompare(b))
+  }, [resources])
 
-  const handleTrain = useCallback(async () => {
-    if (!modelName || symbols.length === 0 || !selectedDataset) {
-      message.warning('Please fill in all required fields')
+  // 复用共享 Hook 归并“每合约可用性映射”，消除与数据准备页的重复逻辑。
+  // 再从映射派生出本组件其余部分消费的 options 数组（与原 availableSymbols 等价）。
+  const availabilityMap = useAvailableSymbols(resources)
+  const availableSymbols = useMemo(
+    () =>
+      [...availabilityMap.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([sym, meta]) => ({
+          value: sym,
+          label: sym,
+          intervals: [...meta.intervals],
+          dateRange: `${meta.start.slice(0, 10)} ~ ${meta.end.slice(0, 10)}`,
+          intervalRanges: meta.intervalRanges,
+        })),
+    [availabilityMap],
+  )
+
+  const inputDataKind = Form.useWatch('input_data_kind', form) || 'bar'
+  const lookback = Form.useWatch('lookback', form) || 30
+  const targetSymbol = Form.useWatch('target_symbol', form) || ''
+  const labelMode = Form.useWatch('label_mode', form) || 'next_bar'
+  const inputInterval = Form.useWatch('input_interval', form) || 'd'
+  const objective = Form.useWatch('objective', form) || 'classification'
+  const trainRange = Form.useWatch('range', form) as [Dayjs, Dayjs] | undefined
+
+  // 回看窗口配置：window=按观测交易日数自动推算；manual=直接手填 bar 数
+  const lookbackMode = Form.useWatch('lookback_mode', form) || 'window'
+  const observationDays = Form.useWatch('observation_days', form) || 30
+  // 当前周期每交易日 bar 数；派生/自定义周期不可推算 → null
+  const barsPerDay = BARS_PER_TRADING_DAY[inputInterval] ?? null
+  // 由「观测交易日数 × 每日 bar 数」推算出的 lookback(T)
+  const derivedLookback = useMemo(() => {
+    if (!barsPerDay) return null
+    return Math.max(1, Math.round(observationDays * barsPerDay))
+  }, [barsPerDay, observationDays])
+  // window 模式下把推算值实时回写到真正提交的 lookback 字段（manual 模式不干预手填值）
+  useEffect(() => {
+    if (lookbackMode === 'window' && derivedLookback != null) {
+      form.setFieldsValue({ lookback: derivedLookback })
+    }
+  }, [lookbackMode, derivedLookback, form])
+  const lookbackOverLimit = lookback > LOOKBACK_MAX
+
+  const targetLocalRange = useMemo(() => {
+    if (!targetSymbol) {
+      return null
+    }
+    const targetKey = targetSymbol.replace(/\.$/, '').toLowerCase()
+    const meta = availableSymbols.find(
+      (item) => item.value.replace(/\.$/, '').toLowerCase() === targetKey,
+    )
+    if (!meta) {
+      return null
+    }
+    if (inputDataKind === 'tick') {
+      return meta.intervalRanges.tick || null
+    }
+    return meta.intervalRanges[inputInterval] || null
+  }, [availableSymbols, inputDataKind, inputInterval, targetSymbol])
+
+  const tensorEstimate = useMemo(() => {
+    const groupCount = observationGroups.length + 1
+    const maxGroupWidth = Math.max(
+      1,
+      ...observationGroups.map((group) => group.symbols.length),
+    )
+    return {
+      channels: 6,
+      time: lookback,
+      width: maxGroupWidth,
+      groups: groupCount,
+    }
+  }, [lookback, observationGroups])
+
+  useEffect(() => {
+    form.setFieldsValue({
+      name: '',
+      target_symbol: '',
+      input_data_kind: 'bar',
+      input_interval: 'd',
+      range: [dayjs().subtract(3, 'year'), dayjs()],
+      label_mode: 'next_bar',
+      label_horizon: 3,
+      oco_take_profit_pct: 3,
+      oco_stop_loss_pct: 2,
+      oco_max_hold: 10,
+      objective: 'classification',
+      label_threshold_pct: 0.5,
+      neutral_policy: 'drop',
+      price_ref: 'next_open',
+      loss_weighting: 'magnitude',
+      epochs: 50,
+      batch_size: 32,
+      learning_rate: 0.001,
+      lookback_mode: 'window',
+      observation_days: 30,
+      lookback: 30,
+      dropout: 0.4,
+      train_ratio: 0.7,
+    })
+    groupForm.setFieldsValue({
+      role: 'market',
+      name: '',
+      symbols: [],
+    })
+  }, [form, groupForm])
+
+  useEffect(() => {
+    if (preset) {
+      form.setFieldsValue({
+        target_symbol: preset.target_symbol,
+        input_data_kind: preset.input_data_kind || 'bar',
+        input_interval: preset.input_interval || 'd',
+      })
+    }
+  }, [form, preset])
+
+  useEffect(() => {
+    if (task.data?.status === 'completed') {
+      refetchModels()
+      queryClient.invalidateQueries({ queryKey: ['cnn-models'] })
+      const taskResultName = String(task.data.result?.name || form.getFieldValue('name') || '')
+      if (taskResultName) {
+        void cnnService.getModel(taskResultName).then(setViewDetail).catch(() => undefined)
+      }
+    }
+  }, [form, queryClient, refetchModels, task.data?.result, task.data?.status])
+
+  useEffect(() => {
+    if (focusModelName) {
+      void cnnService.getModel(focusModelName).then(setViewDetail).catch(() => undefined)
+    }
+  }, [focusModelName])
+
+  // 当查看的模型变化时，拉取真实网络结构
+  useEffect(() => {
+    const name = viewDetail?.name
+    if (!name) {
+      setArchitecture(null)
       return
     }
-    setSubmitting(true)
+    let cancelled = false
+    setArchLoading(true)
+    setArchitecture(null)
+    cnnService
+      .getModelArchitecture(name)
+      .then((arch) => {
+        if (!cancelled) setArchitecture(arch)
+      })
+      .catch(() => {
+        if (!cancelled) setArchitecture(null)
+      })
+      .finally(() => {
+        if (!cancelled) setArchLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [viewDetail?.name])
+
+  const addGroup = async () => {
     try {
-      const result = await cnnService.train({
-        name: modelName,
-        dataset_name: selectedDataset,
-        epochs,
-        batch_size: batchSize,
-        learning_rate: learningRate,
-      })
-      setTaskId(result.task_id)
-      taskStore.getState().addTask({
-        id: result.task_id,
-        name: `CNN Train: ${modelName}`,
-        status: 'running',
-        progress: 0,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      message.success('Training started')
+      const values = await groupForm.validateFields()
+      const symbols: string[] = Array.isArray(values.symbols)
+        ? values.symbols.map((s: string) => s.trim()).filter(Boolean)
+        : parseSymbols(values.symbols || '')
+      const nextGroup: ObservationGroup = {
+        role: values.role,
+        name: values.name,
+        symbols,
+      }
+      if (nextGroup.role === 'target') {
+        message.warning('目标证券在上方单独配置，无需重复添加 target 组')
+        return
+      }
+      if (nextGroup.symbols.length === 0) {
+        message.warning('请至少选择一个证券')
+        return
+      }
+      setObservationGroups((current) => [...current, nextGroup])
+      groupForm.resetFields()
+      groupForm.setFieldsValue({ role: 'market', name: '', symbols: [] })
     } catch {
-      message.error('Failed to start training')
+      // handled by form
+    }
+  }
+
+  const removeGroup = (index: number) => {
+    setObservationGroups((current) => current.filter((_item, itemIndex) => itemIndex !== index))
+  }
+
+  // 按当前关键配置自动生成模型名称：cnn_{标的}_{周期}_{标签}_{目标}_T{回看}_{计价口径}_{时间戳}
+  const autoFillModelName = () => {
+    const sym = (targetSymbol || '').replace(/\.$/, '').replace(/[^0-9A-Za-z]/g, '') || 'sym'
+    const kindInterval = `${inputDataKind === 'tick' ? 'tk' : ''}${inputInterval}`
+
+    const horizon = form.getFieldValue('label_horizon') || 3
+    const ocoTp = form.getFieldValue('oco_take_profit_pct') || 0
+    const ocoSl = form.getFieldValue('oco_stop_loss_pct') || 0
+    const ocoHold = form.getFieldValue('oco_max_hold') || 0
+    const labelTagMap: Record<string, string> = {
+      next_bar: 'nb',
+      horizon_bars: `h${horizon}`,
+      session_close: 'sc',
+      next_session_close: 'nsc',
+      oco: `oco_tp${ocoTp}_sl${ocoSl}_h${ocoHold}`,
+    }
+    const labelTag = labelTagMap[labelMode] || labelMode
+
+    const objTag = objective === 'regression' ? 'reg' : 'cls'
+
+    const priceRef = form.getFieldValue('price_ref') || 'next_open'
+    const priceTagMap: Record<string, string> = {
+      close: 'cl',
+      next_open: 'no',
+      next_close: 'nc',
+      next_vwap: 'vw',
+    }
+    const priceTag = priceTagMap[priceRef] || priceRef
+
+    const stamp = dayjs().format('MMDDHHmm')
+    const name = `cnn_${sym}_${kindInterval}_${labelTag}_${objTag}_T${lookback}_${priceTag}_${stamp}`
+    form.setFieldsValue({ name })
+  }
+
+  const handleTrain = async () => {
+    try {
+      const values = await form.validateFields()
+      if (!targetSymbol) {
+        message.warning('请先填写目标证券')
+        return
+      }
+      if (values.lookback > LOOKBACK_MAX) {
+        message.warning(
+          `回看窗口 T=${values.lookback} 超过上限 ${LOOKBACK_MAX}，` +
+            '请减少观测交易日数或改用更大周期（如 5m/15m/d）后再训练。',
+        )
+        return
+      }
+      setSubmitting(true)
+      const taskStart = await cnnService.train({
+        name: values.name,
+        start: values.range[0].format('YYYY-MM-DD'),
+        end: values.range[1].format('YYYY-MM-DD'),
+        target_symbol: values.target_symbol,
+        input_data_kind: values.input_data_kind,
+        input_interval: values.input_interval,
+        observation_groups: observationGroups,
+        objective: values.objective,
+        label_spec: {
+          mode: values.label_mode,
+          horizon: values.label_mode === 'horizon_bars' ? values.label_horizon : undefined,
+          threshold: Math.max(0, (values.label_threshold_pct || 0) / 100),
+          neutral_policy: values.neutral_policy,
+          price_ref: values.price_ref,
+          take_profit:
+            values.label_mode === 'oco' ? Math.max(0, (values.oco_take_profit_pct || 0) / 100) : undefined,
+          stop_loss:
+            values.label_mode === 'oco' ? Math.max(0, (values.oco_stop_loss_pct || 0) / 100) : undefined,
+          max_hold: values.label_mode === 'oco' ? values.oco_max_hold : undefined,
+        },
+        loss_weighting: values.objective === 'regression' ? 'none' : values.loss_weighting,
+        epochs: values.epochs,
+        batch_size: values.batch_size,
+        learning_rate: values.learning_rate,
+        lookback: values.lookback,
+        dropout: values.dropout,
+        train_ratio: values.train_ratio,
+      })
+      setTaskId(taskStart.task_id)
+      message.success('CNN 训练任务已启动')
+    } catch (error) {
+      if (error instanceof Error) {
+        message.error(error.message)
+      }
     } finally {
       setSubmitting(false)
     }
-  }, [modelName, symbols, selectedDataset, epochs, batchSize, learningRate])
+  }
 
-  const handleViewDetail = useCallback(async (name: string) => {
+  const handleViewModel = async (name: string) => {
     try {
       const detail = await cnnService.getModel(name)
       setViewDetail(detail)
     } catch {
-      message.error('Failed to get model detail')
+      message.error('加载模型详情失败')
     }
-  }, [])
+  }
 
-  const handleDelete = useCallback(async (name: string) => {
+  const handleDeleteModel = async (name: string) => {
     try {
       await cnnService.deleteModel(name)
-      message.success('Model deleted')
+      message.success('CNN 模型已删除')
       refetchModels()
-      if (viewDetail?.name === name) setViewDetail(null)
+      if (viewDetail?.name === name) {
+        setViewDetail(null)
+      }
     } catch {
-      message.error('Delete failed')
+      message.error('删除失败')
     }
-  }, [refetchModels, viewDetail])
+  }
 
-  const modelColumns = [
-    {
-      title: 'Name',
-      dataIndex: 'name',
-      key: 'name',
-      width: 200,
-    },
-    {
-      title: 'Created',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 150,
-      render: (t: string) => new Date(t).toLocaleString(),
-    },
-    {
-      title: 'Params',
-      dataIndex: 'num_params',
-      key: 'num_params',
-      width: 100,
-      render: (v: number) => v.toLocaleString(),
-    },
-    {
-      title: 'Val Loss',
-      key: 'val_loss',
-      width: 100,
-      render: (_: unknown, record: CNNModelInfo) => record.metrics?.val_loss?.toFixed(4) || 'N/A',
-    },
-    {
-      title: 'Actions',
-      key: 'actions',
-      width: 120,
-      render: (_: unknown, record: { name: string }) => (
-        <Space>
-          <Button size="small" icon={<EyeOutlined />} onClick={() => handleViewDetail(record.name)} />
-          <Popconfirm title="Confirm delete?" onConfirm={() => handleDelete(record.name)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ]
+  const handleApplyProfilingSuggestion = (values: Record<string, unknown>, unmappedCount: number) => {
+    if (Object.keys(values).length > 0) {
+      form.setFieldsValue(values)
+      message.success(
+        unmappedCount > 0
+          ? `已填充可映射建议，${unmappedCount} 条需人工处理`
+          : '已填充画像建议，请确认后再训练',
+      )
+    } else {
+      message.warning('当前建议没有可直接填充的训练字段')
+    }
+  }
 
-  const simulatedHistory: HistoryItem[] = viewDetail?.metrics
-    ? Array.from({ length: epochs }, (_, i) => ({
-        epoch: i + 1,
-        train_loss: Math.max(0.1, 2 * Math.exp(-i * 0.05) + Math.random() * 0.1),
-        val_loss: Math.max(0.15, 2.2 * Math.exp(-i * 0.04) + Math.random() * 0.15),
-        train_acc: Math.min(0.95, 0.3 + (0.7 * (1 - Math.exp(-i * 0.08)))),
-        val_acc: Math.min(0.9, 0.25 + (0.6 * (1 - Math.exp(-i * 0.06)))),
-      }))
-    : []
+  const modelList = (
+    <Table<CNNModelInfo>
+      size="small"
+      rowKey="name"
+      dataSource={models || []}
+      pagination={{ pageSize: 6, showSizeChanger: false }}
+      locale={{ emptyText: '还没有 CNN 模型' }}
+      columns={[
+        {
+          title: '模型',
+          key: 'name',
+          render: (_value, record) => (
+            <Space direction="vertical" size={2}>
+              <Button type="link" style={{ padding: 0 }} onClick={() => void handleViewModel(record.name)}>
+                {record.name}
+              </Button>
+              <Space size={4} wrap>
+                <Tag>{record.input_interval || 'd'}</Tag>
+                <Tag color="purple">{record.group_count || 1} 组</Tag>
+              </Space>
+            </Space>
+          ),
+        },
+        {
+          title: '目标证券',
+          dataIndex: 'target_symbol',
+          width: 130,
+        },
+        {
+          title: '最佳损失',
+          dataIndex: 'best_val_loss',
+          width: 110,
+          render: (value?: number) => value?.toFixed(4) || '-',
+        },
+        {
+          title: '操作',
+          key: 'actions',
+          width: 110,
+          render: (_value, record) => (
+            <Space size="small">
+              <Button size="small" icon={<EyeOutlined />} onClick={() => void handleViewModel(record.name)} />
+              <Popconfirm title="确认删除这个 CNN 模型？" onConfirm={() => void handleDeleteModel(record.name)}>
+                <Button size="small" danger icon={<DeleteOutlined />} />
+              </Popconfirm>
+            </Space>
+          ),
+        },
+      ]}
+    />
+  )
 
   return (
     <div className="page-enter">
-      <Typography.Title level={4} style={{ marginBottom: 20 }}>
-        CNN Train
-      </Typography.Title>
+      <Space direction="vertical" size={20} style={{ width: '100%' }}>
+        <div>
+          <Title level={3} style={{ marginBottom: 4 }}>CNN 训练工作流</Title>
+          <Text type="secondary">
+            先选输入源和周期，再配置目标证券与语义观测组，最后定义标签和训练参数。
+          </Text>
+        </div>
 
-      <Row gutter={[16, 16]}>
-        {/* Left: Form */}
-        <Col xs={24} lg={10}>
-          <Card title="CNN Training Config" size="small">
-            <Space direction="vertical" style={{ width: '100%' }} size="middle">
-              <div>
-                <Text type="secondary">Model Name:</Text>
-                <Input
-                  style={{ marginTop: 8 }}
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                  placeholder="cnn_model_v1"
-                />
-              </div>
-              <div>
-                <Text type="secondary">Dataset:</Text>
-                <select
-                  style={{
-                    width: '100%',
-                    marginTop: 8,
-                    padding: '4px 8px',
-                    background: 'transparent',
-                    border: '1px solid #424242',
-                    borderRadius: 6,
-                    color: '#e8e8e8',
-                  }}
-                  value={selectedDataset}
-                  onChange={(e) => setSelectedDataset(e.target.value)}
-                >
-                  <option value="">Select dataset</option>
-                  {(datasets || []).map((d) => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <Text type="secondary">Symbols (one per line):</Text>
-                <Input.TextArea
-                  style={{ marginTop: 8 }}
-                  rows={3}
-                  value={symbolsText}
-                  onChange={(e) => setSymbolsText(e.target.value)}
-                  placeholder="000001.SZSE&#10;600000.SSE"
-                />
-              </div>
-              <div>
-                <Text type="secondary">Date Range:</Text>
-                <RangePicker
-                  style={{ width: '100%', marginTop: 8 }}
-                  value={dateRange}
-                  onChange={(dates) => dates && setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs])}
-                />
-              </div>
-              <Divider style={{ margin: '8px 0' }} />
-              <Row gutter={8}>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Epochs</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={epochs}
-                    onChange={(v) => setEpochs(v || 50)}
-                    min={10}
-                    max={300}
-                  />
-                </Col>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Batch Size</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={batchSize}
-                    onChange={(v) => setBatchSize(v || 32)}
-                    min={8}
-                    max={256}
-                  />
-                </Col>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Learning Rate</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={learningRate}
-                    onChange={(v) => setLearningRate(v || 0.001)}
-                    min={0.0001}
-                    max={0.1}
-                    step={0.0001}
-                  />
-                </Col>
-              </Row>
-              <Row gutter={8}>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Lookback</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={lookback}
-                    onChange={(v) => setLookback(v || 30)}
-                    min={10}
-                    max={120}
-                  />
-                </Col>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Dropout</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={dropout}
-                    onChange={(v) => setDropout(v || 0.5)}
-                    min={0}
-                    max={0.9}
-                    step={0.1}
-                  />
-                </Col>
-                <Col span={8}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Train Ratio</Text>
-                  <InputNumber
-                    style={{ width: '100%' }}
-                    value={trainRatio}
-                    onChange={(v) => setTrainRatio(v || 0.7)}
-                    min={0.5}
-                    max={0.9}
-                    step={0.05}
-                  />
-                </Col>
-              </Row>
-              <Button
-                type="primary"
-                icon={<PlayCircleOutlined />}
-                onClick={handleTrain}
-                loading={submitting || task?.status === 'running'}
-                block
-              >
-                Start Training
-              </Button>
-              {task && (
-                <Card size="small">
-                  <Space>
-                    <Tag color={task.status === 'completed' ? 'success' : task.status === 'failed' ? 'error' : 'processing'}>
-                      {task.status}
-                    </Tag>
-                    <Text type="secondary">{task.message}</Text>
+        <TaskStatusPanel task={task.data || null} title="当前训练任务" />
+
+        <Row gutter={[16, 16]}>
+          <Col xs={24} xl={10}>
+            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <Card title="步骤 1 · 选择输入源">
+                <Form form={form} layout="vertical">
+                  <Form.Item label="模型名称" required>
+                    <Space.Compact style={{ width: '100%' }}>
+                      <Form.Item name="name" noStyle rules={[{ required: true, message: '请输入模型名称' }]}>
+                        <Input placeholder="cnn_market_context_v1" />
+                      </Form.Item>
+                      <Tooltip
+                        title={
+                          <span>
+                            按当前关键配置自动生成模型名称，格式：
+                            <br />
+                            cnn_标的_周期_标签_目标_T回看_计价口径_时间戳
+                            <br />
+                            标签：nb=下一周期 / h{'{N}'}=N周期后 / sc=当日收盘 / nsc=次日收盘
+                            <br />
+                            目标：cls=分类 / reg=回归
+                            <br />
+                            计价口径：no=次开盘 / nc=次收盘 / vw=次日均价 / cl=收盘
+                            <br />
+                            末尾 MMDDHHmm 时间戳保证唯一、避免重名覆盖；生成后仍可手动修改。
+                          </span>
+                        }
+                      >
+                        <Button onClick={autoFillModelName}>自动填充</Button>
+                      </Tooltip>
+                    </Space.Compact>
+                  </Form.Item>
+                  <Form.Item
+                    label="输入数据类型"
+                    name="input_data_kind"
+                    rules={[{ required: true, message: '请选择输入类型' }]}
+                  >
+                    <Select options={BAR_INPUT_OPTIONS} />
+                  </Form.Item>
+                  <Form.Item
+                    label="输入周期"
+                    name="input_interval"
+                    rules={[{ required: true, message: '请选择输入周期' }]}
+                    extra={inputDataKind === 'tick' ? 'Tick 会先按这个周期在本地聚合，再进入 CNN。' : '可直接使用原始K线或派生周期。'}
+                  >
+                    <Select options={barIntervals.map((interval) => ({ label: interval, value: interval }))} />
+                  </Form.Item>
+                  <Form.Item
+                    label="时间范围"
+                    name="range"
+                    rules={[{ required: true, message: '请选择时间范围' }]}
+                    extra={targetLocalRange
+                      ? '可先选目标证券，再点「使用本地全区间」或快捷区间。'
+                      : '选择目标证券后，可一键匹配本地数据区间。'}
+                  >
+                    <DateRangeSelector localRange={targetLocalRange} />
+                  </Form.Item>
+                </Form>
+              </Card>
+
+              <Card title="步骤 2 · 目标证券与观测组">
+                <Form form={form} layout="vertical">
+                  <Form.Item
+                    label="目标证券"
+                    name="target_symbol"
+                    rules={[{ required: true, message: '请选择或输入目标证券' }]}
+                    extra={availableSymbols.length > 0 ? `已有 ${availableSymbols.length} 个证券的本地数据可用` : '暂无本地数据资源，请先在数据准备中下载'}
+                  >
+                    <Select
+                      showSearch
+                      allowClear
+                      placeholder="选择已有数据，或输入 000415.SZSE / sz000415"
+                      optionFilterProp="label"
+                      notFoundContent={availableSymbols.length === 0 ? '暂无本地数据' : '未找到匹配证券'}
+                      options={availableSymbols.map((sym) => ({
+                        value: sym.value,
+                        label: sym.label,
+                      }))}
+                      optionRender={(option) => {
+                        const meta = availableSymbols.find((s) => s.value === option.value)
+                        return (
+                          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                            <Space size={4}>
+                              <DatabaseOutlined style={{ color: '#52c41a' }} />
+                              <span>{option.label}</span>
+                            </Space>
+                            {meta ? (
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {meta.intervals.join('/')} · {meta.dateRange}
+                              </Text>
+                            ) : null}
+                          </Space>
+                        )
+                      }}
+                    />
+                  </Form.Item>
+                  <Space wrap style={{ marginTop: -8, marginBottom: 8 }}>
+                    <Tooltip title={targetSymbol ? '基于当前目标证券、输入周期和观测组做只读画像评估' : '先选择目标证券后再评估'}>
+                      <span>
+                        <Button
+                          size="small"
+                          icon={<ExperimentOutlined />}
+                          disabled={!targetSymbol}
+                          onClick={() => setProfilingOpen(true)}
+                        >
+                          评估该标的
+                        </Button>
+                      </span>
+                    </Tooltip>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      只读诊断，可按建议回填训练表单，不会启动训练。
+                    </Text>
                   </Space>
+                  {latestProfile ? (
+                    <ProfilingResultSummary
+                      result={latestProfile}
+                      historical={latestProfileHistorical}
+                      onOpenDetail={() => setProfilingOpen(true)}
+                    />
+                  ) : null}
+                </Form>
+
+                <Divider style={{ margin: '8px 0 16px' }} />
+
+                <Form form={groupForm} layout="vertical">
+                  <Form.Item label="分组角色" name="role" rules={[{ required: true, message: '请选择分组角色' }]}>
+                    <Select options={GROUP_ROLE_OPTIONS.filter((item) => item.value !== 'target')} />
+                  </Form.Item>
+                  <Form.Item label="分组名称" name="name" rules={[{ required: true, message: '请输入分组名称' }]}>
+                    <Input placeholder="沪深300 / 银行板块 / 龙头组" />
+                  </Form.Item>
+                  <Form.Item
+                    label="证券列表"
+                    name="symbols"
+                    rules={[{ required: true, message: '请选择至少一个证券' }]}
+                  >
+                    <Select
+                      mode="tags"
+                      placeholder="选择已有数据，或输入 000415.SZSE / sz000415"
+                      optionFilterProp="label"
+                      tokenSeparators={[',', '\n', ' ']}
+                      style={{ width: '100%' }}
+                      options={availableSymbols.map((sym) => ({
+                        value: sym.value,
+                        label: sym.label,
+                      }))}
+                      optionRender={(option) => {
+                        const meta = availableSymbols.find((s) => s.value === option.value)
+                        return (
+                          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                            <Space size={4}>
+                              <DatabaseOutlined style={{ color: '#52c41a' }} />
+                              <span>{option.label}</span>
+                            </Space>
+                            {meta ? (
+                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                {meta.intervals.join('/')}
+                              </Text>
+                            ) : null}
+                          </Space>
+                        )
+                      }}
+                    />
+                  </Form.Item>
+                  <Button onClick={() => void addGroup()} block>
+                    添加观测组
+                  </Button>
+                </Form>
+
+                <Divider style={{ margin: '16px 0' }} />
+
+                {observationGroups.length > 0 ? (
+                  <List
+                    size="small"
+                    dataSource={observationGroups}
+                    renderItem={(group, index) => (
+                      <List.Item
+                        actions={[
+                          <Button key="delete" type="link" danger onClick={() => removeGroup(index)}>删除</Button>,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <Space wrap>
+                              <Text strong>{group.name}</Text>
+                              <Tag>{group.role}</Tag>
+                              <Tag color="purple">{group.symbols.length} 只</Tag>
+                            </Space>
+                          }
+                          description={group.symbols.join(', ')}
+                        />
+                      </List.Item>
+                    )}
+                  />
+                ) : (
+                  <Empty description="还没有观测组。可以添加大盘、板块、龙头或自定义组。" />
+                )}
+              </Card>
+
+              <Card title="步骤 3 · 标签定义">
+                <Form form={form} layout="vertical">
+                  <Form.Item
+                    label="预测目标"
+                    name="objective"
+                    tooltip="方向分类：输出上涨概率；收益回归：直接预测涨跌幅，分数与幅度单调对应，可按预测收益排序/定仓。"
+                  >
+                    <Select options={OBJECTIVE_OPTIONS} />
+                  </Form.Item>
+                  {objective === 'regression' ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="回归模式：标签为连续未来收益，损失用 Huber，评估看 IC/方向准确率；阈值仅用于剔除过小噪声，损失加权与噪声并类不适用。"
+                    />
+                  ) : null}
+                  <Form.Item label="标签模式" name="label_mode" rules={[{ required: true, message: '请选择标签模式' }]}>
+                    <Select options={LABEL_MODE_OPTIONS} />
+                  </Form.Item>
+                  {labelMode === 'horizon_bars' ? (
+                    <Form.Item
+                      label="预测跨度（bar）"
+                      name="label_horizon"
+                      rules={[{ required: true, message: '请填写跨度' }]}
+                    >
+                      <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                    </Form.Item>
+                  ) : null}
+                  {labelMode === 'oco' ? (
+                    <>
+                      <Alert
+                        type="info"
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                        message="OCO 三重障碍标签：T+1 开盘建仓，持有期内先触止盈/止损按触发价计收益，到期未触发按时间止损（次开盘）平仓。回归=真实出场收益；分类=止盈→1、止损→0、时间止损按收益符号。同根 bar 双触发时保守假设止损先到。"
+                      />
+                      <Row gutter={12}>
+                        <Col span={8}>
+                          <Form.Item
+                            label="止盈幅度 (%)"
+                            name="oco_take_profit_pct"
+                            rules={[{ required: true, message: '请填写止盈幅度' }]}
+                            tooltip="触及该涨幅即止盈出场（如 3 表示 +3%）。"
+                          >
+                            <InputNumber min={0.1} max={50} step={0.1} style={{ width: '100%' }} addonAfter="%" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            label="止损幅度 (%)"
+                            name="oco_stop_loss_pct"
+                            rules={[{ required: true, message: '请填写止损幅度' }]}
+                            tooltip="触及该跌幅即止损出场（如 2 表示 -2%）。"
+                          >
+                            <InputNumber min={0.1} max={50} step={0.1} style={{ width: '100%' }} addonAfter="%" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                          <Form.Item
+                            label="最大持有（bar）"
+                            name="oco_max_hold"
+                            rules={[{ required: true, message: '请填写最大持有 bar 数' }]}
+                            tooltip="持有期内都不触发时，在第 max_hold+1 根开盘按时间止损平仓。"
+                          >
+                            <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                          </Form.Item>
+                        </Col>
+                      </Row>
+                    </>
+                  ) : null}
+                  {labelMode === 'session_close' && inputInterval === 'd' ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="当日收盘标签只适用于分钟级输入"
+                    />
+                  ) : null}
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item
+                        label="最小波动阈值 (%)"
+                        name="label_threshold_pct"
+                        tooltip="|未来收益|≤该阈值视为噪声样本；0 关闭去噪。建议设为单边成本的约 2 倍。"
+                      >
+                        <InputNumber min={0} max={10} step={0.1} style={{ width: '100%' }} addonAfter="%" />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="噪声样本处理" name="neutral_policy">
+                        <Select options={NEUTRAL_POLICY_OPTIONS} disabled={objective === 'regression'} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Form.Item
+                    label="收益计价口径"
+                    name="price_ref"
+                    tooltip="计价口径与回测撮合成交价一一对齐：next_open=T+1开盘、next_close=T+1收盘(MOC)、next_vwap=T+1全天均价(VWAP)；close为研究口径(实盘吃不到)。"
+                  >
+                    <Select options={PRICE_REF_OPTIONS} />
+                  </Form.Item>
+                </Form>
+              </Card>
+
+              <Card title="步骤 4 · 训练参数">
+                <Form form={form} layout="vertical">
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item label="Epochs" name="epochs">
+                        <InputNumber min={10} max={300} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="Batch Size" name="batch_size">
+                        <InputNumber min={8} max={256} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="Learning Rate" name="learning_rate">
+                        <InputNumber min={0.0001} max={0.1} step={0.0001} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={24}>
+                      <Form.Item
+                        label="回看窗口(T) 配置方式"
+                        name="lookback_mode"
+                        tooltip="按时间窗口：填观测交易日数，按输入周期自动换算回看 bar 数 T；按 bar 数：直接手填 T。"
+                      >
+                        <Segmented options={LOOKBACK_MODE_OPTIONS} />
+                      </Form.Item>
+                    </Col>
+                    {lookbackMode === 'window' ? (
+                      <>
+                        <Col span={12}>
+                          <Form.Item
+                            label="观测交易日数"
+                            name="observation_days"
+                            tooltip="想让模型回看多少个交易日。A股每交易日 240 分钟，按输入周期换算成 bar 数 T。"
+                            extra={
+                              barsPerDay
+                                ? `每交易日 ${barsPerDay} 根 × ${observationDays} 日 → T = ${derivedLookback}`
+                                : `周期「${inputInterval}」无法自动换算，请改用「按 bar 数手填」`
+                            }
+                          >
+                            <InputNumber min={1} max={500} style={{ width: '100%' }} addonAfter="交易日" />
+                          </Form.Item>
+                        </Col>
+                        <Col span={12}>
+                          <Form.Item label="回看 bar 数 T（自动推算）" name="lookback">
+                            <InputNumber style={{ width: '100%' }} disabled />
+                          </Form.Item>
+                        </Col>
+                      </>
+                    ) : (
+                      <Col span={12}>
+                        <Form.Item label="Lookback（回看 bar 数 T）" name="lookback">
+                          <InputNumber min={10} max={LOOKBACK_MAX} style={{ width: '100%' }} />
+                        </Form.Item>
+                      </Col>
+                    )}
+                    <Col span={12}>
+                      <Form.Item label="Dropout" name="dropout">
+                        <InputNumber min={0} max={0.9} step={0.05} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="Train Ratio" name="train_ratio">
+                        <InputNumber min={0.5} max={0.95} step={0.05} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={24}>
+                      <Form.Item
+                        label="损失加权"
+                        name="loss_weighting"
+                        tooltip="magnitude 按 |未来收益| 加权，让大波动样本主导梯度，避免对 +0.01% 和 +5% 一视同仁。回归模式下不适用。"
+                      >
+                        <Select options={LOSS_WEIGHTING_OPTIONS} disabled={objective === 'regression'} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                </Form>
+
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 16 }}
+                  message={`输入张量预估: ${tensorEstimate.channels} x ${tensorEstimate.time} x ${tensorEstimate.width} x ${tensorEstimate.groups}`}
+                  description={`目标证券：${targetSymbol || '未填写'}；当前输入周期：${inputInterval}`}
+                />
+
+                {lookbackMode === 'window' && !barsPerDay ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={`周期「${inputInterval}」无法按交易日自动换算 T`}
+                    description="该周期不在标准换算表内（派生/自定义周期），请切换到「按 bar 数手填」直接设置回看 bar 数。"
+                  />
+                ) : null}
+
+                {lookbackOverLimit ? (
+                  <Alert
+                    type="error"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={`回看窗口 T=${lookback} 超过上限 ${LOOKBACK_MAX}`}
+                    description="分钟周期叠加多交易日会产生巨型张量（显存/训练时长爆炸）。请减少观测交易日数，或改用更大周期（如 5m/15m/d）。"
+                  />
+                ) : null}
+
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  block
+                  disabled={lookbackOverLimit || (lookbackMode === 'window' && !barsPerDay)}
+                  loading={submitting || task.data?.status === 'running'}
+                  onClick={() => void handleTrain()}
+                >
+                  启动 CNN 训练
+                </Button>
+              </Card>
+            </Space>
+          </Col>
+
+          <Col xs={24} xl={14}>
+            <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <Card
+                title="已保存 CNN 模型"
+                extra={<Button type="text" icon={<ReloadOutlined />} onClick={() => void refetchModels()} />}
+              >
+                {modelList}
+              </Card>
+
+              {viewDetail ? (
+                <Card
+                  title={`训练详情 · ${viewDetail.name}`}
+                  extra={
+                    <Space wrap>
+                      <Tag color="purple">{String(viewDetail.train_config.input_interval || viewDetail.input_interval || 'd')}</Tag>
+                      <Tag color="gold">最佳 Epoch {viewDetail.best_epoch || 0}</Tag>
+                    </Space>
+                  }
+                >
+                  <Descriptions size="small" bordered column={2} style={{ marginBottom: 16 }}>
+                    <Descriptions.Item label="目标证券">{String(viewDetail.train_config.target_symbol || '-')}</Descriptions.Item>
+                    <Descriptions.Item label="输入">{String(viewDetail.train_config.input_data_kind || 'bar')} / {String(viewDetail.train_config.input_interval || 'd')}</Descriptions.Item>
+                    <Descriptions.Item label="预测目标">
+                      {String(viewDetail.train_config.objective || 'classification') === 'regression' ? '收益回归' : '方向分类'}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="标签">{String((viewDetail.train_config.label_spec as { mode?: string } | undefined)?.mode || '-')}</Descriptions.Item>
+                    <Descriptions.Item label="最佳验证损失">{viewDetail.best_val_loss?.toFixed(4) || '-'}</Descriptions.Item>
+                    <Descriptions.Item label="标签阈值">
+                      {(() => {
+                        const t = (viewDetail.train_config.label_spec as { threshold?: number } | undefined)?.threshold
+                        return t ? `${(t * 100).toFixed(2)}%` : '关闭'
+                      })()}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="计价口径">
+                      {String((viewDetail.train_config.label_spec as { price_ref?: string } | undefined)?.price_ref || 'close')}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="损失加权">
+                      {String(viewDetail.train_config.loss_weighting || 'none')}
+                    </Descriptions.Item>
+                    <Descriptions.Item label="观测组数">{String((viewDetail.model_config.group_count as number | undefined) || 1)}</Descriptions.Item>
+                  </Descriptions>
+
+                  {(() => {
+                    const best = viewDetail.history?.find((item) => item.epoch === viewDetail.best_epoch)
+                    if (!best) return null
+                    const detailObjective = String(viewDetail.train_config.objective || 'classification')
+                    const excess = best.val_excess_acc
+                    const hasExcess = excess !== undefined && excess !== null
+                    const beats = hasExcess && excess > 0
+                    const valPosRatio = (viewDetail.dataset_info as Record<string, number> | undefined)?.val_pos_ratio
+                    if (detailObjective === 'regression') {
+                      return (
+                        <Card size="small" title="模型评估（最佳 Epoch · 回归）" style={{ marginBottom: 16 }}>
+                          <Descriptions size="small" bordered column={2}>
+                            <Descriptions.Item label="IC">{num3(best.val_ic)}</Descriptions.Item>
+                            <Descriptions.Item label="RankIC">{num3(best.val_rank_ic)}</Descriptions.Item>
+                            <Descriptions.Item label="MAE">{best.val_mae === undefined ? '-' : best.val_mae.toFixed(4)}</Descriptions.Item>
+                            <Descriptions.Item label="RMSE">{best.val_rmse === undefined ? '-' : best.val_rmse.toFixed(4)}</Descriptions.Item>
+                            <Descriptions.Item label="方向准确率">
+                              <Space size={6}>
+                                {pct(best.val_dir_acc)}
+                                <Tag color={beats ? 'green' : 'red'}>{beats ? '跑赢基线' : '未跑赢基线'}</Tag>
+                              </Space>
+                            </Descriptions.Item>
+                            <Descriptions.Item label="多数类基线">{pct(best.val_baseline_acc)}</Descriptions.Item>
+                          </Descriptions>
+                        </Card>
+                      )
+                    }
+                    return (
+                      <Card size="small" title="模型评估（最佳 Epoch）" style={{ marginBottom: 16 }}>
+                        <Descriptions size="small" bordered column={2}>
+                          <Descriptions.Item label="验证准确率">{pct(best.val_acc)}</Descriptions.Item>
+                          <Descriptions.Item label="多数类基线">{pct(best.val_baseline_acc)}</Descriptions.Item>
+                          <Descriptions.Item label="超额准确率">
+                            <Space size={6}>
+                              <span style={{ color: beats ? '#49aa19' : '#dc4446' }}>
+                                {hasExcess ? `${excess > 0 ? '+' : ''}${(excess * 100).toFixed(1)}%` : '-'}
+                              </span>
+                              <Tag color={beats ? 'green' : 'red'}>{beats ? '跑赢基线' : '未跑赢基线'}</Tag>
+                            </Space>
+                          </Descriptions.Item>
+                          <Descriptions.Item label="AUC">
+                            {best.val_auc === undefined || best.val_auc === null ? '-' : best.val_auc.toFixed(3)}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="F1">
+                            {best.val_f1 === undefined ? '-' : best.val_f1.toFixed(3)}
+                          </Descriptions.Item>
+                          <Descriptions.Item label="正样本比例(验证)">{pct(valPosRatio)}</Descriptions.Item>
+                        </Descriptions>
+                      </Card>
+                    )
+                  })()}
+
+                  <Card size="small" title="观测组配置" style={{ marginBottom: 16 }}>
+                    {Array.isArray(viewDetail.train_config.observation_groups) && viewDetail.train_config.observation_groups.length > 0 ? (
+                      <List
+                        size="small"
+                        dataSource={viewDetail.train_config.observation_groups as Array<Record<string, unknown>>}
+                        renderItem={(group) => (
+                          <List.Item>
+                            <List.Item.Meta
+                              title={
+                                <Space wrap>
+                                  <Text strong>{String(group.name || '-')}</Text>
+                                  <Tag>{String(group.role || 'custom')}</Tag>
+                                </Space>
+                              }
+                              description={Array.isArray(group.symbols) ? group.symbols.join(', ') : '-'}
+                            />
+                          </List.Item>
+                        )}
+                      />
+                    ) : (
+                      <Empty description="模型未记录观测组信息" />
+                    )}
+                  </Card>
+
+                  <ArchitectureCard arch={architecture} loading={archLoading} />
+
+                  <Card size="small" title="训练历史">
+                    <LossTable
+                      history={viewDetail.history}
+                      objective={String(viewDetail.train_config.objective || 'classification')}
+                    />
+                  </Card>
+                </Card>
+              ) : (
+                <Card title="训练详情">
+                  <Empty description="选择一个 CNN 模型后，这里会显示真实训练历史、观测组和标签配置" />
                 </Card>
               )}
             </Space>
-          </Card>
-        </Col>
-
-        {/* Right: Model List + Loss Chart */}
-        <Col xs={24} lg={14}>
-          {viewDetail && simulatedHistory.length > 0 && (
-            <Card
-              title={`Training Curve: ${viewDetail.name}`}
-              size="small"
-              style={{ marginBottom: 16 }}
-              extra={
-                <Text type="secondary">
-                  Val Loss: {viewDetail.metrics?.val_loss?.toFixed(4) || 'N/A'}
-                </Text>
-              }
-            >
-              <LossChart history={simulatedHistory} />
-            </Card>
-          )}
-
-          <Card
-            title="Saved Models"
-            size="small"
-            extra={<ReloadOutlined onClick={() => refetchModels()} style={{ cursor: 'pointer' }} />}
-          >
-            <Table
-              size="small"
-              columns={modelColumns}
-              dataSource={(models || []).map((name) => ({
-                name,
-                key: name,
-              }))}
-              pagination={false}
-              locale={{ emptyText: 'No models trained yet' }}
-            />
-          </Card>
-        </Col>
-      </Row>
+          </Col>
+        </Row>
+      </Space>
+      <ProfilingPanel
+        open={profilingOpen}
+        onClose={() => setProfilingOpen(false)}
+        targetSymbol={targetSymbol}
+        interval={inputInterval}
+        defaultAsOf={trainRange?.[0] || dayjs().subtract(3, 'year')}
+        observationGroups={observationGroups}
+        onApplySuggestion={handleApplyProfilingSuggestion}
+        onResultChange={(profile, historical) => {
+          setLatestProfile(profile)
+          setLatestProfileHistorical(historical)
+        }}
+      />
     </div>
   )
 }

@@ -1,0 +1,79 @@
+"""
+交易操作台（Trading Console）请求模型。
+
+把前端配置表单映射为编排器所需的请求对象，并提供到既有领域对象
+（`RiskConfig` / `PortfolioSnapshot`）的映射辅助。本层不含决策逻辑，
+仅做校验与字段转换。
+"""
+
+from datetime import datetime
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+from ..alpha.lab_utils import normalize_vt_symbol
+from ..live.decision_instant import SUPPORTED_BAR_FREQS
+from ..live.risk import RiskConfig
+from ..live.signal_service import PortfolioSnapshot
+
+
+class PortfolioSnapshotRequest(BaseModel):
+    """组合快照（与既有 PortfolioSnapshot 字段一一对应）。"""
+    portfolio_value: float = Field(description="组合总市值（现金+持仓）")
+    total_position_value: float = Field(default=0.0, description="当前总持仓市值")
+    current_position: int = Field(default=0, description="目标标的当前持仓股数")
+    current_symbol_value: float = Field(default=0.0, description="目标标的当前持仓市值")
+
+    def to_domain(self) -> PortfolioSnapshot:
+        """映射为既有 PortfolioSnapshot 领域对象。"""
+        return PortfolioSnapshot(
+            portfolio_value=self.portfolio_value,
+            total_position_value=self.total_position_value,
+            current_position=self.current_position,
+            current_symbol_value=self.current_symbol_value,
+        )
+
+
+class RiskConfigRequest(BaseModel):
+    """风控配置（映射 RiskConfig）。"""
+    blacklist: list[str] = Field(default_factory=list, description="禁止买入的标的列表")
+    max_total_position_ratio: float = Field(default=0.95, description="总持仓市值 / 组合市值 上限")
+    max_single_position_ratio: float = Field(default=0.30, description="单票市值 / 组合市值 上限")
+    allow_when_halted: bool = Field(default=False, description="停牌/涨跌停封死时是否允许交易")
+
+    def to_domain(self) -> RiskConfig:
+        """映射为既有 RiskConfig 领域对象；blacklist: list[str] -> set[str]。"""
+        return RiskConfig(
+            blacklist={normalize_vt_symbol(symbol) for symbol in self.blacklist},
+            max_total_position_ratio=self.max_total_position_ratio,
+            max_single_position_ratio=self.max_single_position_ratio,
+            allow_when_halted=self.allow_when_halted,
+        )
+
+
+class LiveDecisionRequest(BaseModel):
+    """触发一次今日决策的请求体。"""
+    model: str = Field(description="CNN 模型名（必填）")
+    vt_symbol: str = Field(description="目标标的（必填）")
+    scheme: str = Field(description="方案名（必填）")
+    as_of: Optional[datetime] = Field(default=None, description="决策时刻，缺省=当前；仅 close_time<=as_of 的 bar 可见")
+    bar_freq: str = Field(
+        default="1d",
+        description="决策 bar 频率（须与所选模型训练间隔一致）；1d=日频，分钟频=盘中逐 bar 决策",
+    )
+    data_source: Literal["upload", "pull"] = Field(default="pull", description="数据源")
+    portfolio: PortfolioSnapshotRequest
+    risk: RiskConfigRequest = Field(default_factory=RiskConfigRequest)
+    buy_threshold: float = Field(default=0.6, description="买入阈值")
+    position_ratio: float = Field(default=0.95, description="目标仓位比例")
+    min_volume: int = Field(default=100, description="最小成交手数")
+    model_version: str = Field(default="", description="模型版本，参与 signal_id")
+    halted: bool = Field(default=False, description="目标标的当日是否停牌/封死")
+    should_exit: bool = Field(default=False, description="是否触发出场，见“出场逻辑”")
+
+    @field_validator("bar_freq")
+    @classmethod
+    def _valid_bar_freq(cls, v: str) -> str:
+        if v not in SUPPORTED_BAR_FREQS:
+            raise ValueError(f"bar_freq 仅支持 {SUPPORTED_BAR_FREQS}：{v!r}")
+        return v

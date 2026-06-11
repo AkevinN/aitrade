@@ -14,3 +14,12 @@ dist/
 .DS_Store
 .aitrade/
 .cnn_models/
+.run/
+
+# 本地工具目录与数据包
+.cursor/
+.kiro/
+.playwright-cli/
+*.rar
+=*
+.claude/settings.local.json
