@@ -54,6 +54,8 @@ interface HistoryRow {
 const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
   const { message } = App.useApp()
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // 批量删除的勾选集合（rowKey = signal_id）。
+  const [checkedIds, setCheckedIds] = useState<React.Key[]>([])
 
   // 列表查询：signal_id 集合。
   const {
@@ -91,10 +93,27 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
     onSuccess: (_data, signalId) => {
       message.success('决策已删除（归档），同一 bar 可重新产出决策')
       if (selectedId === signalId) setSelectedId(null)
+      setCheckedIds((keys) => keys.filter((k) => k !== signalId))
       void refetchList()
     },
     onError: (e: unknown) =>
       message.error(e instanceof Error ? e.message : '删除失败，请重试'),
+  })
+
+  // 批量删除：与单条同语义（归档式），部分成功——缺失的由后端归入 missing 返回。
+  const batchDeleteMutation = useMutation({
+    mutationFn: (signalIds: string[]) => liveService.batchDeleteDecisions(signalIds),
+    onSuccess: (res) => {
+      message.success(
+        `已删除 ${res.deleted.length} 条决策（归档）` +
+          (res.missing.length ? `，${res.missing.length} 条不存在已跳过` : ''),
+      )
+      if (selectedId && res.deleted.includes(selectedId)) setSelectedId(null)
+      setCheckedIds([])
+      void refetchList()
+    },
+    onError: (e: unknown) =>
+      message.error(e instanceof Error ? e.message : '批量删除失败，请重试'),
   })
 
   const rows: HistoryRow[] = (signalIds ?? []).map((id) => ({ signal_id: id }))
@@ -163,6 +182,24 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+        <Popconfirm
+          title={`批量删除 ${checkedIds.length} 条决策？`}
+          description="所选决策与过程档案将移入归档；同一 bar 之后可重新产出决策与提醒。"
+          okText="确认删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => batchDeleteMutation.mutate(checkedIds as string[])}
+        >
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            disabled={checkedIds.length === 0}
+            loading={batchDeleteMutation.isPending}
+          >
+            批量删除{checkedIds.length > 0 ? ` (${checkedIds.length})` : ''}
+          </Button>
+        </Popconfirm>
         <Button
           size="small"
           icon={<ReloadOutlined />}
@@ -179,12 +216,20 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
         loading={listLoading}
         columns={columns}
         dataSource={rows}
+        rowSelection={{
+          selectedRowKeys: checkedIds,
+          onChange: setCheckedIds,
+        }}
         pagination={{ pageSize: 8, hideOnSinglePage: true }}
         locale={{
           emptyText: <Empty description="暂无历史决策记录" />,
         }}
         onRow={(record) => ({
-          onClick: () => setSelectedId(record.signal_id),
+          onClick: (e) => {
+            // 勾选列内的点击只切换选中，不打开详情弹窗。
+            if ((e.target as HTMLElement).closest('.ant-table-selection-column')) return
+            setSelectedId(record.signal_id)
+          },
           style: { cursor: 'pointer' },
         })}
       />

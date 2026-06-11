@@ -280,6 +280,49 @@ def test_delete_decision_not_found_returns_404(client, monkeypatch, tmp_path) ->
     assert "决策不存在" in resp.json()["detail"]
 
 
+def test_batch_delete_decisions_partial_success(client, monkeypatch, tmp_path) -> None:
+    """批量删除部分成功：存在的归档（决策 + trace），缺失的归入 missing，不整体失败。"""
+    from aitrade.live.decision_trace import DecisionTraceStore
+
+    test_client, store = client
+    trace_store = DecisionTraceStore(tmp_path / "decisions")
+    monkeypatch.setattr(live_api, "_trace_store", trace_store)
+
+    d1 = _decision()
+    d2 = _decision(signal_id=make_signal_id(BAR_DT, "1d", "另一方案", "v3"), scheme="另一方案")
+    store.save(d1)
+    store.save(d2)
+    trace_store.save_if_absent(
+        d1.signal_id,
+        {"schema_version": 1, "run_id": "r1", "signal_id": d1.signal_id,
+         "completed_sections": [], "sections": {}},
+    )
+
+    resp = test_client.post(
+        "/api/live/decisions/batch-delete",
+        json={"signal_ids": [d1.signal_id, "不存在的id", d2.signal_id, d1.signal_id]},
+    )
+    assert resp.status_code == 200
+    # 重复 id 去重、保持入参顺序。
+    assert resp.json() == {
+        "deleted": [d1.signal_id, d2.signal_id],
+        "missing": ["不存在的id"],
+    }
+
+    # 两条决策与 d1 的 trace 均已归档不可见；归档目录留有 3 个文件。
+    assert store.list_ids() == []
+    assert trace_store.get(d1.signal_id) is None
+    archived = list((tmp_path / "decisions" / "archive").glob("*.json"))
+    assert len(archived) == 3
+
+
+def test_batch_delete_decisions_empty_returns_400(client) -> None:
+    test_client, _ = client
+    resp = test_client.post("/api/live/decisions/batch-delete", json={"signal_ids": []})
+    assert resp.status_code == 400
+    assert "不能为空" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # 需求 7.3：接口文档标注无鉴权前置条件
 # ---------------------------------------------------------------------------

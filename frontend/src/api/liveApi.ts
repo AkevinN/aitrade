@@ -44,6 +44,15 @@ export const liveService = {
       )
       .then((r) => r.data),
 
+  // 批量归档式删除（部分成功语义：存在的归档，缺失的归入 missing 返回）。
+  batchDeleteDecisions: (signalIds: string[]) =>
+    api
+      .post<{ deleted: string[]; missing: string[] }>(
+        '/api/live/decisions/batch-delete',
+        { signal_ids: signalIds },
+      )
+      .then((r) => r.data),
+
   // ===== 交易计划自动化（Trading Plan Automation）=====
 
   // 列出所有交易计划摘要

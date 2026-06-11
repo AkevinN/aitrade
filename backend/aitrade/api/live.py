@@ -8,6 +8,7 @@
 - `GET    /api/live/decisions`：列出已持久化决策的 signal_id 集合。
 - `GET    /api/live/decisions/{signal_id}`：单条决策详情。
 - `DELETE /api/live/decisions/{signal_id}`：归档式删除决策 + trace（解除幂等占位）。
+- `POST   /api/live/decisions/batch-delete`：批量归档式删除（部分成功语义）。
 
 安全边界（v1）：本路由**不 import 也不调用任何券商网关 / 下单接口**，产出仅限
 Decision 落盘 + Notifier 提醒（Property 7）。当前后端无鉴权（TD-015），真实下单能力
@@ -229,6 +230,29 @@ async def delete_decision(signal_id: str) -> dict:
         "deleted": True,
         "trace_archived": trace_archived is not None,
     }
+
+
+@router.post(
+    "/decisions/batch-delete",
+    description=(
+        "批量归档式删除决策及其过程档案（语义与单条 DELETE 一致：移入 archive/、"
+        "解除幂等占位）。部分成功：存在的逐条归档，不存在的归入 missing 返回，"
+        "不因个别缺失而整体失败。signal_ids 为空则 400。"
+    ),
+)
+async def batch_delete_decisions(signal_ids: list[str] = Body(..., embed=True)) -> dict:
+    """批量归档决策 + trace；返回 {deleted, missing}（均保持入参顺序，重复 id 去重）。"""
+    if not signal_ids:
+        raise HTTPException(400, "signal_ids 不能为空")
+    deleted: list[str] = []
+    missing: list[str] = []
+    for signal_id in dict.fromkeys(signal_ids):  # 去重且保序
+        if _store.archive(signal_id) is None:
+            missing.append(signal_id)
+        else:
+            _trace_store.archive(signal_id)
+            deleted.append(signal_id)
+    return {"deleted": deleted, "missing": missing}
 
 
 # =============================================================================
