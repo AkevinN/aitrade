@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..alpha.lab_utils import normalize_vt_symbol
 from ..models import CNNTrainRequest, CNNBacktestRequest, CNNPredictRequest, TaskType
+from ..models.alpha import LabelMode
 from ..models.governance import (
     CNNCandidateTrainRequest,
     CNNGovernanceConfig,
@@ -284,6 +285,13 @@ async def start_cnn_train(req: CNNTrainRequest) -> dict:
     ):
         raise HTTPException(400, "oco 模式必须提供正的 take_profit 与 stop_loss（如 0.03 表示 3%）")
 
+    # Property 6 API 侧：path_class objective 必须配合 oco label，否则路径标签无法构建四类标注
+    if req.objective == "path_class" and label_spec.get("mode") != LabelMode.OCO:
+        raise HTTPException(
+            400,
+            "objective=path_class 需要 label_spec.mode=oco（路径标签依赖三重障碍判定）",
+        )
+
     task_id = task_manager.create_task(
         TaskType.CNN_TRAIN,
         params={"name": req.name, "symbols": effective_symbols},
@@ -542,6 +550,8 @@ def _run_cnn_backtest(
         "hold_days": hold_days,
         "take_profit": take_profit,
         "stop_loss": stop_loss,
+        # path_class 专用：否决阈值透传，非 path_class 场景下保持默认 1.0（等效关闭）
+        "veto_threshold": req.veto_threshold,
     }
     engine.add_strategy(CNNSignalStrategy, strategy_setting, signal_df)
 
@@ -587,6 +597,9 @@ def _run_cnn_backtest(
         }
 
     statistics = engine.calculate_statistics()
+    # path_class 否决计数：「本要买入却被否决的次数」，供前端显示策略激进程度
+    # 防御式读取：非 path_class 场景下策略无 _veto_count 属性时回退 0
+    statistics["veto_count"] = int(getattr(engine.strategy, "_veto_count", 0))
     # 回传本次回测使用的成本参数，便于前端展示「成本假设」
     statistics["commission_rate"] = req.commission_rate
     statistics["stamp_duty"] = req.stamp_duty

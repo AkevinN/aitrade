@@ -58,6 +58,9 @@ class CNNBacktestParams(BaseModel):
 
     控制信号阈值（buy_threshold / sell_threshold）、A 股交易成本（佣金/印花税/滑点）
     以及出场模式（threshold / fixed_hold / oco / auto）；T+1 默认开启贴近 A 股现实。
+
+    ``veto_threshold`` 仅在 objective='path_class' 时生效：当「先触止损」类概率
+    prob_sl >= 该值时否决买入；默认 1.0 等效关闭（向后兼容）。
     """
 
     buy_threshold: float = 0.6
@@ -71,6 +74,15 @@ class CNNBacktestParams(BaseModel):
     take_profit: float = Field(default=0.0, ge=0, lt=1)
     stop_loss: float = Field(default=0.0, ge=0, lt=1)
     t_plus1: bool = False
+    veto_threshold: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "path_class 专用：先触止损概率 prob_sl >= 该值时否决买入；"
+            "默认 1.0 等效关闭否决（向后兼容）。"
+        ),
+    )
 
 
 class CNNPromotionGate(BaseModel):
