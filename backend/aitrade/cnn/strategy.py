@@ -11,17 +11,29 @@ CNN 专用回测策略 —— 单标的、由 CNN 概率信号驱动。
 说明：共享回测引擎采用「下一根 bar 成交」（T 下单、T+1 成交）。因此 fixed_hold 的
 实际成交是「按下一根 bar 撮合」，与 label 的收盘价口径存在一根 bar 的执行近似；
 入场/出场价精确口径（close vs next_open）由 LabelSpec.price_ref 在迭代 1 收敛。
+
+path_class 七列信号（含 prob_sl）下可启用入场否决：``veto_threshold`` 控制否决阈值，
+prob_sl >= veto_threshold 时拒绝新建仓，仅影响开仓判断，出场逻辑不受任何影响。
+classification/regression 三列信号（无 prob_sl）时否决逻辑自动关闭，向后兼容。
 """
 
 from datetime import date
 from typing import Optional
+
+import polars as pl
 
 from ..backtest.strategy import BaseStrategy
 from ..backtest.types import Direction, TradeData, BarData
 
 
 class CNNSignalStrategy(BaseStrategy):
-    """由 CNN 概率信号驱动的单标的策略。"""
+    """由 CNN 概率信号驱动的单标的策略。
+
+    三种出场模式（threshold / fixed_hold / oco）均支持「入场否决」机制：
+    path_class 信号含 prob_sl 列时，若 prob_sl >= veto_threshold 则拒绝新建仓（
+    否决计数记入 _veto_count），仅影响入场判断，出场逻辑始终执行。
+    classification/regression 信号无 prob_sl 列时否决恒为 False，完全向后兼容。
+    """
 
     buy_threshold: float = 0.6     # 概率 > 该值买入
     sell_threshold: float = 0.4    # 概率 < 该值卖出（仅 threshold 模式使用）
@@ -32,6 +44,7 @@ class CNNSignalStrategy(BaseStrategy):
     hold_days: int = 1             # fixed_hold/oco：固定/最大持有交易日数（oco 下为时间回退，0=不启用）
     take_profit: float = 0.0       # oco：止盈幅度（如 0.02=+2%），0=不启用
     stop_loss: float = 0.0         # oco：止损幅度（如 0.03=-3%），0=不启用
+    veto_threshold: float = 1.0    # path_class：信号行 prob_sl >= 该值则否决买入；1.0=等效关闭（向后兼容）
 
     def on_init(self) -> None:
         """策略初始化回调 —— 重置内部持仓状态并记录初始化日志。"""
@@ -40,7 +53,37 @@ class CNNSignalStrategy(BaseStrategy):
         self._entry_price: Optional[float] = None    # 当前持仓的建仓成交价（OCO 止盈止损基准）
         self._hold_count: int = 0                    # 自建仓起已持有的交易日数
         self._last_count_dt: Optional[date] = None   # 上次计数的交易日（防同日重复计数）
+        self._veto_count: int = 0                    # path_class 否决买入的累计次数（供外部任务读取）
         self.write_log(f"CNN 信号策略已初始化，出场模式={self.exit_mode}")
+
+    def _entry_vetoed(self, signal: pl.DataFrame) -> bool:
+        """入场否决检查：信号含 prob_sl 列且首行 prob_sl >= veto_threshold 时返回 True。
+
+        classification/regression 信号无 prob_sl 列，恒返回 False（向后兼容）。
+        触发时 write_log 记录否决事件（含 prob_sl 值）并累计 _veto_count。
+        仅在「空仓考虑入场」时由各入场分支调用（持仓时不调用、不计数），
+        三种出场模式语义一致。
+
+        Args:
+            signal: get_signal() 返回的当前时刻信号 DataFrame（非空）。
+
+        Returns:
+            True 表示触发否决（不应开新仓）；False 表示允许正常入场判断。
+
+        Example:
+            >>> if not signal.is_empty() and not self._entry_vetoed(signal):
+            ...     # 继续判断 prob > buy_threshold ...
+        """
+        if "prob_sl" not in signal.columns:
+            return False
+        prob_sl = float(signal["prob_sl"][0])
+        if prob_sl >= self.veto_threshold:
+            self._veto_count += 1
+            self.write_log(
+                f"否决买入: prob_sl={prob_sl:.3f} >= veto_threshold={self.veto_threshold}"
+            )
+            return True
+        return False
 
     def on_trade(self, trade: TradeData) -> None:
         """成交回报回调 —— 维护固定持有计数与建仓价。
@@ -104,7 +147,7 @@ class CNNSignalStrategy(BaseStrategy):
         current_pos = self.get_pos(vt_symbol)
         portfolio_value = self.get_portfolio_value()
 
-        if prob > self.buy_threshold and current_pos == 0:
+        if prob > self.buy_threshold and current_pos == 0 and not self._entry_vetoed(signal):
             volume = self._target_volume(portfolio_value, bar.close_price)
             if volume >= self.min_volume:
                 self.set_target(vt_symbol, volume)
@@ -147,10 +190,10 @@ class CNNSignalStrategy(BaseStrategy):
                 self.execute_trading(bars, price_add=self.price_add)
                 return
 
-        # 2) 入场：空仓且无在途建仓，概率达标才买入
+        # 2) 入场：空仓且无在途建仓，概率达标且未被否决才买入
         if current_pos == 0 and self._entry_fill_dt is None:
             signal = self.get_signal()
-            if not signal.is_empty():
+            if not signal.is_empty() and not self._entry_vetoed(signal):
                 prob = float(signal["signal"][0])
                 if prob > self.buy_threshold:
                     volume = self._target_volume(self.get_portfolio_value(), bar.close_price)
@@ -215,10 +258,10 @@ class CNNSignalStrategy(BaseStrategy):
                     self.execute_trading(bars, price_add=self.price_add)
             return
 
-        # 2) 空仓：概率达标建仓
+        # 2) 空仓：概率达标且未被否决才建仓
         if current_pos == 0 and self._entry_fill_dt is None:
             signal = self.get_signal()
-            if not signal.is_empty():
+            if not signal.is_empty() and not self._entry_vetoed(signal):
                 prob = float(signal["signal"][0])
                 if prob > self.buy_threshold:
                     volume = self._target_volume(self.get_portfolio_value(), bar.close_price)
