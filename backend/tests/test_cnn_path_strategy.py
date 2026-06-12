@@ -272,6 +272,29 @@ def test_veto_does_not_affect_exit_fixed_hold() -> None:
     assert sell_trades[0].datetime.date() == days[2].date()
 
 
+def test_veto_not_counted_when_prob_below_threshold() -> None:
+    """新增：prob_tp < buy_threshold 时即使 prob_sl 高于 veto_threshold，否决计数应为 0。
+
+    守护「统一否决时机」的核心语义：_entry_vetoed 仅在概率达标、即将下买单前调用，
+    不达标就不进入否决判断，计数不增加、日志不产生。
+    """
+    closes = [100.0 + i for i in range(6)]
+    bars, days = _build_bars(closes)
+    # prob_tp 全程 0.3，低于 buy_threshold=0.6，不会尝试买入
+    # prob_sl 全程 0.9，高于 veto_threshold=0.5，若在概率判断前检查则会错误计数
+    signal_df = _signal_df_path(days, [0.3] * 6, [0.9] * 6)
+
+    engine = _run(
+        bars, days, signal_df,
+        {"buy_threshold": 0.6, "exit_mode": "threshold", "veto_threshold": 0.5},
+    )
+
+    assert len(_buy_trades(engine)) == 0, "概率不达标时应无任何买入"
+    assert engine.strategy._veto_count == 0, (
+        "概率未达标时不应调用否决检查，veto_count 应为 0"
+    )
+
+
 def test_veto_log_written_on_trigger() -> None:
     """① 否决触发时，engine.logs 中应有包含'否决买入'的条目。"""
     closes = [100.0 + i for i in range(4)]
@@ -393,3 +416,4 @@ def test_property4b_no_prob_sl_matches_veto1_baseline(params) -> None:
     for t1, t2 in zip(trades_test, trades_base, strict=True):
         assert t1.direction == t2.direction, "成交方向应一致"
         assert t1.datetime.date() == t2.datetime.date(), "成交日期应一致"
+        assert t1.volume == t2.volume, "成交量应一致"

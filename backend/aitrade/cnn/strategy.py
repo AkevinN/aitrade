@@ -59,28 +59,36 @@ class CNNSignalStrategy(BaseStrategy):
     def _entry_vetoed(self, signal: pl.DataFrame) -> bool:
         """入场否决检查：信号含 prob_sl 列且首行 prob_sl >= veto_threshold 时返回 True。
 
+        **仅在「概率达标、即将下买单」之前调用**——三种出场模式（threshold/fixed_hold/oco）
+        语义完全对齐：_veto_count 统计的是「本要买入却被否决的次数」，空仓期间概率不达标
+        时不调用此方法，不产生无意义的否决计数与日志。
+
         classification/regression 信号无 prob_sl 列，恒返回 False（向后兼容）。
-        触发时 write_log 记录否决事件（含 prob_sl 值）并累计 _veto_count。
-        仅在「空仓考虑入场」时由各入场分支调用（持仓时不调用、不计数），
-        三种出场模式语义一致。
+        触发时 write_log 记录否决事件（含引擎时刻与 prob_sl 值）并累计 _veto_count。
+        仅在「空仓考虑入场」时由各入场分支调用（持仓时不调用、不计数）。
 
         Args:
             signal: get_signal() 返回的当前时刻信号 DataFrame（非空）。
+                    调用方应已确认 prob > buy_threshold 后再调用本方法。
 
         Returns:
             True 表示触发否决（不应开新仓）；False 表示允许正常入场判断。
 
         Example:
-            >>> if not signal.is_empty() and not self._entry_vetoed(signal):
-            ...     # 继续判断 prob > buy_threshold ...
+            >>> prob = float(signal["signal"][0])
+            >>> if prob > self.buy_threshold and not self._entry_vetoed(signal):
+            ...     # 下买单
         """
         if "prob_sl" not in signal.columns:
             return False
         prob_sl = float(signal["prob_sl"][0])
         if prob_sl >= self.veto_threshold:
             self._veto_count += 1
+            engine_dt = self.strategy_engine.datetime
+            dt_str = f" {engine_dt}" if engine_dt is not None else ""
             self.write_log(
-                f"否决买入: prob_sl={prob_sl:.3f} >= veto_threshold={self.veto_threshold}"
+                f"否决买入:{dt_str} prob_sl={prob_sl:.3f}"
+                f" >= veto_threshold={self.veto_threshold}"
             )
             return True
         return False
@@ -193,9 +201,9 @@ class CNNSignalStrategy(BaseStrategy):
         # 2) 入场：空仓且无在途建仓，概率达标且未被否决才买入
         if current_pos == 0 and self._entry_fill_dt is None:
             signal = self.get_signal()
-            if not signal.is_empty() and not self._entry_vetoed(signal):
+            if not signal.is_empty():
                 prob = float(signal["signal"][0])
-                if prob > self.buy_threshold:
+                if prob > self.buy_threshold and not self._entry_vetoed(signal):
                     volume = self._target_volume(self.get_portfolio_value(), bar.close_price)
                     if volume >= self.min_volume:
                         self.set_target(vt_symbol, volume)
@@ -261,9 +269,9 @@ class CNNSignalStrategy(BaseStrategy):
         # 2) 空仓：概率达标且未被否决才建仓
         if current_pos == 0 and self._entry_fill_dt is None:
             signal = self.get_signal()
-            if not signal.is_empty() and not self._entry_vetoed(signal):
+            if not signal.is_empty():
                 prob = float(signal["signal"][0])
-                if prob > self.buy_threshold:
+                if prob > self.buy_threshold and not self._entry_vetoed(signal):
                     volume = self._target_volume(self.get_portfolio_value(), bar.close_price)
                     if volume >= self.min_volume:
                         self.set_target(vt_symbol, volume)
