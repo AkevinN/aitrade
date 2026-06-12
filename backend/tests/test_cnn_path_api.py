@@ -18,6 +18,8 @@ Feature: cnn-path-multiclass-head
 Property 8: 对任意合法 oco label_spec，derive_strategy_exit_from_label 推导的出场参数
 与 label oco 口径相等；对推导口径调用 check_label_strategy_consistency 告警为空或不含
 oco 口径错配项；故意破坏出场参数后告警非空且不中断（返回告警而非抛异常）。
+注意：「不中断」性质仅对合法 exit_mode 组合成立（如 threshold+oco label → 软性告警）；
+fixed_hold+oco label 属硬性错配，consistency.py 会抛 ValueError，不在「不中断」覆盖范围。
 """
 
 from __future__ import annotations
@@ -175,10 +177,22 @@ def _run_engine(
 
 @pytest.fixture(scope="module")
 def app_client():
-    """模块级 TestClient（不涉及 I/O 的纯校验测试可共用）。"""
+    """模块级 TestClient（不涉及 I/O 的纯校验测试可共用）。
+
+    同时将 task_manager.run_async patch 为 no-op，避免测试向真实
+    ThreadPoolExecutor 提交训练/回测任务，防止污染本机任务历史归档
+    （.aitrade/task_history）。断言仅关心同步校验结果（状态码），
+    异步执行路径不在测试范围内。
+    """
+    from unittest.mock import patch
+
     app = create_app()
-    with TestClient(app) as c:
-        yield c
+    # patch aitrade.api.cnn 命名空间内的 task_manager.run_async：
+    # api/cnn.py 通过 `from ..task import task_manager` 导入，
+    # 因此需 patch 该模块内已绑定的对象属性，而非 task 包的原始引用
+    with patch("aitrade.api.cnn.task_manager.run_async", return_value=None):
+        with TestClient(app) as c:
+            yield c
 
 
 class TestPathClassTrainValidation:
@@ -382,7 +396,6 @@ class TestMergeTrainingMetrics:
         构造合成 checkpoint + history 文件，验证 best_val_rank_ic 被正确注入。
         """
         import json
-        import torch
 
         model_name = "test_merge_model"
         # 构造最小 history（3 个 epoch，best 在第 2 个）
@@ -394,13 +407,11 @@ class TestMergeTrainingMetrics:
         history_path = tmp_path / f"{model_name}_history.json"
         history_path.write_text(json.dumps(history), encoding="utf-8")
 
-        # 保存合成 checkpoint（只需含 best_epoch 和 objective）
+        # checkpoint 直接传给 _merge_training_metrics（不需要 .pt 文件）
         checkpoint = {
             "best_epoch": 2,
             "train_config": {"objective": "regression"},
         }
-        model_path = tmp_path / f"{model_name}.pt"
-        torch.save(checkpoint, str(model_path))
 
         # 临时 patch CNN_MODEL_DIR
         import aitrade.cnn.governance as gov_module
@@ -418,7 +429,6 @@ class TestMergeTrainingMetrics:
     def test_merge_path_class_injects_tp_sl_auc(self, tmp_path) -> None:
         """_merge_training_metrics 对 path_class 注入 best_val_tp_auc / best_val_sl_auc。"""
         import json
-        import torch
 
         model_name = "test_path_merge"
         history = [
@@ -428,12 +438,11 @@ class TestMergeTrainingMetrics:
         history_path = tmp_path / f"{model_name}_history.json"
         history_path.write_text(json.dumps(history), encoding="utf-8")
 
+        # checkpoint 直接传给 _merge_training_metrics（不需要 .pt 文件）
         checkpoint = {
             "best_epoch": 2,
             "train_config": {"objective": "path_class"},
         }
-        model_path = tmp_path / f"{model_name}.pt"
-        torch.save(checkpoint, str(model_path))
 
         import aitrade.cnn.governance as gov_module
         original_dir = gov_module.CNN_MODEL_DIR
@@ -536,6 +545,30 @@ class TestVetoCountEngineContract:
         count = getattr(engine.strategy, "_veto_count", 0)
         assert isinstance(count, int)
 
+    def test_veto_count_readable_after_zero_trade_backtest(self) -> None:
+        """零成交回测（全程被否决）后，_veto_count 仍可防御式读取。
+
+        覆盖 _run_cnn_backtest 无成交早退分支中 veto_count 字段的读取路径：
+        engine.run_backtesting() 已执行，engine.strategy 存在，_veto_count 可读。
+        """
+        closes = [10.0] * 10
+        bars, days = _build_bars(closes)
+        n = len(days)
+        # prob_sl 全为 0.9，veto_threshold=0.5 → 全程被否决 → 零成交
+        signal_df = _signal_df_path(
+            days,
+            probs_tp=[0.9] * n,   # signal 高于 buy_threshold，本要买入
+            probs_sl=[0.9] * n,   # prob_sl >= veto_threshold，触发否决
+        )
+        engine = _run_engine(bars, days, signal_df, self._base_setting(veto_threshold=0.5))
+
+        # 零成交场景：trade_count == 0，但 _veto_count 仍应可防御式读取
+        assert engine.trade_count == 0, "全程否决应导致零成交"
+        veto_count = int(getattr(engine.strategy, "_veto_count", 0))
+        assert veto_count > 0, (
+            "全程否决后 _veto_count 应 > 0（API 早退分支依赖此值解释零成交原因）"
+        )
+
 
 # =============================================================================
 # 6.5  Property 8（Hypothesis）：label ↔ 策略 consistency，oco 场景
@@ -588,7 +621,7 @@ def test_property8_oco_consistency(
     assert not mismatched, f"对齐口径不应有错配告警: {mismatched}"
 
     # (c) 故意改出场参数 → 告警非空，且是返回告警而非抛异常（不中断语义）
-    # 改 exit_mode 为 fixed_hold（与 oco label 不对齐）
+    # 改 exit_mode 为 threshold（与 oco label 不对齐，软性告警路径）
     warnings_broken = check_label_strategy_consistency(
         label_spec, "threshold", max_hold, input_interval
     )

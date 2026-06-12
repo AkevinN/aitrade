@@ -401,14 +401,12 @@ def _merge_training_metrics(
         model_name: 模型名称（不含 .pt 后缀），用于定位 _history.json 文件。
         checkpoint: 已加载的 checkpoint 字典，须含 best_epoch 键。
     """
-    import json as _json
-
     history_path = CNN_MODEL_DIR / f"{model_name}_history.json"
     if not history_path.exists():
         return
     try:
         with history_path.open(encoding="utf-8") as file:
-            history: list[dict[str, Any]] = _json.load(file)
+            history: list[dict[str, Any]] = json.load(file)
     except (OSError, ValueError):
         return
 

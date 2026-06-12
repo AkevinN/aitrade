@@ -12,7 +12,6 @@ from fastapi import APIRouter, HTTPException
 
 from ..alpha.lab_utils import normalize_vt_symbol
 from ..models import CNNTrainRequest, CNNBacktestRequest, CNNPredictRequest, TaskType
-from ..models.alpha import LabelMode
 from ..models.governance import (
     CNNCandidateTrainRequest,
     CNNGovernanceConfig,
@@ -286,7 +285,7 @@ async def start_cnn_train(req: CNNTrainRequest) -> dict:
         raise HTTPException(400, "oco 模式必须提供正的 take_profit 与 stop_loss（如 0.03 表示 3%）")
 
     # Property 6 API 侧：path_class objective 必须配合 oco label，否则路径标签无法构建四类标注
-    if req.objective == "path_class" and label_spec.get("mode") != LabelMode.OCO:
+    if req.objective == "path_class" and label_spec.get("mode") != "oco":  # 与上方 "oco" 字符串风格一致（LabelMode.OCO.value == "oco"，等价）
         raise HTTPException(
             400,
             "objective=path_class 需要 label_spec.mode=oco（路径标签依赖三重障碍判定）",
@@ -584,12 +583,14 @@ def _run_cnn_backtest(
 
     if daily_df is None or engine.trade_count == 0:
         logger.warning("CNN 回测期间无成交记录")
+        # veto_count 在零成交时尤其有意义：激进 veto 导致全程否决恰是最需要解释的场景
         return {
             "name": req.name,
             "statistics": {
                 "error": "回测期间无成交，请调整阈值或检查数据",
                 "capital": req.capital,
                 "total_trade_count": 0,
+                "veto_count": int(getattr(engine.strategy, "_veto_count", 0)),
             },
             # 字段恒在：无成交即空成交列表与空净值曲线
             "trades": [],
