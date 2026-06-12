@@ -22,6 +22,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import polars as pl
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -272,11 +273,26 @@ def test_veto_does_not_affect_exit_fixed_hold() -> None:
     assert sell_trades[0].datetime.date() == days[2].date()
 
 
-def test_veto_not_counted_when_prob_below_threshold() -> None:
-    """新增：prob_tp < buy_threshold 时即使 prob_sl 高于 veto_threshold，否决计数应为 0。
+@pytest.mark.parametrize("exit_mode,extra_setting", [
+    ("threshold", {}),
+    ("fixed_hold", {"hold_days": 2}),
+    ("oco", {"hold_days": 2, "take_profit": 0.5, "stop_loss": 0.5}),
+])
+def test_veto_not_counted_when_prob_below_threshold(
+    exit_mode: str, extra_setting: dict
+) -> None:
+    """prob_tp < buy_threshold 时，无论 exit_mode 为何，否决计数均应为 0。
 
     守护「统一否决时机」的核心语义：_entry_vetoed 仅在概率达标、即将下买单前调用，
     不达标就不进入否决判断，计数不增加、日志不产生。
+
+    三种 exit_mode（threshold / fixed_hold / oco）均需覆盖，因为 fixed_hold / oco
+    模式的否决路径与 threshold 不同，历史上曾独立出现过回退风险。
+
+    Args:
+        exit_mode: 出场模式，参数化为 threshold / fixed_hold / oco。
+        extra_setting: 对应 exit_mode 所需的额外 setting 项，如 hold_days、
+            take_profit、stop_loss。
     """
     closes = [100.0 + i for i in range(6)]
     bars, days = _build_bars(closes)
@@ -284,14 +300,14 @@ def test_veto_not_counted_when_prob_below_threshold() -> None:
     # prob_sl 全程 0.9，高于 veto_threshold=0.5，若在概率判断前检查则会错误计数
     signal_df = _signal_df_path(days, [0.3] * 6, [0.9] * 6)
 
-    engine = _run(
-        bars, days, signal_df,
-        {"buy_threshold": 0.6, "exit_mode": "threshold", "veto_threshold": 0.5},
-    )
+    setting: dict = {"buy_threshold": 0.6, "exit_mode": exit_mode, "veto_threshold": 0.5}
+    setting.update(extra_setting)
+
+    engine = _run(bars, days, signal_df, setting)
 
     assert len(_buy_trades(engine)) == 0, "概率不达标时应无任何买入"
     assert engine.strategy._veto_count == 0, (
-        "概率未达标时不应调用否决检查，veto_count 应为 0"
+        f"概率未达标时不应调用否决检查，veto_count 应为 0（exit_mode={exit_mode}）"
     )
 
 
