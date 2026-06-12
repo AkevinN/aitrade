@@ -156,11 +156,18 @@ def ohlc_path_strategy(draw):
 
     价格用围绕入场价的小步随机游走生成，使 tp/sl/time/skip 四种分支均有可观概率出现：
     - scale ∈ [0.001, 0.2] 控制步幅：小值→安静走到期（time），大值→快速触发障碍（tp/sl）。
-    - 序列长度在 [max_hold+1, max_hold+5] 随机，使 skip 分支（fallback 越界）真实可达。
+    - skip 分支（fallback 越界）由显式布尔控制占比约 10%，避免 st.integers 偏向下边界
+      导致 skip 淹没有效路径（旧口径 skip ≈ 70%，修复后 skip ≈ 10%）。
+
+    Skip 判定原理（anchor=0, entry_index=1）：
+      fallback_index = entry_index + max_hold + 1 = max_hold + 2
+      skip ⟺ fallback_index >= n ⟺ n <= max_hold + 2
+      因此：want_skip → n ∈ {max_hold+1, max_hold+2}（必越界）
+            否则   → n ∈ {max_hold+3, max_hold+4, max_hold+5}（必不越界，可走完整扫描+兜底）
 
     Returns:
         (opens, highs, lows, spec, threshold, neutral_policy)：
-        - opens/highs/lows 是 float64 numpy 数组，长度在 [max_hold+1, max_hold+5]。
+        - opens/highs/lows 是 float64 numpy 数组。
         - spec 是规整后的 OCO label_spec 字典，mode="oco"。
         - threshold ∈ [0, 0.01]。
         - neutral_policy ∈ {"drop", "negative"}。
@@ -171,13 +178,18 @@ def ohlc_path_strategy(draw):
     threshold = draw(st.floats(min_value=0.0, max_value=0.01))
     neutral_policy = draw(st.sampled_from(["drop", "negative"]))
 
-    # 长度在 [max_hold+1, max_hold+5]：
-    #   - max_hold+1 对应 fallback_index = 1+max_hold+1 = max_hold+2 > max_hold+1 → skip
-    #   - max_hold+5 保证 fallback 可访问，路径有机会走完
-    n = draw(st.integers(min_value=max_hold + 1, max_value=max_hold + 5))
+    # 显式控制 skip 分支：约 10% 概率走越界路径，其余走完整路径
+    # 用 st.integers(0, 9) == 0 得到均匀 ~10%，不依赖 st.integers 的边界偏好
+    want_skip = draw(st.integers(min_value=0, max_value=9)) == 0
+    if want_skip:
+        # n ∈ {max_hold+1, max_hold+2}：fallback_index = max_hold+2 >= n → 必 skip
+        n = draw(st.integers(min_value=max_hold + 1, max_value=max_hold + 2))
+    else:
+        # n ∈ {max_hold+3, max_hold+4, max_hold+5}：fallback_index = max_hold+2 < n → 必不 skip
+        n = draw(st.integers(min_value=max_hold + 3, max_value=max_hold + 5))
 
     base = draw(st.floats(min_value=10.0, max_value=1000.0))
-    # 步幅尺度：上限 0.2 使 time 出场占 ~20%、skip 占 ~40%，四分类均可观
+    # 步幅尺度：上限 0.2；scale <= 0.2 与 base >= 10 共同保证所有价格均为正数
     scale = draw(st.floats(min_value=0.001, max_value=0.2))
 
     opens_vals: list[float] = []
@@ -196,7 +208,7 @@ def ohlc_path_strategy(draw):
         wick = draw(st.floats(min_value=0.0, max_value=abs(scale) * 0.5))
         hi = max(o, c) * (1.0 + wick)
         lo = min(o, c) / (1.0 + wick)
-        # 采样下界已保证正数（base >= 10，scale <= 0.8），无需额外钳制
+        # 采样下界已保证正数（base >= 10，scale <= 0.2），无需额外钳制
         opens_vals.append(o)
         highs_vals.append(hi)
         lows_vals.append(lo)
