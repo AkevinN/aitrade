@@ -166,6 +166,16 @@ class CNNBacktestRequest(BaseModel):
     take_profit: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止盈幅度（0.02=+2%），0=不启用")
     stop_loss: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止损幅度（0.03=-3%），0=不启用")
     t_plus1: bool = Field(default=False, description="是否启用 T+1 卖出限制（当日买入不可当日卖出）")
+    veto_threshold: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "path_class 回测专用否决阈值（取值范围 (0, 1]）："
+            "当模型预测的「先触止损」类概率 prob_sl ≥ 该值时，否决本次买入信号。"
+            "默认 1.0 表示关闭否决（prob_sl 永远达不到 1.0），与旧版行为完全兼容。"
+        ),
+    )
 
 
 class CNNPredictRequest(BaseModel):
@@ -201,9 +211,13 @@ class CNNTrainRequest(BaseModel):
         default="none",
         description="损失加权：none=普通BCE；magnitude=按|未来收益|加权，让大波动样本主导梯度（仅分类）",
     )
-    objective: Literal["classification", "regression"] = Field(
+    objective: Literal["classification", "regression", "path_class"] = Field(
         default="classification",
-        description="预测目标：classification=方向二分类(输出概率)；regression=直接预测涨跌幅(输出预测收益)",
+        description=(
+            "预测目标：classification=方向二分类（输出概率）；"
+            "regression=直接预测涨跌幅（输出预测收益）；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
+        ),
     )
 
 

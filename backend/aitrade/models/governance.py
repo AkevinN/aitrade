@@ -102,7 +102,13 @@ class CNNWalkForwardRequest(BaseModel):
     train_days: int = Field(default=720, ge=30)
     test_days: int = Field(default=90, ge=1)
     step_days: Optional[int] = Field(default=None, ge=1)
-    objective: Literal["classification", "regression"] = "classification"
+    objective: Literal["classification", "regression", "path_class"] = Field(
+        default="classification",
+        description=(
+            "预测目标：classification=方向二分类；regression=涨跌幅回归；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌）"
+        ),
+    )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)
     observation_groups: list[ObservationGroup] = Field(default_factory=list)
     training_params: CNNTrainingParams = Field(default_factory=CNNTrainingParams)
@@ -154,7 +160,13 @@ class CNNGovernanceReplayRequest(BaseModel):
     evaluation_period_days: int = Field(default=30, ge=1)
     test_period_days: int = Field(default=30, ge=1)
     capital: float = Field(default=1_000_000, gt=0)
-    objective: Literal["classification", "regression"] = "classification"
+    objective: Literal["classification", "regression", "path_class"] = Field(
+        default="classification",
+        description=(
+            "预测目标：classification=方向二分类；regression=涨跌幅回归；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌）"
+        ),
+    )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)
     observation_groups: list[ObservationGroup] = Field(default_factory=list)
     training_params: CNNTrainingParams = Field(default_factory=CNNTrainingParams)
