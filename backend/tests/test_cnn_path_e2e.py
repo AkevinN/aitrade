@@ -225,9 +225,12 @@ def test_path_class_e2e_full_pipeline(tmp_path, monkeypatch) -> None:
     assert set(cd.keys()) == {"tp_first", "sl_first", "time_up", "time_down"}, (
         f"class_distribution 键不完整: {cd.keys()}"
     )
-    # 至少要有样本（合成数据足够长，必然有标签）
-    total_samples = sum(cd.values())
-    assert total_samples > 0, "class_distribution 全为 0，合成数据未能生成标签"
+    # 四类路径标签均须有样本（当前固定种子 seed=42 下实测分布：
+    # {tp_first:46, sl_first:46, time_up:7, time_down:5}，四类全非零；
+    # 若未来改种子，合成行情参数需保证四类路径均可覆盖）
+    assert all(v > 0 for v in cd.values()), (
+        f"class_distribution 存在零样本类，合成数据未能覆盖四类路径: {cd}"
+    )
 
     # ------------------------------------------------------------------
     # 阶段 2：推理（predict_cnn_signals，七列信号帧）
@@ -303,9 +306,13 @@ def test_path_class_e2e_full_pipeline(tmp_path, monkeypatch) -> None:
     except Exception as exc:
         pytest.fail(f"calculate_result/calculate_statistics 异常: {exc}")
 
-    # _veto_count >= 0（属性存在且为非负整数）
+    # _veto_count > 0：当前数据实测否决触发 2 次（veto_threshold=0.3，buy_threshold=0.3，seed=42）；
+    # >=0 对任意整数恒真，无守护力；若 veto 机制失效（计数始终为 0）此处会暴露问题
     assert hasattr(engine.strategy, "_veto_count"), "CNNSignalStrategy 缺少 _veto_count 属性"
-    assert engine.strategy._veto_count >= 0, "_veto_count 不应为负数"
+    assert engine.strategy._veto_count > 0, (
+        f"_veto_count={engine.strategy._veto_count}，veto 否决机制应至少触发一次"
+        "（当前 buy_threshold=0.3，veto_threshold=0.3，seed=42 下实测=2）"
+    )
 
     # ------------------------------------------------------------------
     # 阶段 4：全链路耗时报告（供 CI 参考，不断言）

@@ -697,12 +697,12 @@ flowchart TB
 
 | 标签 | 编码 | 含义 | 触发条件 |
 |------|------|------|----------|
-| `tp_first` | 0 | 止盈先触发 | 持仓期内收盘价首先触及 `+take_profit` 障碍 |
-| `sl_first` | 1 | 止损先触发 | 持仓期内收盘价首先触及 `-stop_loss` 障碍 |
-| `time_up` | 2 | 时间止损（上涨方向） | `max_hold` 根 bar 内未触及任何障碍，期末收益 ≥ 0 |
-| `time_down` | 3 | 时间止损（下跌方向） | `max_hold` 根 bar 内未触及任何障碍，期末收益 < 0 |
+| `tp_first` | 0 | 止盈先触发 | 持仓期内任意 bar 的 **high** 首先触及止盈价（`entry_price × (1 + take_profit)`） |
+| `sl_first` | 1 | 止损先触发 | 持仓期内任意 bar 的 **low** 首先触及止损价（`entry_price × (1 - stop_loss)`）；同根 bar 两侧均触发时保守假设止损先到 |
+| `time_up` | 2 | 时间止损（上涨方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **> threshold**（默认 threshold=0）|
+| `time_down` | 3 | 时间止损（下跌方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **< -threshold**；dead-zone（\|ret\| ≤ threshold）按 `neutral_policy` 归入此类或丢弃 |
 
-标签由三重障碍法（OCO，One-Cancels-Other）生成，**必须配合 `label_spec.mode="oco"`**；障碍宽度以收盘价为基准，固定比例（`take_profit`/`stop_loss`）、最长持有 `max_hold` 根 bar。
+标签由三重障碍法（OCO，One-Cancels-Other）生成，**必须配合 `label_spec.mode="oco"`**。建仓对齐 A 股 T+1：在 anchor+1 根**开盘价**建仓，障碍宽度以**建仓价**（开盘价）为基准，固定比例（`take_profit`/`stop_loss`）、最长持有 `max_hold` 根 bar；触发判定用每根 bar 的 **high/low**（收盘价不参与判定）。
 
 ### 5.2 训练
 
@@ -758,14 +758,14 @@ if prob_sl >= veto_threshold:
 - 否决不影响出场：已持仓后 `prob_sl` 飙高，不触发提前平仓。
 - `engine.strategy._veto_count` 记录整个回测期间的累计否决次数。
 
-**`exit_mode="auto"` 推导**：当 `exit_mode` 未显式指定或为 `"auto"` 时，策略依据信号帧列数自动推导：七列帧自动使用 `"oco"` 出场（配合 `take_profit`/`stop_loss`/`hold_days`），三列帧退回 `"threshold"` 出场。
+**`exit_mode="auto"` 推导**：`exit_mode` 请求默认值为 `"threshold"`，用户须显式传入 `"auto"` 才触发自动对齐。`auto` 读取 checkpoint 中存储的 **`label_spec.mode`** 进行推导：OCO label（`mode="oco"`）→ `exit_mode="oco"`（`take_profit`/`stop_loss`/`max_hold` 与 label 同口径）；固定持有期类 label（`horizon_bars` 等）→ `exit_mode="fixed_hold"`（`hold_days` 取自 label 持有期）。与信号帧列数无关；推导逻辑由 `aitrade.cnn.consistency.derive_strategy_exit_from_label` 实现。
 
 ### 5.5 前端入口
 
 | 位置 | 控件 | 说明 |
 |------|------|------|
-| 训练页（CNNTrain） | 训练目标下拉 | 第三选项「路径形态分类（OCO）」，选中后标签模式自动锁定为 `oco`，显示止盈/止损/最大持有配置 |
-| 回测页（CNNBacktest） | veto 控件 | 勾选「启用否决」后出现 `veto_threshold` 滑块（0.0~1.0），回测结果展示 `veto_count` |
+| 训练页（CNNTrain） | 训练目标下拉 | 第三选项「**路径形态分类（四类剧本概率）**」，选中后标签模式自动锁定为 `oco`，显示止盈/止损/最大持有配置 |
+| 回测页（CNNBacktest） | veto 控件 | **无需勾选**；选中 `path_class` 模型后自动显示 `veto_threshold` 滑块（范围 **0.1~1.0**，1.0 标注"关闭"）；回测结果中 `veto_count` 仅在 **>0** 时展示 |
 
 ### 5.6 与 classification / regression 的对比
 
