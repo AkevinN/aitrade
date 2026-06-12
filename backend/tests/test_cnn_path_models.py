@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from aitrade.models.alpha import CNNBacktestRequest, CNNTrainRequest
 from aitrade.models.governance import (
+    CNNCandidateTrainRequest,
     CNNGovernanceReplayRequest,
     CNNWalkForwardRequest,
 )
@@ -201,6 +202,26 @@ def test_cnn_walkforward_request_objective_invalid() -> None:
             end=date(2024, 12, 31),
             objective="bad_value",
         )
+
+
+# ---------------------------------------------------------------------------
+# CNNCandidateTrainRequest.objective 三值校验（派生模型继承守护）
+# ---------------------------------------------------------------------------
+
+
+def test_cnn_candidate_train_request_objective_path_class() -> None:
+    """CNNCandidateTrainRequest 继承 CNNWalkForwardRequest 后仍接受 objective='path_class'。
+
+    守护派生模型继承约束：防止日后子类重写 objective 字段时无测试可拦。
+    """
+    req = CNNCandidateTrainRequest(
+        name="cand1",
+        target_symbol="000001.SZSE",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        objective="path_class",
+    )
+    assert req.objective == "path_class"
 
 
 # ---------------------------------------------------------------------------

@@ -106,7 +106,7 @@ class CNNWalkForwardRequest(BaseModel):
         default="classification",
         description=(
             "预测目标：classification=方向二分类；regression=涨跌幅回归；"
-            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌）"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
         ),
     )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)
@@ -164,7 +164,7 @@ class CNNGovernanceReplayRequest(BaseModel):
         default="classification",
         description=(
             "预测目标：classification=方向二分类；regression=涨跌幅回归；"
-            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌）"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
         ),
     )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)

@@ -146,7 +146,13 @@ class BacktestRunRequest(BaseModel):
 
 
 class CNNBacktestRequest(BaseModel):
-    """CNN model backtest request."""
+    """CNN 模型回测请求体，同时服务 classification / regression / path_class 三种 objective。
+
+    统一封装回测所需的模型名称、资金、日期区间、出场策略及交易成本参数。
+    ``veto_threshold`` 仅在 objective='path_class' 时生效：当「先触止损」类概率
+    prob_sl 达到该阈值时否决买入信号；其他 objective 下该字段无意义，保留默认值 1.0
+    即可保持与旧版行为完全兼容。
+    """
     name: str = Field(description="回测名称")
     model: str = Field(description="CNN 模型名称")
     capital: float = Field(default=1_000_000, description="初始资金")
@@ -171,9 +177,9 @@ class CNNBacktestRequest(BaseModel):
         gt=0.0,
         le=1.0,
         description=(
-            "path_class 回测专用否决阈值（取值范围 (0, 1]）："
-            "当模型预测的「先触止损」类概率 prob_sl ≥ 该值时，否决本次买入信号。"
-            "默认 1.0 表示关闭否决（prob_sl 永远达不到 1.0），与旧版行为完全兼容。"
+            "path_class 专用：先触止损概率 prob_sl >= 该值时否决买入；"
+            "默认 1.0 等效关闭否决（仅 prob_sl 饱和为 1.0 的极端行会被否决，属可接受边界）。"
+            "对单标量模型无效。"
         ),
     )
 
