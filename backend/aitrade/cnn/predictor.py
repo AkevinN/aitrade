@@ -57,16 +57,26 @@ def predict_cnn_signals(
         end: 信号生成结束日期（含）。
         on_progress: 进度回调 ``(percent, message)``，可为 None。
         on_meta: 推理完成后调用一次的元信息回调 ``(meta_dict) -> None``，可为 None；
-            meta_dict 含 target_symbol/lookback/input_interval 等观测信息，不含凭证。
+            meta_dict 含 target_symbol/lookback/input_interval/objective 等观测信息，不含凭证。
 
     Returns:
-        polars DataFrame，列为 [datetime, vt_symbol, signal]：
-        - signal 分类模型为上涨概率（0~1），回归模型为预测收益（无界）。
-        - datetime 去除时区信息，与回测引擎的 bar datetime 对齐。
+        polars DataFrame，输出列因 objective 而异：
+
+        - **classification / regression**（三列）：
+          ``[datetime, vt_symbol, signal]``；
+          classification 的 signal 为上涨概率（0~1），regression 为预测收益（无界）。
+
+        - **path_class**（七列）：
+          ``[datetime, vt_symbol, signal, prob_tp, prob_sl, prob_time_up, prob_time_down]``；
+          signal 恒等于 prob_tp（止盈先触发的概率）；
+          四列概率由 softmax 计算，行内和严格为 1。
+
+        所有 objective 下 datetime 均去除时区信息，与回测引擎的 bar datetime 对齐。
 
     Raises:
         FileNotFoundError: 模型文件不存在时抛出。
-        ValueError: 加载观测证券数据失败，或推理后无结果时抛出。
+        ValueError: checkpoint 的 num_classes 与 path_class 要求不符（非 4）时抛出；
+            或加载观测证券数据失败、推理后无结果时抛出。
     """
     import torch
 
@@ -98,8 +108,19 @@ def predict_cnn_signals(
     input_data_kind: str = train_config.get("input_data_kind", "bar")
     input_interval: str = train_config.get("input_interval", "d")
     dropout: float = model_config.get("dropout", 0.5)
-    # 分类模型 signal 为上涨概率(0~1)；回归模型 signal 为预测收益(无界)
+    # 分类模型 signal 为上涨概率(0~1)；回归模型 signal 为预测收益(无界)；
+    # path_class 模型 signal == prob_tp，另附 prob_sl/prob_time_up/prob_time_down。
     objective: str = train_config.get("objective", "classification")
+
+    # 冗余校验：path_class checkpoint 若存在 num_classes 键，其值必须为 4；
+    # 键缺失（旧 checkpoint 向后兼容）时不报错，仅在值存在且不等于 4 时拒绝。
+    if objective == "path_class":
+        num_classes = model_config.get("num_classes")
+        if num_classes is not None and num_classes != 4:
+            raise ValueError(
+                f"path_class checkpoint 的 num_classes 应为 4，实得 {num_classes}；"
+                "checkpoint 可能被手工篡改。"
+            )
 
     # Rebuild observation groups
     raw_groups = train_config.get("observation_groups", [])
@@ -232,15 +253,33 @@ def predict_cnn_signals(
         m_tensor = torch.FloatTensor(np.array(batch_masks)).to(device)
 
         with torch.no_grad():
-            probs = model(x_tensor, m_tensor).cpu().numpy().flatten()
+            out = model(x_tensor, m_tensor)
 
-        for i, anchor in enumerate(batch_indices):
-            dt = aligned_dates[anchor]
-            predictions.append({
-                "datetime": dt.replace(tzinfo=None),
-                "vt_symbol": target_symbol,
-                "signal": float(probs[i]),
-            })
+        if objective == "path_class":
+            # path_class：softmax 得到四类概率矩阵 [B, 4]；
+            # 列顺序与 dataset.PATH_CLASS_NAMES 对应：0=tp,1=sl,2=time_up,3=time_down。
+            probs_mat = torch.softmax(out, dim=1).cpu().numpy()  # [B, 4]
+            for i, anchor in enumerate(batch_indices):
+                dt = aligned_dates[anchor]
+                p = probs_mat[i]
+                predictions.append({
+                    "datetime": dt.replace(tzinfo=None),
+                    "vt_symbol": target_symbol,
+                    "signal": float(p[0]),       # signal 恒等于 prob_tp
+                    "prob_tp": float(p[0]),
+                    "prob_sl": float(p[1]),
+                    "prob_time_up": float(p[2]),
+                    "prob_time_down": float(p[3]),
+                })
+        else:
+            probs = out.cpu().numpy().flatten()
+            for i, anchor in enumerate(batch_indices):
+                dt = aligned_dates[anchor]
+                predictions.append({
+                    "datetime": dt.replace(tzinfo=None),
+                    "vt_symbol": target_symbol,
+                    "signal": float(probs[i]),
+                })
 
         if on_progress:
             pct = 55 + 40 * min(batch_start + batch_size, len(valid_indices)) / max(len(valid_indices), 1)
