@@ -14,6 +14,9 @@ import { toEquityPoints, toOHLCBars, toTradeMarkers } from '../../components/cha
 import type { ChartTime } from '../../components/charts/types'
 import type { BacktestResultPayload } from '../../types/alpha'
 
+/**
+ * {@link BacktestCharts} 组件 props。
+ */
 export interface BacktestChartsProps {
   /** 回测结果载荷（来自 task.result），含成交明细与逐日净值 */
   result?: BacktestResultPayload
@@ -25,6 +28,13 @@ export interface BacktestChartsProps {
   end: string
 }
 
+/**
+ * 回测结果图表容器（业务接线组件）。
+ *
+ * 组装净值曲线图（{@link EquityCurveChart}）、策略 vs 基准收益对比图（{@link ReturnComparisonChart}）
+ * 和 K 线+买卖点图（{@link KLineChart}），从 `result` 载荷提取目标标的后
+ * 自动拉取 OHLC 行情、过滤越界买卖点。
+ */
 export default function BacktestCharts({ result, interval, start, end }: BacktestChartsProps) {
   // 1. 净值曲线：逐日净值 → EquityPoint[]。空数据由 EquityCurveChart 自身渲染空状态（Req 6.4）。
   const equityPoints = useMemo(

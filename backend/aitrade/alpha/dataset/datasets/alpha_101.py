@@ -1,10 +1,24 @@
+"""Alpha101 因子数据集——WorldQuant 101 基础 Alpha 因子库。"""
+
 import polars as pl
 
 from ..template import AlphaDataset
 
 
 class Alpha101(AlphaDataset):
-    """101 basic factors from WorldQuant"""
+    """WorldQuant 101 基础 Alpha 因子数据集。
+
+    在 AlphaDataset 基础上，构造器内自动注册全部 101 个因子表达式（alpha1~alpha101），
+    因子来源于 WorldQuant 公开论文《101 Formulaic Alphas》（Kakushadze, 2016）。
+
+    输入数据需包含以下列：open、high、low、close、volume、vwap。
+    标签表达式未预设，需用户通过 set_label 单独配置。
+
+    Example:
+        >>> ds = Alpha101(bar_df, ("20200101", "20211231"), ("20220101", "20221231"), ("20230101", "20231231"))
+        >>> ds.set_label("ts_delay(close, -3) / ts_delay(close, -1) - 1")
+        >>> ds.prepare_data()
+    """
 
     def __init__(
         self,
@@ -13,7 +27,15 @@ class Alpha101(AlphaDataset):
         valid_period: tuple[str, str],
         test_period: tuple[str, str]
     ) -> None:
-        """Constructor"""
+        """初始化并批量注册 101 个 WorldQuant Alpha 表达式。
+
+        Args:
+            df: 原始行情 DataFrame，必须包含 datetime、vt_symbol、
+                open、high、low、close、volume、vwap 列。
+            train_period: 训练区间 (start, end)，格式 "YYYYMMDD" 或 "YYYY-MM-DD"。
+            valid_period: 验证区间，格式同上。
+            test_period: 测试区间，格式同上。
+        """
         super().__init__(
             df=df,
             train_period=train_period,

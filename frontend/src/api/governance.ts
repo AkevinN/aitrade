@@ -1,3 +1,10 @@
+/**
+ * CNN 治理模块 API 服务对象——封装所有与后端 `/api/cnn/governance/` 端点的 HTTP 交互。
+ *
+ * 提供治理配置读写、候选模型管理（训练/评估/晋升/拒绝/回滚）、
+ * 历史事件查询、治理报告获取及历史重演（Replay）能力。
+ * 所有方法均返回 `Promise<T>`，错误由全局 Axios 拦截器透传。
+ */
 import api from './client'
 import type {
   CNNCandidate,

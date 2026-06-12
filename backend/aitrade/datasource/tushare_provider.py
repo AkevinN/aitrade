@@ -67,6 +67,15 @@ INTERVAL_MAP: dict[str, str] = {
 
 
 def _to_ts_code(symbol: str, exchange: str) -> str | None:
+    """将项目内部合约代码转换为 Tushare 的 ts_code 格式（如 ``"600519.SH"``）。
+
+    Args:
+        symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+        exchange: 项目标准交易所代码，如 ``"SSE"``。
+
+    Returns:
+        Tushare ts_code 字符串；不支持的交易所返回 None。
+    """
     suffix = VT_TO_TS_SUFFIX.get(exchange)
     if not suffix:
         return None
@@ -74,6 +83,15 @@ def _to_ts_code(symbol: str, exchange: str) -> str | None:
 
 
 def _from_ts_code(ts_code: str) -> tuple[str, str] | None:
+    """将 Tushare ts_code（如 ``"600519.SH"``）拆解为项目内部 (symbol, exchange)。
+
+    Args:
+        ts_code: Tushare 格式的合约代码，如 ``"000001.SZ"``。
+
+    Returns:
+        (symbol, vt_exchange) 元组，如 ``("000001", "SZSE")``；
+        格式不合法或交易所后缀未知时返回 None。
+    """
     parts = ts_code.split(".")
     if len(parts) != 2:
         return None
@@ -85,7 +103,12 @@ def _from_ts_code(ts_code: str) -> tuple[str, str] | None:
 
 
 class TushareProvider(BaseProvider):
-    """Tushare / Tinyshare data source (switchable backend)."""
+    """Tushare / Tinyshare 数据源，通过 TUSHARE_BACKEND 环境变量切换后端。
+
+    支持：合约列表（股票/指数/期货/基金）、历史 K 线（日线/分钟线）、
+    交易日历、基本面数据（PE/PB/市值）、复权因子。
+    Tushare 权限要求：120 积分可用股票日线/日历/基本面；2000 积分可用分钟线。
+    """
 
     name = "tushare"
     display_name = "Tushare 数据服务"
@@ -95,6 +118,7 @@ class TushareProvider(BaseProvider):
     BACKEND_TINYSHARE = "tinyshare"
 
     def __init__(self) -> None:
+        """初始化 Provider，从配置读取 token 与后端类型，不立即连接。"""
         self._pro = None
         self._ts = None
         self._inited = False
@@ -102,6 +126,11 @@ class TushareProvider(BaseProvider):
         self._backend: str = TUSHARE_BACKEND
 
     def _get_backend_module(self):
+        """按 _backend 字段动态导入 tinyshare 或 tushare 模块。
+
+        Returns:
+            tinyshare 或 tushare 模块对象，供调用 pro_api/set_token/pro_bar。
+        """
         if self._backend == self.BACKEND_TINYSHARE:
             import tinyshare as ts  # type: ignore
             return ts
@@ -110,6 +139,14 @@ class TushareProvider(BaseProvider):
             return ts
 
     def init(self, output: Callable = print) -> bool:
+        """初始化 Tushare/Tinyshare Pro API 连接。
+
+        Args:
+            output: 日志输出函数，默认 print。
+
+        Returns:
+            True 表示连接成功；False 表示 token 为空或连接失败（软失败，不抛异常）。
+        """
         if self._inited:
             return True
 
@@ -139,7 +176,20 @@ class TushareProvider(BaseProvider):
         asset: str,
         freq: str,
     ):
-        """Unified pro_bar call — abstracts tushare/tinyshare param differences."""
+        """封装 tushare/tinyshare 两种 pro_bar 调用差异（参数名不同）。
+
+        tushare 使用 ``api=`` 参数；tinyshare 使用 ``pro_api_client=`` 参数。
+
+        Args:
+            ts_code: Tushare 合约代码，如 ``"600519.SH"``。
+            start_date: 起始日期字符串，格式 YYYYMMDD。
+            end_date: 截止日期字符串，格式 YYYYMMDD。
+            asset: 资产类型（E=股票, I=指数, FT=期货, FD=基金）。
+            freq: 行情频率，如 ``"D"``/``"W"``/``"60min"``。
+
+        Returns:
+            pandas DataFrame；失败时可能抛出异常。
+        """
         if self._backend == self.BACKEND_TINYSHARE:
             return self._ts.pro_bar(
                 ts_code=ts_code,
@@ -166,7 +216,17 @@ class TushareProvider(BaseProvider):
         end: datetime,
         freq: str,
     ):
-        """Query minute bars (tinyshare uses stk_mins interface)."""
+        """通过 stk_mins 接口查询分钟级 K 线（tinyshare 专用接口）。
+
+        Args:
+            ts_code: Tushare 合约代码。
+            start: 起始时间（含）。
+            end: 截止时间（含）。
+            freq: 分钟频率，如 ``"1min"``/``"5min"``/``"60min"``。
+
+        Returns:
+            pandas DataFrame，包含 trade_time / open / high / low / close / vol 等列。
+        """
         return self._pro.query(
             "stk_mins",
             ts_code=ts_code,
@@ -445,6 +505,14 @@ class TushareProvider(BaseProvider):
     # ---- Private helpers ----
 
     def _fetch_stock_contracts(self, exchange: str = "") -> list[ContractInfo]:
+        """从 Tushare stock_basic 接口获取上市股票合约列表。
+
+        Args:
+            exchange: 交易所过滤；空字符串表示全部交易所。
+
+        Returns:
+            ContractInfo 列表（product_type="股票"）；请求失败或无数据返回空列表。
+        """
         kwargs: dict = {"list_status": "L", "fields": "ts_code,symbol,name,list_date,delist_date,exchange"}
         if exchange:
             kwargs["exchange"] = exchange
@@ -473,6 +541,14 @@ class TushareProvider(BaseProvider):
         return result
 
     def _fetch_index_contracts(self, exchange: str = "") -> list[ContractInfo]:
+        """从 Tushare index_basic 接口获取指数合约列表。
+
+        Args:
+            exchange: 市场过滤（如 ``"SSE"``）；空字符串表示全部。
+
+        Returns:
+            ContractInfo 列表（product_type="指数"）；失败时返回空列表。
+        """
         kwargs: dict = {"fields": "ts_code,name,market,publisher,category,base_date"}
         if exchange:
             kwargs["market"] = exchange
@@ -498,6 +574,15 @@ class TushareProvider(BaseProvider):
         return result
 
     def _fetch_futures_contracts(self, exchange: str = "") -> list[ContractInfo]:
+        """从 Tushare fut_basic 接口获取期货合约列表（按交易所逐一查询）。
+
+        Args:
+            exchange: 期货交易所代码（如 ``"SHFE"``/``"DCE"``）；空字符串获取全部。
+
+        Returns:
+            ContractInfo 列表（product_type="期货"，size 来自 multiplier 字段）；
+            各交易所失败时跳过，不影响其他交易所。
+        """
         exchanges = [exchange] if exchange else ["DCE", "SHFE", "CZCE", "CFFEX", "INE", "GFEX"]
 
         result = []
@@ -539,6 +624,14 @@ class TushareProvider(BaseProvider):
         return result
 
     def _fetch_fund_contracts(self, exchange: str = "") -> list[ContractInfo]:
+        """从 Tushare fund_basic 接口获取场内基金合约列表（market="E"）。
+
+        Args:
+            exchange: 交易所过滤；空字符串表示全部。
+
+        Returns:
+            ContractInfo 列表（product_type="基金"）；失败时返回空列表。
+        """
         try:
             df = self._pro.fund_basic(market="E", fields="ts_code,name,fund_type,found_date,list_date")
         except Exception:
@@ -568,6 +661,15 @@ class TushareProvider(BaseProvider):
         return result
 
     def _detect_asset(self, symbol: str, exchange: str) -> str:
+        """依据交易所与代码前缀推断 Tushare pro_bar 的 asset 参数。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀）。
+            exchange: 项目标准交易所代码。
+
+        Returns:
+            ``"E"``（股票）/``"I"``（指数）/``"FT"``（期货）/``"FD"``（基金）。
+        """
         if exchange in ("CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"):
             return "FT"
         if exchange in ("SSE", "SZSE"):

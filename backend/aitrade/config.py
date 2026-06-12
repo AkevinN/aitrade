@@ -42,13 +42,21 @@ LIVE_DECISION_PATH: Path = AITRADE_HOME / "live" / "decisions"
 # 交易计划自动化（Trading Plan Automation）持久化与调度接线
 # 交易计划存储目录（每 plan_id 一个 JSON 文件，TradingPlanStore 首次实例化自动创建）
 TRADING_PLAN_PATH: Path = AITRADE_HOME / "live" / "plans"
+
+# Phase 3 M2：规则策略调仓决策持久化目录（RebalanceStore 首次实例化自动创建）
+LIVE_REBALANCE_PATH: Path = AITRADE_HOME / "live" / "rebalances"
+# Phase 3 M2：持仓账本持久化目录（PositionBook 首次实例化自动创建）
+LIVE_PORTFOLIO_PATH: Path = AITRADE_HOME / "live" / "portfolios"
 # 调度器运行时轻状态（Last_Triggered_Map：{plan_id: "YYYY-MM-DD"}），重启可恢复
 LIVE_RUNTIME_STATE_PATH: Path = AITRADE_HOME / "live" / "runtime_state.json"
 # 调度器单实例互斥锁（防同机多进程并发触发）
 SCHEDULER_LOCK_PATH: Path = AITRADE_HOME / "live" / "scheduler.lock"
 
-# Task state persistence
-TASK_DB_PATH: Path = AITRADE_HOME / "tasks.db"
+# 任务历史持久化（task-scheduler-observability R2.5：以 TASK_HISTORY_PATH 取代已声明未用的 TASK_DB_PATH）
+TASK_HISTORY_PATH: Path = AITRADE_HOME / "task_history"
+
+# 调度运行日志（task-scheduler-observability R3：SchedulerRunLog 按日 JSONL 落盘）
+SCHEDULER_RUN_LOG_PATH: Path = AITRADE_HOME / "live" / "scheduler_runs"
 
 # =============================================================================
 # API server
@@ -124,5 +132,8 @@ CSV_REQUIRED_FIELDS: list[str] = ["datetime", "open", "high", "low", "close"]
 # Initialize storage directories
 # =============================================================================
 
-for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH]:
+# 规则型信号数据目录（转债条款快照 + 历史溢价率，CBTermsStore 使用）
+RULES_DATA_PATH: Path = AITRADE_HOME / "rules"
+
+for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH, RULES_DATA_PATH, TASK_HISTORY_PATH, SCHEDULER_RUN_LOG_PATH]:
     _dir.mkdir(parents=True, exist_ok=True)

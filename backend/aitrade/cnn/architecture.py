@@ -22,7 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def _human_params(n: int) -> str:
-    """把参数量格式化为易读字符串（如 12.3K / 1.2M）。"""
+    """把参数量格式化为易读字符串（如 12.3K / 1.2M）。
+
+    Args:
+        n: 参数数量（整数）。
+
+    Returns:
+        带单位后缀的字符串；<1 000 时直接返回数字字符串。
+    """
     if n >= 1_000_000:
         return f"{n / 1_000_000:.2f}M"
     if n >= 1_000:
@@ -33,16 +40,33 @@ def _human_params(n: int) -> str:
 def describe_cnn_architecture(name: str) -> dict[str, Any]:
     """探查指定 CNN 模型的真实网络结构。
 
-    Returns 字典包含：
-    - verified: 权重是否严格匹配重建的结构（True=结构与权重完全一致）
-    - verify_message: 当 verified=False 时的不一致说明
-    - module_repr: PyTorch 原生模块树（str(model)），层级一目了然
-    - input_shapes: 探查时使用的输入张量形状
-    - output_shape: 整个模型的输出张量形状
-    - total_params / trainable_params: 总参数量 / 可训练参数量
-    - total_params_h / trainable_params_h: 上述的易读格式
-    - param_dtype: 权重数据类型
-    - layers: 逐层（叶子模块）执行顺序的列表，含 name/type/params/output_shape
+    重建模型实例并用 load_state_dict(strict=True) 加载 checkpoint 权重（真实性闸门），
+    再通过 forward hook 跑 dummy 输入获取逐层真实输出形状。
+    能成功加载即证明「展示的结构 == 训练时的模型」，否则 verified=False 并附不一致说明。
+
+    Args:
+        name: 模型名称（不含 .pt 后缀），对应 CNN_MODEL_DIR/<name>.pt。
+
+    Returns:
+        字典，包含：
+        - verified (bool): 权重是否严格匹配重建的结构（True=完全一致）。
+        - verify_message (str): verified=False 时的不一致说明；一致时为空字符串。
+        - forward_error (str): dummy forward 失败时的错误说明；成功为空字符串。
+        - module_repr (str): PyTorch 原生模块树（str(model)），层级一目了然。
+        - objective (str): 训练目标，"classification" 或 "regression"。
+        - input_shapes (dict): 探查时使用的输入张量形状，键为 "x" 和 "group_mask"，
+          形状分别为 [1, C, T, S, G] 和 [1, 1, 1, S, G]。
+        - output_shape (list[int] | None): 整个模型的输出形状；forward 失败时为 None。
+        - total_params (int): 总参数量。
+        - total_params_h (str): 易读格式（如 "12.3K"）。
+        - trainable_params (int): 可训练参数量。
+        - trainable_params_h (str): 易读格式。
+        - param_dtype (str): 权重数据类型（如 "float32"）；无参数时为 "—"。
+        - layers (list[dict]): 逐层（叶子模块）按 forward 执行顺序的列表，每项含
+          name/type/params/params_h/output_shape。
+
+    Raises:
+        FileNotFoundError: 模型文件不存在时抛出。
     """
     import torch
 

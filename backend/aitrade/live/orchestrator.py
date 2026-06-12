@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta
@@ -141,6 +142,8 @@ def run_live_decision(
     on_progress: Optional[Callable[[float, str], None]] = None,
     trace_store: DecisionTraceStore | None = None,
     data_source_type: str = "pull",
+    signal_fn: Callable[..., pl.DataFrame] | None = None,
+    trigger_source: str = "manual",
 ) -> dict[str, Any]:
     """编排一次今日决策。
 
@@ -157,6 +160,15 @@ def run_live_decision(
 
     不调用任何券商网关 / 下单接口（Property 7）。
 
+    signal_fn 契约（可选注入，用于测试或 Phase 3 组合调仓路径）：
+    - 若传入非 None，调用该函数取代模块全局 `predict_cnn_signals`。
+    - 若为 None（默认），在调用时从模块全局解析 `predict_cnn_signals`，使
+      `monkeypatch.setattr(orchestrator, "predict_cnn_signals", ...)` 桩继续生效。
+    - 注入的 signal_fn 必须接受与 `predict_cnn_signals` 相同的 kwargs 调用形态：
+      ``signal_fn(model_name=..., start=..., end=..., on_progress=..., on_meta=...)``
+    - 返回值硬约束：包含 ``[datetime, vt_symbol, signal]`` 三列的 polars DataFrame，
+      下游 ``_select_signal_bar`` 依赖该 schema。
+
     可观测性（Requirement 8）：开头生成 `run_id` 并逐段累积 Decision_Trace（六段：
     run_header / inference / pricing / decision_logic / risk / result）。trace 持久化为
     **best-effort**——仅当传入 `trace_store` 时在 Decision 落盘后写盘，失败只记 warning 并在
@@ -166,7 +178,8 @@ def run_live_decision(
     token），数据源仅记录类型 + bar 数量（8.7/8.8）。
     """
     # 0. 运行头：生成短码 run_id，预派生 signal_id（与最终 Decision 的 signal_id 必然一致），
-    #    据此构造逐段累积的 TraceBuilder。
+    #    据此构造逐段累积的 TraceBuilder。Wave 2c：入口计时（elapsed_ms）。
+    _t0 = time.monotonic()
     run_id = uuid.uuid4().hex[:8]
     # signal_id 由 Decision_Bar 决定；1d 下 = as_of 当日（收盘后触发的常态），可据 as_of 提前推导，
     # 与 run_for_instant 内据实际选中 bar 计算的 signal_id 一致（用于 trace 键与持久化）。
@@ -217,7 +230,10 @@ def run_live_decision(
                 on_progress(10 + p * 0.6, f"[推理] {m}")  # 推理段 0~100 -> 10~70
 
         meta_box: dict[str, Any] = {}  # on_meta 收集器（仅符号/计数/时间，无凭证）
-        signal_df: pl.DataFrame = predict_cnn_signals(
+        # 调用时解析：默认分支从模块全局取 predict_cnn_signals，使 monkeypatch 桩继续生效；
+        # 注入分支直接使用传入的 signal_fn（测试 / Phase 3 组合调仓路径）。
+        fn = signal_fn if signal_fn is not None else predict_cnn_signals
+        signal_df: pl.DataFrame = fn(
             model_name=model_name,
             start=instant.as_of.date() - timedelta(days=_DECISION_WINDOW_DAYS),
             end=instant.as_of.date(),
@@ -286,7 +302,12 @@ def run_live_decision(
             vt_symbol=vt_symbol,
             should_exit=should_exit,
             halted=halted,
+            trigger_source=trigger_source,
         )
+        # Wave 2c: 捕获实测通知结果（SignalService.run_for_instant 存入 last_notify_ok）。
+        # None = 未发送（幂等命中/hold 路径）；True/False = send 实测返回值。
+        _notify_ok: bool | None = getattr(service, "last_notify_ok", None)
+
     except Exception as exc:  # noqa: BLE001 — 产出 Decision 前中止：记 abort_reason 后重新抛出
         abort_reason = str(exc)
         logger.warning("[%s] 产出 Decision 前中止: %s", run_id, abort_reason)
@@ -303,6 +324,8 @@ def run_live_decision(
             "trace_persisted": False,
             "trace_persist_error": None,
             "abort_reason": abort_reason,
+            "elapsed_ms": int((time.monotonic() - _t0) * 1000),
+            "trigger_source": trigger_source,
         }
         if trace_store is not None:
             try:
@@ -315,7 +338,15 @@ def run_live_decision(
     #    Decision，未重新走风控与提醒。
     idempotent_hit = existed_before
     authoritative_ok = "风控拦截" not in (decision.reason or "")
-    notified = (not idempotent_hit) and decision.action in ("buy", "sell")
+    # Wave 2c：notified 改为实测值（R5.1 语义变更）。
+    # _notify_ok：True/False = send 实测返回值；None = 未发送（幂等命中/hold）。
+    # trace 消费者沿用 "notified" 键，值语义更准确，无契约破坏。
+    notified: bool = bool(_notify_ok) if _notify_ok is not None else False
+    if _notify_ok is False:
+        logger.warning(
+            "[%s] 通知发送失败（send 返回 False），计划/scheme=%s", run_id, scheme_name
+        )
+
 
     # decision_logic：信号 vs 阈值 + 仓位规模信息（volume/intended_value 取自决策结果）。
     intended_value = (decision.volume or 0) * (decision.price or 0.0)
@@ -337,6 +368,8 @@ def run_live_decision(
     }, debug_detail={"records": inspector.records})
 
     # 6. best-effort 持久化（Decision 已落盘后）：失败不影响返回（8.12）。
+    # Wave 2c: elapsed_ms = 入口到此处的毫秒数（落盘完成后计算）。
+    elapsed_ms = int((time.monotonic() - _t0) * 1000)
     # result：先按成功乐观标注，持久化失败再回填 trace_persisted/trace_persist_error。
     builder.set_section("result", {
         "action": decision.action,
@@ -349,6 +382,8 @@ def run_live_decision(
         "trace_persisted": True,
         "trace_persist_error": None,
         "abort_reason": None,
+        "elapsed_ms": elapsed_ms,
+        "trigger_source": trigger_source,
     })
 
     if trace_store is not None:

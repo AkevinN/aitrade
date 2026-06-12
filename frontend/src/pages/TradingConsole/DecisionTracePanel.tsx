@@ -26,6 +26,9 @@ import type {
 
 const { Text } = Typography
 
+/**
+ * {@link DecisionTracePanel} 组件 props。
+ */
 interface DecisionTracePanelProps {
   /** 关联决策的 signal_id；为空时不渲染（无可观测对象）。 */
   signalId?: string | null

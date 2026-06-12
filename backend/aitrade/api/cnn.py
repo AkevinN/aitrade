@@ -26,6 +26,14 @@ router = APIRouter(prefix="/api/cnn", tags=["CNN量化预测"])
 
 
 def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
+    """规范化证券代码列表并去重（保持首次出现顺序）。
+
+    Args:
+        vt_symbols: 原始证券代码列表，允许含空项。
+
+    Returns:
+        去重后的规范化代码列表。
+    """
     return list(dict.fromkeys(normalize_vt_symbol(item) for item in vt_symbols if item))
 
 
@@ -35,30 +43,35 @@ def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
 
 @router.get("/governance/config")
 async def get_governance_config() -> dict:
+    """读取 CNN 治理配置（晋级门禁参数、调度策略等）。"""
     from ..cnn.governance import store
     return store.get_config()
 
 
 @router.put("/governance/config")
 async def update_governance_config(req: CNNGovernanceConfig) -> dict:
+    """更新 CNN 治理配置并追加 config_updated 历史事件。"""
     from ..cnn.governance import store
     return store.save_config(req)
 
 
 @router.get("/governance/production")
 async def get_governance_production() -> dict:
+    """读取当前生产模型信息（model_name/version/promoted_at 等）。"""
     from ..cnn.governance import store
     return store.get_production()
 
 
 @router.get("/governance/candidates")
 async def list_governance_candidates() -> list[dict]:
+    """列出所有候选模型，按创建时间降序排列。"""
     from ..cnn.governance import store
     return store.list_candidates()
 
 
 @router.get("/governance/candidates/{candidate_id}")
 async def get_governance_candidate(candidate_id: str) -> dict:
+    """读取指定候选模型的元数据（含 WF 报告 ID 与训练结果摘要）。"""
     from ..cnn.governance import store
     candidate = store.get_candidate(candidate_id)
     if candidate is None:
@@ -68,6 +81,7 @@ async def get_governance_candidate(candidate_id: str) -> dict:
 
 @router.post("/governance/evaluate")
 async def start_governance_evaluate(req: CNNWalkForwardRequest) -> dict:
+    """启动 WF/OOS 评估任务，异步执行并立即返回 task_id。"""
     task_id = task_manager.create_task(
         TaskType.CNN_WF_EVALUATE,
         params=req.model_dump(mode="json"),
@@ -86,6 +100,7 @@ async def start_governance_evaluate(req: CNNWalkForwardRequest) -> dict:
 
 @router.post("/governance/candidates/train")
 async def start_governance_candidate_train(req: CNNCandidateTrainRequest) -> dict:
+    """启动候选模型训练任务（WF/OOS 评估 + 最终模型训练），异步执行并立即返回 task_id。"""
     task_id = task_manager.create_task(
         TaskType.CNN_CANDIDATE_TRAIN,
         params=req.model_dump(mode="json"),
@@ -104,6 +119,7 @@ async def start_governance_candidate_train(req: CNNCandidateTrainRequest) -> dic
 
 @router.post("/governance/candidates/{candidate_id}/promote")
 async def promote_governance_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict:
+    """将指定候选模型晋级为生产模型（同步执行）。"""
     from ..cnn.governance import promote_candidate
     try:
         return promote_candidate(candidate_id, req)
@@ -113,6 +129,7 @@ async def promote_governance_candidate(candidate_id: str, req: CNNPromotionReque
 
 @router.post("/governance/candidates/{candidate_id}/reject")
 async def reject_governance_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict:
+    """拒绝指定候选模型，更新其状态为 rejected（同步执行）。"""
     from ..cnn.governance import reject_candidate
     try:
         return reject_candidate(candidate_id, note=req.note)
@@ -122,6 +139,7 @@ async def reject_governance_candidate(candidate_id: str, req: CNNPromotionReques
 
 @router.post("/governance/rollback")
 async def rollback_governance_production(req: CNNRollbackRequest) -> dict:
+    """将生产模型回滚到上一版本（或指定模型），同步执行。"""
     from ..cnn.governance import rollback_production
     try:
         return rollback_production(req)
@@ -131,12 +149,14 @@ async def rollback_governance_production(req: CNNRollbackRequest) -> dict:
 
 @router.get("/governance/history")
 async def get_governance_history() -> list[dict]:
+    """读取全量治理历史事件列表（JSONL，按写入时间升序）。"""
     from ..cnn.governance import store
     return store.history()
 
 
 @router.get("/governance/reports/{report_id}")
 async def get_governance_report(report_id: str) -> dict:
+    """读取指定 WF/OOS 评估报告（含各折统计与晋级门禁结果）。"""
     from ..cnn.governance import store
     report = store.get_report(report_id)
     if report is None:
@@ -146,6 +166,7 @@ async def get_governance_report(report_id: str) -> dict:
 
 @router.post("/governance/replay/run")
 async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
+    """启动治理回放回测任务，在历史区间对比三条基线策略，异步执行并立即返回 task_id。"""
     task_id = task_manager.create_task(
         TaskType.CNN_GOVERNANCE_REPLAY,
         params=req.model_dump(mode="json"),
@@ -164,12 +185,14 @@ async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
 
 @router.get("/governance/replay")
 async def list_governance_replays() -> list[dict]:
+    """列出所有治理回放报告，按创建时间降序排列。"""
     from ..cnn.governance import store
     return store.list_replay_reports()
 
 
 @router.get("/governance/replay/{replay_id}")
 async def get_governance_replay(replay_id: str) -> dict:
+    """读取指定治理回放报告（含三条基线对比、晋级事件与结论）。"""
     from ..cnn.governance import store
     replay = store.get_replay_report(replay_id)
     if replay is None:
@@ -354,7 +377,28 @@ def _run_cnn_backtest(
     req: CNNBacktestRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """Execute CNN model backtest."""
+    """执行 CNN 模型回测：推理生成信号 → 共享回测引擎 → 返回统计+成交+净值。
+
+    核心步骤：
+    1. 校验模型文件存在；
+    2. 调用 predict_cnn_signals 生成 [datetime, vt_symbol, signal] 信号表；
+    3. 解析出场配置（auto=按 label 自动推导），校验 label↔策略一致性；
+    4. 初始化 BacktestingEngine，设置成本参数与 fill_price_mode；
+    5. 运行回测并计算统计，附买入持有基准收益。
+
+    隐性失败守护：信号与行情 datetime 无交集时直接抛 ValueError 而非返回空结果。
+
+    Args:
+        req: CNN 回测请求，含 model/start/end/capital/exit_mode/buy_threshold 等参数。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+
+    Returns:
+        字典，含 name/model/target_symbol/statistics/trades/equity_curve；
+        无信号或无成交时 statistics 含 error 键，trades/equity_curve 为空列表。
+
+    Raises:
+        ValueError: CNN 模型不存在、信号与行情无交集、label↔策略硬性不一致时抛出。
+    """
     import logging
     from datetime import datetime
 

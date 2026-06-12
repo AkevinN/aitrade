@@ -5,6 +5,9 @@ import type { Task } from '../../types/alpha'
 
 const { Text } = Typography
 
+/**
+ * {@link ProgressCard} 组件 props。
+ */
 interface ProgressCardProps {
   /** 当前决策任务（来自 useTask 订阅，复用既有 task/WS 机制）。 */
   task?: Task | null

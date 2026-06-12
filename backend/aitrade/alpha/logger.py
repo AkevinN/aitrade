@@ -1,5 +1,9 @@
 """
-Alpha logger using loguru.
+Alpha 模块统一日志实例。
+
+基于 loguru 构建，移除默认输出后重新注册带颜色格式的 stdout sink，
+供 alpha 包内所有模块通过 ``from .logger import logger`` 引用。
+外部模块亦可直接 ``from aitrade.alpha import logger`` 使用。
 """
 
 import sys

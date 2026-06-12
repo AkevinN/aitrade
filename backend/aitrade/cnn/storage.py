@@ -24,11 +24,18 @@ def save_cnn_model(
     save_data: dict[str, Any],
     history: list[dict],
 ) -> tuple[Path, Path]:
-    """
-    保存 CNN 模型 checkpoint 和训练历史。
+    """保存 CNN 模型 checkpoint 和训练历史到 CNN_MODEL_DIR。
+
+    checkpoint 以 torch.save 格式（.pt）持久化，训练历史以 JSON 格式（_history.json）持久化。
+
+    Args:
+        name: 模型名称（不含后缀），文件保存为 {name}.pt 和 {name}_history.json。
+        save_data: 待持久化的 checkpoint 字典，含 model_state_dict/model_config/
+            train_config/normalization/dataset_info/best_epoch 等键。
+        history: 训练历史列表，每项为一个 epoch 的指标字典。
 
     Returns:
-        (model_path, history_path)
+        (model_path, history_path)：.pt 文件路径和 _history.json 文件路径的二元组。
     """
     import torch
 
@@ -44,7 +51,16 @@ def save_cnn_model(
 
 
 def list_cnn_models() -> list[dict]:
-    """列出已保存的 CNN 模型"""
+    """列出 CNN_MODEL_DIR 中所有已保存的模型摘要信息。
+
+    逐个加载 .pt checkpoint 并提取元数据；加载失败的文件不会抛错，
+    仅返回空 checkpoint 对应的默认值。
+
+    Returns:
+        字典列表，每项含 name/size_mb/created_at/modified/best_epoch/best_val_loss/
+        target_symbol/input_data_kind/input_interval/objective/group_count/
+        observation_groups 等键，按文件系统枚举顺序排列。
+    """
     import torch
 
     models: list[dict] = []
@@ -101,7 +117,18 @@ def model_input_interval(name: str) -> str:
 
 
 def get_cnn_model_detail(name: str) -> dict:
-    """获取模型详情"""
+    """获取指定模型的完整详情（含训练配置、归一化参数和逐 epoch 历史）。
+
+    Args:
+        name: 模型名称（不含 .pt 后缀）。
+
+    Returns:
+        字典，含 name/created_at/train_config/model_config/normalization/
+        dataset_info/best_epoch/best_val_loss/history 等键。
+
+    Raises:
+        FileNotFoundError: 模型文件不存在时抛出。
+    """
     import torch
 
     model_path = CNN_MODEL_DIR / f"{name}.pt"
@@ -129,7 +156,14 @@ def get_cnn_model_detail(name: str) -> dict:
 
 
 def delete_cnn_model(name: str) -> bool:
-    """删除 CNN 模型"""
+    """删除 CNN 模型文件（.pt 和 _history.json）。
+
+    Args:
+        name: 模型名称（不含后缀）。
+
+    Returns:
+        True 表示 .pt 文件已删除；False 表示模型文件本不存在（_history.json 的删除不影响返回值）。
+    """
     model_path = CNN_MODEL_DIR / f"{name}.pt"
     history_path = CNN_MODEL_DIR / f"{name}_history.json"
     deleted = False

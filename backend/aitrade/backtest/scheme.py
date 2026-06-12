@@ -28,7 +28,7 @@ from .registry import get_strategy
 class CostConfig(BaseModel):
     """成本与制度约束（与回测引擎成本字段一一对应）。"""
     commission_rate: float = Field(default=0.0003, description="单边佣金率")
-    stamp_duty: float = Field(default=0.001, description="卖出印花税率")
+    stamp_duty: float = Field(default=0.0005, description="卖出印花税率")
     slippage: float = Field(default=0.0005, description="每笔不利滑点率")
     t_plus1: bool = Field(default=False, description="T+1 卖出限制")
 
@@ -59,16 +59,41 @@ class Scheme(BaseModel):
 
 
 class SchemeStore:
-    """方案配置的 JSON 持久化（每方案一文件）。"""
+    """方案配置的 JSON 持久化（每方案一文件）。
+
+    每个 Scheme 以 ``{name}.json`` 存储于 base_path 目录，
+    文件名即方案名，便于直接查看与手动编辑。
+    """
 
     def __init__(self, base_path: Optional[Path] = None) -> None:
+        """初始化持久化存储，并确保目录存在。
+
+        Args:
+            base_path: 方案 JSON 根目录；None 时使用 config.SCHEME_PATH。
+        """
         self.base_path = Path(base_path) if base_path else SCHEME_PATH
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, name: str) -> Path:
+        """返回方案名对应的 JSON 文件路径。
+
+        Args:
+            name: 方案名（不含 .json 后缀）。
+
+        Returns:
+            完整文件路径 ``{base_path}/{name}.json``。
+        """
         return self.base_path / f"{name}.json"
 
     def save(self, scheme: Scheme) -> Path:
+        """将方案序列化为 JSON 并写入磁盘。
+
+        Args:
+            scheme: 待持久化的 Scheme 对象，其 name 用作文件名。
+
+        Returns:
+            写入的 JSON 文件绝对路径。
+        """
         path = self._path(scheme.name)
         path.write_text(
             json.dumps(scheme.model_dump(), ensure_ascii=False, indent=2),
@@ -77,15 +102,39 @@ class SchemeStore:
         return path
 
     def load(self, name: str) -> Scheme:
+        """从磁盘读取方案 JSON 并反序列化为 Scheme 对象。
+
+        Args:
+            name: 方案名（不含 .json 后缀）。
+
+        Returns:
+            反序列化后的 Scheme 对象。
+
+        Raises:
+            FileNotFoundError: 方案文件不存在时抛出。
+        """
         path = self._path(name)
         if not path.exists():
             raise FileNotFoundError(f"方案不存在：{name}")
         return Scheme.model_validate(json.loads(path.read_text(encoding="utf-8")))
 
     def list_names(self) -> list[str]:
+        """返回所有已保存方案的名称列表（升序）。
+
+        Returns:
+            base_path 下所有 .json 文件的 stem（不含后缀）列表。
+        """
         return sorted(p.stem for p in self.base_path.glob("*.json"))
 
     def delete(self, name: str) -> bool:
+        """删除指定方案的 JSON 文件。
+
+        Args:
+            name: 方案名（不含 .json 后缀）。
+
+        Returns:
+            True 表示文件存在且已删除；False 表示文件不存在。
+        """
         path = self._path(name)
         if path.exists():
             path.unlink()

@@ -1,5 +1,8 @@
 """
-Pydantic data models for aitrade API.
+aitrade API 请求/响应模型。
+
+定义所有 API 层使用的 Pydantic v2 模型：任务模型（TaskModel/TaskStatus/TaskType）、
+Alpha 研究请求（数据下载/数据集/模型训练/信号/回测）、CNN 相关请求，以及各种响应模型。
 """
 
 from datetime import date, datetime
@@ -10,7 +13,8 @@ from pydantic import BaseModel, Field
 
 
 class TaskStatus(str, Enum):
-    """Async task status."""
+    """异步任务状态枚举。"""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -18,7 +22,7 @@ class TaskStatus(str, Enum):
 
 
 class TaskType(str, Enum):
-    """Async task type."""
+    """异步任务类型枚举（单一事实来源，API 层与 TaskManager 共用）。"""
     DATA_DOWNLOAD = "data_download"
     DATA_IMPORT = "data_import"
     DATA_AGGREGATE = "data_aggregate"
@@ -37,10 +41,18 @@ class TaskType(str, Enum):
     CNN_GOVERNANCE_REPLAY = "cnn_governance_replay"
     SCHEME_BACKTEST = "scheme_backtest"
     LIVE_DECISION = "live_decision"
+    STRATEGY_BACKTEST = "strategy_backtest"
+    STRATEGY_SWEEP = "strategy_sweep"
+    STRATEGY_WALKFORWARD = "strategy_walkforward"
+    LIVE_REBALANCE = "live_rebalance"
 
 
 class TaskModel(BaseModel):
-    """Async task state model."""
+    """异步任务状态模型（内存存储 + API 响应共用）。
+
+    所有字段带默认值以保证既有消费者零回归；started_at/finished_at/duration_ms 为
+    task-scheduler-observability R1 新增字段，旧版 JSON 兼容读取（None 为默认）。
+    """
     task_id: str
     type: TaskType
     title: str = ""
@@ -52,6 +64,13 @@ class TaskModel(BaseModel):
     result: Optional[dict[str, Any]] = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    # --- 任务执行记录增强（task-scheduler-observability R1）---
+    # 全部带默认值，保证既有消费者零回归。
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    error_traceback: str = ""       # 失败堆栈，截断至 8000 字符
+    params: dict[str, Any] = Field(default_factory=dict)  # 创建参数摘要（已脱敏）
 
 
 # =============================================================================
@@ -67,6 +86,7 @@ class DataDownloadRequest(BaseModel):
     source_interval: Optional[str] = Field(default=None, description="原始K线周期，如 d/1m/5m")
     interval: Optional[str] = Field(default=None, description="兼容旧字段，等价于 source_interval")
     provider: Optional[str] = Field(default=None, description="指定数据源，如 tushare/akshare；为空则自动选择")
+    asset_class: Literal["stock", "etf", "cbond"] = Field(default="stock", description="品种类型：stock=A股股票；etf=交易所交易基金；cbond=可转债")
 
 
 class DataAggregateRequest(BaseModel):
@@ -135,7 +155,7 @@ class CNNBacktestRequest(BaseModel):
     buy_threshold: float = Field(default=0.6, description="买入阈值 (0~1)")
     sell_threshold: float = Field(default=0.4, description="卖出阈值 (0~1)")
     commission_rate: float = Field(default=0.0003, ge=0, lt=0.1, description="单边佣金率（默认万3）")
-    stamp_duty: float = Field(default=0.001, ge=0, lt=0.1, description="卖出印花税率（默认千1，A股现行）")
+    stamp_duty: float = Field(default=0.0005, ge=0, lt=0.1, description="卖出印花税率（默认0.5‰，A股2023-08起现行）")
     slippage: float = Field(default=0.0005, ge=0, lt=0.1, description="每笔成交不利滑点率（默认5bp）")
     price_add: float = Field(default=0.002, ge=0, lt=0.1, description="限价单价格缓冲/市价化挂单（默认20bp）")
     exit_mode: Literal["threshold", "fixed_hold", "oco", "auto"] = Field(
@@ -295,6 +315,11 @@ class ContractSetting(BaseModel):
     short_rate: float = 0.0
     size: float = 1.0
     pricetick: float = 0.01
+    # 可选字段：不传则不写入 JSON（保持 JSON 干净）
+    stamp_duty: float | None = None      # 卖出印花税率（A 股 2023-08 起默认 0.0005）
+    slippage: float | None = None        # 每笔成交不利滑点率
+    limit_ratio: float | None = None     # 单边涨跌停比例（None = 无限制，如转债）
+    t_plus1: bool | None = None          # T+1 卖出限制（引擎层消费为下一任务）
 
 
 class SystemStatus(BaseModel):

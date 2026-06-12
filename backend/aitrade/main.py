@@ -5,8 +5,10 @@ FastAPI 应用主入口 — aitrade 后端服务。
 """
 
 import logging
+import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,12 +22,53 @@ from .config import (
     SCHEDULER_TICK_SECONDS,
 )
 from .datasource import AkshareProvider, MockProvider, TushareProvider, datasource_manager
-from .api import alpha_router, cnn_router, live_router, status_router
+from .api import alpha_router, cnn_router, live_router, status_router, strategy_router
 from .api.live import build_plan_scheduler, register_scheduler
 from .api.ws import ws_manager
 from .live.single_instance import SingleInstanceLock
 
 logger = logging.getLogger(__name__)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def _configure_logging() -> None:
+    """配置统一的后端 logging（R7.1 / R7.2）。
+
+    - 日志级别经 AITRADE_LOG_LEVEL 环境变量控制，默认 INFO。
+    - basicConfig 以 force=False（温和模式）运行：uvicorn 已配置 root handler 时为 no-op，
+      避免破坏 uvicorn 控制台输出。
+    - 若设置了 AITRADE_LOG_FILE，为 root logger 追加 RotatingFileHandler
+      （单文件 20MB、保留 5 份；幂等：同路径 handler 已存在不重复加）。
+    """
+    level_str = os.getenv("AITRADE_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_str, logging.INFO)
+
+    # force=False：uvicorn 已有 root handler 时为 no-op（温和，不破坏控制台输出）
+    logging.basicConfig(level=level, format=_LOG_FORMAT)
+
+    log_file = os.getenv("AITRADE_LOG_FILE")
+    if log_file:
+        root = logging.getLogger()
+        # 幂等：同路径 RotatingFileHandler 已存在则跳过
+        existing_paths = {
+            getattr(h, "baseFilename", None)
+            for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+        }
+        abs_path = os.path.abspath(log_file)
+        if abs_path not in existing_paths:
+            fh = RotatingFileHandler(
+                abs_path,
+                maxBytes=20 * 1024 * 1024,  # 20 MB
+                backupCount=5,
+                encoding="utf-8",
+            )
+            fh.setFormatter(logging.Formatter(_LOG_FORMAT))
+            root.addHandler(fh)
+
+
+_configure_logging()
 
 
 @asynccontextmanager
@@ -69,14 +112,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         register_scheduler(None)
 
 
-def create_app() -> FastAPI:
-    """创建 FastAPI 应用实例。"""
+def create_app(history_store=None) -> FastAPI:
+    """创建 FastAPI 应用实例。
+
+    Args:
+        history_store: 可选的 TaskHistoryStore 实例（测试注入用）。
+                       None 时使用默认路径（TASK_HISTORY_PATH）的单例。
+    """
+    from .task.history import TaskHistoryStore as _TaskHistoryStore
+    from .config import TASK_HISTORY_PATH as _TASK_HISTORY_PATH
+
     app = FastAPI(
         title="Aitrade Backend API",
         description="AI 量化交易研究平台后端 API",
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # 注入 history_store 到 app.state，供 alpha 路由使用（R2.3）
+    app.state.history_store = history_store or _TaskHistoryStore(_TASK_HISTORY_PATH)
 
     app.add_middleware(
         CORSMiddleware,
@@ -90,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(alpha_router)
     app.include_router(cnn_router)
     app.include_router(live_router)
+    app.include_router(strategy_router)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

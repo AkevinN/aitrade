@@ -18,7 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 def _broadcast_group_mask(group_mask: np.ndarray, x: np.ndarray) -> np.ndarray:
-    """Expand a [1,1,1,S,G] mask to [N,1,T,S,G] for normalization."""
+    """将 [1,1,1,S,G] 掩码广播为 [N,1,T,S,G]，供逐样本归一化使用。
+
+    Args:
+        group_mask: 分组掩码，形状 [1, 1, 1, S, G]，float32。
+        x: 特征张量，形状 [N, C, T, S, G]；仅使用其 shape 计算广播目标。
+
+    Returns:
+        广播后的掩码，形状 [N, 1, T, S, G]；N 为样本数，T 为时间步数。
+    """
     return np.broadcast_to(
         group_mask,
         (x.shape[0], 1, 1, x.shape[3], x.shape[4]),
@@ -30,7 +38,22 @@ def _normalize_grouped_tensor(
     full_x: np.ndarray,
     group_mask: np.ndarray,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Fit channel-wise stats on train slice only and apply to all samples."""
+    """在训练集上拟合逐通道均值/标准差，并对全集（训练+验证）做标准化。
+
+    只使用训练集的有效样本（group_mask=1 的位置）计算统计量，防止验证集数据泄漏；
+    归一化后对无效位置（掩码=0）保持 0，NaN/Inf 替换为 0。
+
+    Args:
+        train_x: 训练集特征张量，形状 [N_train, C, T, S, G]，float32。
+        full_x: 全集特征张量，形状 [N, C, T, S, G]，float32（N >= N_train）。
+        group_mask: 分组掩码，形状 [1, 1, 1, S, G]，float32；有效位为 1.0。
+
+    Returns:
+        (normalized_full_x, normalization_info)：
+        - normalized_full_x: 标准化后的全集张量，形状同 full_x，float32。
+        - normalization_info: 含 channel_mean/channel_std/group_mask 的字典，
+          供推理时复现同一标准化（保存到 checkpoint）。
+    """
     train_valid = _broadcast_group_mask(group_mask, train_x)
     full_valid = _broadcast_group_mask(group_mask, full_x)
 
@@ -229,11 +252,46 @@ def train_cnn_model(
     loss_weighting: str = "none",
     objective: str = "classification",
 ) -> dict[str, Any]:
-    """Train a grouped market CNN and persist checkpoint + training history.
+    """训练分组感知的多尺度行情 CNN 并持久化 checkpoint 与训练历史。
 
-    objective:
-    - "classification"：方向二分类，Sigmoid + BCELoss，输出上涨概率。
-    - "regression"：直接预测未来收益，线性输出 + Huber 损失，配 IC/MAE 等指标。
+    流程：
+    1. 构建样本集（build_dataset）；
+    2. 在训练集上拟合逐通道归一化参数（_normalize_grouped_tensor）；
+    3. AdamW + CosineAnnealingLR 迭代训练，按业务指标（AUC/RankIC）选最佳 epoch；
+    4. 早停：连续 patience 轮无改善则提前终止；
+    5. 将最佳权重、训练配置、归一化统计量等保存到 checkpoint（save_cnn_model）。
+
+    模型名后自动追加 _{start:%Y%m%d}-{end:%Y%m%d} 后缀，以便回测侧识别并跳过训练区间。
+
+    Args:
+        name: 模型基础名称；最终保存名为 {name}_{start}-{end}（如 name 已含后缀则不重复）。
+        vt_symbols: 参与训练的证券代码列表（observation_groups 为空时构造默认分组）。
+        start: 训练数据起始日期（含）。
+        end: 训练数据结束日期（含）。
+        target_symbol: 预测目标证券代码；None 时取 vt_symbols[0]。
+        epochs: 最大训练轮数；默认 50。
+        batch_size: 每批样本数；默认 32。
+        learning_rate: AdamW 初始学习率；默认 0.001。
+        lookback: 每个样本的回看 bar 数（时间窗口 T）；默认 30。
+        dropout: 全连接头 Dropout 概率；默认 0.5。
+        train_ratio: 训练集比例（时间顺序切分，非随机）；默认 0.7。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+        observation_groups: 语义分组配置；None 时退化为旧版兼容逻辑。
+        input_data_kind: 数据种类，"bar" 或 "tick"。
+        input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
+        label_spec: label 配置字典；None → 默认 next_bar。
+        loss_weighting: 损失加权策略，"none"（均匀）或 "magnitude"（幅度加权，仅分类）。
+        objective: 训练目标，"classification"（BCELoss）或 "regression"（HuberLoss）。
+
+    Returns:
+        训练结果字典，含 name/model_path/history_path/best_epoch/best_val_loss/
+        best_val_acc/beats_baseline/total_params/train_samples/val_samples/
+        elapsed_seconds/history/tensor_shape 等键；
+        回归模式下额外含 best_val_ic/best_val_rank_ic/best_val_mae/best_val_dir_acc，
+        分类模式下额外含 best_val_auc/best_val_f1。
+
+    Raises:
+        ValueError: 样本数不足（< 50）、训练集或验证集为空时抛出。
     """
     import torch
     import torch.nn as nn

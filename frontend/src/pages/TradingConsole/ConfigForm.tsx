@@ -32,6 +32,9 @@ const DATA_SOURCE_OPTIONS = [
   { label: '上传文件（CSV / parquet）', value: 'upload' },
 ]
 
+/**
+ * {@link ConfigForm} 组件 props。
+ */
 interface ConfigFormProps {
   /** 拿到 task_id 后回传给页面，供进度/结果/风控区消费（任务 9.3~9.5）。 */
   onStarted: (taskId: string) => void

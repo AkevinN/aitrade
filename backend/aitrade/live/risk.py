@@ -12,6 +12,16 @@ from dataclasses import dataclass, field
 
 @dataclass
 class RiskConfig:
+    """风控参数配置。
+
+    Attributes:
+        blacklist:                禁止买入的标的集合（vt_symbol，经 normalize 后存储）。
+        max_total_position_ratio: 总持仓市值 / 组合总市值 上限（0~1），默认 0.95。
+        max_single_position_ratio: 单票市值 / 组合总市值 上限（0~1），默认 0.30。
+        daily_loss_limit:         单日亏损熔断阈值（相对组合市值比例），0 表示不启用熔断。
+        allow_when_halted:        停牌/涨跌停封死标的是否允许买入，默认 False。
+    """
+
     blacklist: set[str] = field(default_factory=set)
     max_total_position_ratio: float = 0.95   # 总持仓市值 / 组合市值 上限
     max_single_position_ratio: float = 0.30  # 单票市值 / 组合市值 上限
@@ -20,17 +30,37 @@ class RiskConfig:
 
 
 class RiskManager:
-    """前置风控。kill_switch 与 circuit_broken 为运行时状态。"""
+    """前置风控管理器。kill_switch 与 circuit_broken 为运行时状态（不持久化）。
+
+    任何下单/建议前必须经此风控：`can_trade()` 检全局闸门，`check_buy()` 检买入细节。
+    `RiskGuardedGateway` 在 send_order 前调用 `can_trade()`；`SignalService` 在买入决策前
+    调用 `check_buy()` / `buy_capacity()`。
+
+    Example:
+        >>> mgr = RiskManager(RiskConfig(max_single_position_ratio=0.2))
+        >>> mgr.can_trade()
+        (True, '')
+        >>> mgr.trip_kill_switch()
+        >>> mgr.can_trade()
+        (False, '人工 kill-switch 已触发，暂停所有交易')
+    """
 
     def __init__(self, config: RiskConfig | None = None) -> None:
+        """初始化 RiskManager。
+
+        Args:
+            config: 风控配置，None 时使用全默认参数。
+        """
         self.config = config or RiskConfig()
         self.kill_switch: bool = False
         self.circuit_broken: bool = False
 
     def trip_kill_switch(self) -> None:
+        """人工触发 kill-switch，立即暂停所有交易（全局闸门）。"""
         self.kill_switch = True
 
     def reset(self) -> None:
+        """重置 kill-switch 与熔断标志（人工恢复用）。"""
         self.kill_switch = False
         self.circuit_broken = False
 
@@ -42,7 +72,11 @@ class RiskManager:
         return self.circuit_broken
 
     def can_trade(self) -> tuple[bool, str]:
-        """全局闸门：kill-switch / 熔断。"""
+        """全局闸门：检查 kill-switch 与单日亏损熔断。
+
+        Returns:
+            (True, "") 表示可交易；(False, 原因) 表示被阻断。
+        """
         if self.kill_switch:
             return False, "人工 kill-switch 已触发，暂停所有交易"
         if self.circuit_broken:
@@ -58,7 +92,21 @@ class RiskManager:
         current_symbol_value: float = 0.0,
         halted: bool = False,
     ) -> tuple[bool, str]:
-        """买入前置检查。返回 (放行, 原因)。"""
+        """买入前置检查（权威判定）。
+
+        按序检查：全局闸门 → 黑名单 → 停牌/封死 → 组合市值非正 → 总仓位上限 → 单票上限。
+
+        Args:
+            vt_symbol:                    目标标的。
+            intended_value:               拟买入市值（元），用于仓位上限校验。
+            portfolio_value:              组合总市值（元）。
+            current_total_position_value: 当前总持仓市值（元），不含本次买入。
+            current_symbol_value:         该标的当前持仓市值（元），默认 0。
+            halted:                       标的当日是否停牌/封死，默认 False。
+
+        Returns:
+            (True, "") 放行；(False, 原因文本) 拦截，原因供审计/提醒。
+        """
         ok, reason = self.can_trade()
         if not ok:
             return False, reason

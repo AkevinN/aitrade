@@ -7,7 +7,17 @@ import { useNavigate } from 'react-router-dom'
 
 import AlphaBacktest from './AlphaBacktest'
 import CNNBacktest from './CNNBacktest'
+import RuleBacktest from './RuleBacktest'
 
+/**
+ * 回测页面（Tab 容器）。
+ *
+ * 包含四个标签：
+ * - Alpha 因子回测
+ * - CNN 模型回测
+ * - 规则策略回测（本分支新增）
+ * - 治理回放回测（跳转至 CNN 治理页）
+ */
 const Backtest: React.FC = () => {
   const navigate = useNavigate()
   return (
@@ -34,6 +44,16 @@ const Backtest: React.FC = () => {
               </span>
             ),
             children: <CNNBacktest />,
+          },
+          {
+            key: 'rule',
+            label: (
+              <span>
+                <LineChartOutlined />
+                规则策略回测
+              </span>
+            ),
+            children: <RuleBacktest />,
           },
           {
             key: 'cnn-governance-replay',

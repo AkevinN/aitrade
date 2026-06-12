@@ -18,13 +18,34 @@ from .gateway import (
 
 
 class PaperBroker(BrokerGateway):
+    """模拟盘网关：内存撮合，用于纸面/沙盒验证，不连接任何真实交易所。
+
+    成交口径：按委托价即时成交（限价/市价不区分）；
+    买入扣佣金；卖出扣佣金 + 印花税；资金/持仓不足拒单；
+    同 client_order_id 重复提交返回首单结果（幂等）。
+
+    Example:
+        >>> broker = PaperBroker(cash=500_000)
+        >>> req = OrderRequest("oid1", "000001.SZSE", "long", "open", 100, 12.5)
+        >>> report = broker.send_order(req)
+        >>> report.status
+        'filled'
+    """
+
     def __init__(
         self,
         cash: float = 1_000_000.0,
         commission_rate: float = 0.0003,
-        stamp_duty: float = 0.001,
+        stamp_duty: float = 0.0005,
         size: float = 1.0,
     ) -> None:
+        """
+        Args:
+            cash:            初始资金（元）。
+            commission_rate: 单边佣金率（买卖均收）。
+            stamp_duty:      卖出印花税率（买入不收，默认 0.05%，2023 起 A 股标准）。
+            size:            合约乘数（股票为 1，期货按品种设置）。
+        """
         self.cash = cash
         self.commission_rate = commission_rate
         self.stamp_duty = stamp_duty
@@ -35,6 +56,17 @@ class PaperBroker(BrokerGateway):
 
     # -- BrokerGateway --
     def send_order(self, req: OrderRequest) -> OrderReport:
+        """下单并撮合（内存即时成交）。
+
+        幂等：同 client_order_id 重复提交直接返回首单结果，不重复扣款/加仓。
+        资金不足（买入）或持仓不足（卖出）时返回 REJECTED 回报。
+
+        Args:
+            req: 委托请求。
+
+        Returns:
+            OrderReport；成交时 status=filled，拒单时 status=rejected，message 含原因。
+        """
         # 幂等：重复 client_order_id 直接返回首单结果
         if req.client_order_id in self._orders:
             return self._orders[req.client_order_id]
@@ -77,6 +109,14 @@ class PaperBroker(BrokerGateway):
         return report
 
     def cancel_order(self, client_order_id: str) -> bool:
+        """撤销活跃订单（submitted / partial 状态），已终结订单无法撤销。
+
+        Args:
+            client_order_id: 委托 id。
+
+        Returns:
+            True 表示成功撤销，False 表示订单不存在或已终结。
+        """
         report = self._orders.get(client_order_id)
         if report and report.is_active:
             report.status = "cancelled"
@@ -84,10 +124,13 @@ class PaperBroker(BrokerGateway):
         return False
 
     def query_orders(self) -> list[OrderReport]:
+        """返回全部历史订单回报列表（包含已成交/已撤/已拒单）。"""
         return list(self._orders.values())
 
     def query_positions(self) -> dict[str, float]:
+        """返回当前持仓快照（vt_symbol → 股数，零持仓标的不含在内）。"""
         return dict(self.positions)
 
     def query_account(self) -> dict:
+        """返回账户资金状态（含可用现金）。"""
         return {"cash": self.cash}

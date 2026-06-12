@@ -20,6 +20,12 @@ class RiskInspector:
     """包住 RiskManager，逐项记录风控检查明细。判定结果仍以 RiskManager 为准。"""
 
     def __init__(self, risk: RiskManager) -> None:
+        """初始化 RiskInspector。
+
+        Args:
+            risk: 被包装的 RiskManager 实例，承载权威判定逻辑与配置。
+                  RiskInspector 不修改其状态，仅读取 `config` 属性并透传方法调用。
+        """
         self._risk = risk
         self.records: list[dict] = []  # [{check, passed, detail}]
 

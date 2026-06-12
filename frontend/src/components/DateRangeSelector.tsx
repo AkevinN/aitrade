@@ -6,15 +6,30 @@ import dayjs from 'dayjs'
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/** 本地数据可用时间范围（ISO 日期字符串）。 */
 export interface LocalDateRange {
+  /** 可用起始日期（ISO 格式，如 `"2024-01-01"`）。 */
   start: string
+  /** 可用结束日期（ISO 格式）。 */
   end: string
 }
 
+/**
+ * {@link DateRangeSelector} 组件 props。
+ */
 export interface DateRangeSelectorProps {
+  /** 当前选中区间（受控）；`null` 表示未选。 */
   value?: [Dayjs, Dayjs] | null
+  /** 区间变化回调；传入 `null` 表示清空选择。 */
   onChange?: (value: [Dayjs, Dayjs] | null) => void
+  /**
+   * 本地数据可用区间，用于：
+   * 1. 约束快捷预设不超出本地范围；
+   * 2. 显示「本地全区间」快捷按钮；
+   * 3. 展示可用区间提示文字。
+   */
   localRange?: LocalDateRange | null
+  /** 是否展示快捷预设按钮（近1月/3月/6月等），默认 `true`。 */
   showPresets?: boolean
 }
 
@@ -52,6 +67,16 @@ const DATE_RANGE_PRESETS: DateRangePreset[] = [
   },
 ]
 
+/**
+ * 将预设区间收缩到本地可用区间范围内。
+ *
+ * 若 `localRange` 为空则直接返回原区间；否则将 start 下限夹紧到 localRange.start，
+ * end 上限夹紧到 localRange.end；若夹紧后 start > end 则退回整个 localRange。
+ *
+ * @param range - 原始区间。
+ * @param localRange - 本地数据可用范围。
+ * @returns 夹紧后的区间。
+ */
 const clampRange = (
   range: [Dayjs, Dayjs],
   localRange?: LocalDateRange | null,
@@ -74,6 +99,12 @@ const clampRange = (
   return [start, end]
 }
 
+/**
+ * 日期区间选择器：Ant Design RangePicker + 快捷预设按钮组。
+ *
+ * 提供「近1月/3月/6月/1年/3年」快捷预设，以及「使用本地全区间」按钮（当 `localRange` 存在时显示）。
+ * 所有预设区间都会被 {@link clampRange} 约束在 `localRange` 范围内，避免请求无数据的区间。
+ */
 const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
   value,
   onChange,

@@ -1,4 +1,8 @@
-"""CNN 模型治理请求/响应模型。"""
+"""
+CNN 模型治理请求/响应模型。
+
+定义 Walk-Forward 评估、候选训练、晋级/回滚、治理回放等治理流程的 Pydantic v2 模型。
+"""
 
 from __future__ import annotations
 
@@ -19,7 +23,11 @@ GovernanceBaseline = Literal[
 
 
 class CNNGovernanceConfig(BaseModel):
-    """CNN 治理模块配置。"""
+    """CNN 治理模块配置（全局开关与默认参数）。
+
+    控制 Walk-Forward 评估周期、训练/测试窗口大小、随机种子数量等治理行为；
+    ``auto_promote=False`` 要求人工确认晋级，适合第一版保守运营。
+    """
 
     enabled: bool = Field(default=True, description="是否启用治理模块")
     evaluation_period_days: int = Field(default=30, ge=1, description="默认评估周期（天）")
@@ -31,7 +39,10 @@ class CNNGovernanceConfig(BaseModel):
 
 
 class CNNTrainingParams(BaseModel):
-    """治理训练参数。"""
+    """CNN 治理训练超参数（Walk-Forward 与候选训练共用）。
+
+    与单次训练接口的参数结构对齐；各字段均带范围约束，防止异常值导致 OOM 或发散。
+    """
 
     epochs: int = Field(default=20, ge=1, le=500)
     batch_size: int = Field(default=32, ge=1, le=4096)
@@ -43,12 +54,16 @@ class CNNTrainingParams(BaseModel):
 
 
 class CNNBacktestParams(BaseModel):
-    """治理回测参数。"""
+    """CNN 治理回测参数（阈值、成本、出场规则）。
+
+    控制信号阈值（buy_threshold / sell_threshold）、A 股交易成本（佣金/印花税/滑点）
+    以及出场模式（threshold / fixed_hold / oco / auto）；T+1 默认开启贴近 A 股现实。
+    """
 
     buy_threshold: float = 0.6
     sell_threshold: float = 0.4
     commission_rate: float = Field(default=0.0003, ge=0, lt=0.1)
-    stamp_duty: float = Field(default=0.001, ge=0, lt=0.1)
+    stamp_duty: float = Field(default=0.0005, ge=0, lt=0.1)
     slippage: float = Field(default=0.0005, ge=0, lt=0.1)
     price_add: float = Field(default=0.002, ge=0, lt=0.1)
     exit_mode: Literal["threshold", "fixed_hold", "oco", "auto"] = "auto"
@@ -59,7 +74,11 @@ class CNNBacktestParams(BaseModel):
 
 
 class CNNPromotionGate(BaseModel):
-    """候选模型晋级门禁。"""
+    """候选模型晋级门禁（Walk-Forward 折内胜出条件）。
+
+    当候选模型的 min_win_rate 折数胜出、核心指标提升 >= min_core_score_delta
+    且最大回撤劣化 <= max_drawdown_worsen_pct 时，才允许晋级（或提示运营人工确认）。
+    """
 
     min_win_rate: float = Field(default=0.5, ge=0, le=1, description="候选胜出折数比例下限")
     min_core_score_delta: float = Field(default=0.0, description="核心分数相对生产模型的平均提升下限")
@@ -68,7 +87,11 @@ class CNNPromotionGate(BaseModel):
 
 
 class CNNWalkForwardRequest(BaseModel):
-    """启动 CNN walk-forward/OOS 评估。"""
+    """启动 CNN Walk-Forward / OOS 评估的请求体。
+
+    分 train_days 训练窗 + test_days OOS 测试窗逐步前推；production_model 为空时
+    自动读取当前生产模型作为相对胜出基准。step_days 为空时默认等于 test_days（无重叠滚动）。
+    """
 
     name: str = Field(description="评估名称")
     target_symbol: str
@@ -89,21 +112,25 @@ class CNNWalkForwardRequest(BaseModel):
 
 
 class CNNCandidateTrainRequest(CNNWalkForwardRequest):
-    """训练候选模型请求。"""
+    """在全量（或指定）窗口上训练候选模型的请求体。
+
+    继承 ``CNNWalkForwardRequest`` 的所有评估配置；额外可指定 final_train_start /
+    final_train_end 以覆盖最终训练窗，不指定时沿用请求 start 或最后一个训练窗结束。
+    """
 
     final_train_start: Optional[date] = Field(default=None, description="最终候选训练起始日期；为空用请求 start")
     final_train_end: Optional[date] = Field(default=None, description="最终候选训练结束日期；为空用最后一个训练窗口结束")
 
 
 class CNNPromotionRequest(BaseModel):
-    """候选晋级请求。"""
+    """将候选模型晋级为生产模型的请求体（人工确认用）。"""
 
     promoted_by: str = Field(default="manual")
     note: str = ""
 
 
 class CNNRollbackRequest(BaseModel):
-    """生产模型回滚请求。"""
+    """将生产模型回滚到指定版本（或上一生产模型）的请求体。"""
 
     rollback_to: Optional[str] = Field(default=None, description="指定回滚模型；为空回滚上一生产模型")
     requested_by: str = Field(default="manual")
@@ -111,7 +138,11 @@ class CNNRollbackRequest(BaseModel):
 
 
 class CNNGovernanceReplayRequest(BaseModel):
-    """治理回放回测请求。"""
+    """治理回放回测请求：模拟历史上若使用治理流程会有何收益/风险。
+
+    以 initial_train_days 初始训练窗启动，每 evaluation_period_days 评估一次，
+    并与 baselines（固定初始模型/永远重训/治理晋级/买入持有）做横向对比。
+    """
 
     name: str
     target_symbol: str
@@ -140,7 +171,11 @@ class CNNGovernanceReplayRequest(BaseModel):
 
 
 class CNNProductionModel(BaseModel):
-    """当前生产模型状态。"""
+    """当前生产模型状态（持久化的晋级记录快照）。
+
+    promoted_at / promoted_by 记录最近一次晋级操作的时刻与操作者；
+    previous_model_name / previous_model_version 保留上一版生产模型信息（回滚用）。
+    """
 
     model_name: str = ""
     model_version: str = ""
@@ -155,7 +190,11 @@ class CNNProductionModel(BaseModel):
 
 
 class CNNGovernanceHistoryEvent(BaseModel):
-    """治理历史事件。"""
+    """治理历史事件记录（审计日志条目）。
+
+    每次晋级/回滚/评估触发时追加到历史序列；payload 含操作参数与判定结果，
+    供治理回放与合规审计使用。
+    """
 
     ts: datetime = Field(default_factory=datetime.now)
     event_type: str

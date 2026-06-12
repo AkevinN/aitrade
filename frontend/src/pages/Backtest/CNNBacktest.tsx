@@ -18,6 +18,13 @@ import type { BacktestResultPayload, BacktestStatistics } from '../../types/alph
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/**
+ * CNN 模型回测页面。
+ *
+ * 支持分类（方向二分类）与回归（预测收益）两种模型，阈值口径随模型类型自动切换。
+ * 出场模式：threshold（概率阈值）/ fixed_hold（固定持有）/ oco（止盈止损）/ auto（按 label 推导）。
+ * 回测结果展示统计指标、成交明细与净值曲线，含 label↔策略一致性自检提示。
+ */
 const CNNBacktest: React.FC = () => {
   const [backtestName, setBacktestName] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
@@ -34,9 +41,9 @@ const CNNBacktest: React.FC = () => {
   const [takeProfit, setTakeProfit] = useState(0.02)
   const [stopLoss, setStopLoss] = useState(0.03)
   const [tPlus1, setTPlus1] = useState(false)
-  // 成本假设（A股默认：佣金万3、卖出印花税千1、滑点5bp、限价缓冲20bp）
+  // 成本假设（A股默认：佣金万3、卖出印花税0.5‰、滑点5bp、限价缓冲20bp）
   const [commissionRate, setCommissionRate] = useState(0.0003)
-  const [stampDuty, setStampDuty] = useState(0.001)
+  const [stampDuty, setStampDuty] = useState(0.0005)
   const [slippage, setSlippage] = useState(0.0005)
   const [priceAdd, setPriceAdd] = useState(0.002)
   const [taskId, setTaskId] = useState<string | null>(null)
@@ -81,6 +88,12 @@ const CNNBacktest: React.FC = () => {
     }
   }, [isRegression])
 
+  /**
+   * 启动 CNN 回测任务。
+   *
+   * 校验模型已选且 threshold 模式下买入阈值 > 卖出阈值，
+   * 回测名称留空则自动生成（cnn_bt_{model}_{timestamp}）。
+   */
   const handleRun = useCallback(async () => {
     if (!selectedModel) {
       message.warning('请选择一个 CNN 模型')
@@ -314,7 +327,7 @@ const CNNBacktest: React.FC = () => {
                   <InputNumber
                     style={{ width: '100%' }}
                     value={stampDuty}
-                    onChange={(v) => setStampDuty(v ?? 0.001)}
+                    onChange={(v) => setStampDuty(v ?? 0.0005)}
                     min={0}
                     max={0.01}
                     step={0.0005}

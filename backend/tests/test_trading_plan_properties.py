@@ -20,10 +20,10 @@ from aitrade.live import notifier_channels as nc
 from aitrade.live import plan_scheduler as ps_mod
 from aitrade.live import trading_plan as tp_mod
 from aitrade.live.calendar import TradingCalendar
+from aitrade.live.legacy_migration import migrate_plan
 from aitrade.live.notifier import LogNotifier, MultiNotifier
-from aitrade.live.plan_scheduler import PlanScheduler
+from aitrade.live.plan_scheduler import PlanScheduler, _schedule_matches_today
 from aitrade.live.runtime_state import RuntimeStateStore
-from aitrade.live.scheduler import due_slots
 from aitrade.live.trading_plan import TradingPlan, TradingPlanStore
 from aitrade.models.trading_plan import TradingPlanRequest
 
@@ -223,7 +223,7 @@ def _scheduler(tmpdir, plans, *, now, healthy=True, calendar=None):
     return sched, calls, state
 
 
-weekday_datetimes = st.datetimes(
+weekdaydatetimes = st.datetimes(
     min_value=datetime(2026, 1, 1), max_value=datetime(2026, 12, 31)
 )
 trigger_time_strs = st.builds(
@@ -242,9 +242,9 @@ trigger_time_strs = st.builds(
 # Validates: Requirements 4.2, 4.3
 @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(
-    now=weekday_datetimes,
+    now=weekdaydatetimes,
     dt_str=trigger_time_strs,
-    last_trig=st.one_of(st.none(), weekday_datetimes.map(lambda d: d.date())),
+    last_trig=st.one_of(st.none(), weekdaydatetimes.map(lambda d: d.date())),
 )
 def test_property_5_single_time_trigger_decision(now, dt_str, last_trig):
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -326,7 +326,7 @@ def test_property_7_restart_recovery_no_duplicate(_seed):
 # 对任意 enabled=false 的计划，无论时刻与日历如何，tick_once 不触发它。
 # Validates: Requirements 4.5
 @settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
-@given(now=weekday_datetimes, dt_str=trigger_time_strs)
+@given(now=weekdaydatetimes, dt_str=trigger_time_strs)
 def test_property_8_disabled_plan_never_triggers(now, dt_str):
     with tempfile.TemporaryDirectory() as tmpdir:
         plan = _make_plan(enabled=False, trigger_time=dt_str)
@@ -427,3 +427,223 @@ def test_property_12_no_broker_order_path(_seed):
                 assert token not in lowered, (
                     f"{module.__name__} 不应 import 下单相关模块: {mod_name}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Task 3.1 / 3.6 新增属性测试
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Property 13: 旧版 JSON（无 v2 字段）读取 → 默认值正确，磁盘回写收敛
+# ---------------------------------------------------------------------------
+# Phase 3 M2 Task 3.1：旧计划无 strategy_type/signal_source 等 → migrate 后
+# 这些字段均取新默认值，再次 migrate 幂等（值不再变化）。
+def test_property_13_legacy_json_v2_fields_defaults():
+    """旧计划 JSON 读取后新字段均为合法默认值，且 migrate 幂等。"""
+    # 最小旧版 JSON（无 v2 字段，只有 v1 必需字段）
+    old_raw: dict = {
+        "plan_id": "p_legacy",
+        "name": "旧计划",
+        "model": "m1",
+        "vt_symbol": "000001.SZSE",
+        "scheme": "s1",
+        "bar_freq": "1d",
+        "trigger_times": ["15:05"],
+    }
+    migrated = migrate_plan(old_raw)
+    # 新字段默认值
+    assert migrated["strategy_type"] == "cnn"
+    assert migrated["signal_source"] == ""
+    assert migrated["signal_params"] == {}
+    assert migrated["trigger_schedule"] == "daily"
+    assert migrated["portfolio_id"] == ""
+    # migrate 幂等：对已迁移结果再次 migrate 结果不变
+    again = migrate_plan(migrated)
+    assert again == migrated
+
+
+# ---------------------------------------------------------------------------
+# Property 14: migrate_plan 幂等（对新结构任意调用次数，结果稳定）
+# ---------------------------------------------------------------------------
+@settings(max_examples=100, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@given(
+    strat=st.sampled_from(["cnn", "rule"]),
+    src=st.text(alphabet="abcdef_", min_size=0, max_size=12),
+    sched=st.sampled_from(["daily", "weekly_first", "monthly_first"]),
+)
+def test_property_14_migrate_plan_idempotent(strat, src, sched):
+    """migrate_plan 对任意含 v2 字段的 plan 幂等。"""
+    raw = {
+        "plan_id": "px",
+        "name": "n",
+        "model": "m",
+        "vt_symbol": "000001.SZSE",
+        "scheme": "s",
+        "bar_freq": "1d",
+        "trigger_times": ["15:05"],
+        "strategy_type": strat,
+        "signal_source": src,
+        "signal_params": {},
+        "trigger_schedule": sched,
+        "portfolio_id": "",
+    }
+    once = migrate_plan(raw)
+    twice = migrate_plan(once)
+    assert once == twice
+
+
+# ---------------------------------------------------------------------------
+# Property 15: _schedule_matches_today 闸门行为（确定性用例）
+# ---------------------------------------------------------------------------
+def _cal_from_trading_days(days: list[date]) -> TradingCalendar:
+    return TradingCalendar(trading_days=days)
+
+
+def test_property_15a_daily_always_passes():
+    """strategy_type='cnn'，trigger_schedule='daily' → 闸门恒真。"""
+    plan = _make_plan(trigger_time="15:05")
+    # 给 plan 加 trigger_schedule
+    plan.trigger_schedule = "daily"  # type: ignore[attr-defined]
+    cal = TradingCalendar()
+    for d in [date(2026, 6, 9), date(2026, 6, 10), date(2026, 6, 11)]:
+        assert _schedule_matches_today(plan, d, cal) is True
+
+
+def test_property_15b_weekly_first_mon_only_trading():
+    """周一是本周唯一交易日 → weekly_first 在周一通过，周二不通过（非交易日忽略）。
+
+    构造：本周仅周一（2026-06-08）为交易日。
+    """
+    trading_days = [date(2026, 6, 8)]  # 仅周一
+    cal = _cal_from_trading_days(trading_days)
+    plan = _make_plan(trigger_time="15:05")
+    plan.trigger_schedule = "weekly_first"  # type: ignore[attr-defined]
+    # 周一是本周第一个（也是唯一）交易日 → True
+    assert _schedule_matches_today(plan, date(2026, 6, 8), cal) is True
+    # 周三不是交易日 → False（today 本身不是交易日）
+    assert _schedule_matches_today(plan, date(2026, 6, 10), cal) is False
+
+
+def test_property_15c_weekly_first_holiday_mon_tue_is_first():
+    """周一是节假日，周二是本周第一个交易日 → weekly_first 在周二通过。
+
+    构造：2026-06-08（周一）是节假日；2026-06-09（周二）是交易日。
+    """
+    trading_days = [date(2026, 6, 9), date(2026, 6, 10), date(2026, 6, 11),
+                    date(2026, 6, 12)]  # 周二~周五
+    cal = _cal_from_trading_days(trading_days)
+    plan = _make_plan(trigger_time="15:05")
+    plan.trigger_schedule = "weekly_first"  # type: ignore[attr-defined]
+    # 周一不是交易日 → False（today 自身不是交易日）
+    assert _schedule_matches_today(plan, date(2026, 6, 8), cal) is False
+    # 周二是本周第一个交易日 → True
+    assert _schedule_matches_today(plan, date(2026, 6, 9), cal) is True
+    # 周三不是本周第一个交易日（周二已是）→ False
+    assert _schedule_matches_today(plan, date(2026, 6, 10), cal) is False
+
+
+def test_property_15d_monthly_first():
+    """月初第一个交易日。
+
+    构造：2026-07-01（周三）节假日，2026-07-02（周四）是7月第一个交易日。
+    """
+    trading_days = [date(2026, 7, 2), date(2026, 7, 3), date(2026, 7, 6)]
+    cal = _cal_from_trading_days(trading_days)
+    plan = _make_plan(trigger_time="15:05")
+    plan.trigger_schedule = "monthly_first"  # type: ignore[attr-defined]
+    # 7月1日不是交易日 → False
+    assert _schedule_matches_today(plan, date(2026, 7, 1), cal) is False
+    # 7月2日是本月第一个交易日 → True
+    assert _schedule_matches_today(plan, date(2026, 7, 2), cal) is True
+    # 7月3日不是第一个 → False
+    assert _schedule_matches_today(plan, date(2026, 7, 3), cal) is False
+
+
+def test_property_15e_weekly_first_normal_week():
+    """普通周：周一是交易日 → weekly_first 在周一通过，周二不通过。"""
+    # 全周均为交易日（默认日历，不过节假日）
+    cal = TradingCalendar()  # 默认：工作日即交易日
+    plan = _make_plan(trigger_time="15:05")
+    plan.trigger_schedule = "weekly_first"  # type: ignore[attr-defined]
+    mon = date(2026, 6, 8)   # 周一
+    tue = date(2026, 6, 9)   # 周二
+    assert _schedule_matches_today(plan, mon, cal) is True
+    assert _schedule_matches_today(plan, tue, cal) is False
+
+
+# ---------------------------------------------------------------------------
+# Property 16: rule 计划缺 signal_source → 请求体校验 422
+# ---------------------------------------------------------------------------
+def test_property_16_rule_plan_missing_signal_source_rejected():
+    """strategy_type='rule' 且 signal_source 为空 → pydantic 校验 ValueError。"""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    with _pytest.raises(ValidationError):
+        TradingPlanRequest(
+            name="规则计划",
+            model="m1",
+            vt_symbol="000001.SZSE",
+            scheme="s1",
+            portfolio={"portfolio_value": 1_000_000.0},
+            strategy_type="rule",
+            signal_source="",  # 空 → 应 422
+        )
+
+
+def test_property_16b_rule_plan_with_signal_source_ok():
+    """strategy_type='rule' 且 signal_source 非空 → 校验通过。"""
+    req = TradingPlanRequest(
+        name="规则计划",
+        model="m1",
+        vt_symbol="000001.SZSE",
+        scheme="s1",
+        portfolio={"portfolio_value": 1_000_000.0},
+        strategy_type="rule",
+        signal_source="etf_momentum",
+    )
+    assert req.strategy_type == "rule"
+    assert req.signal_source == "etf_momentum"
+
+
+def test_property_16c_invalid_trigger_schedule_rejected():
+    """trigger_schedule 非法值 → pydantic 校验 ValueError。"""
+    import pytest as _pytest
+    from pydantic import ValidationError
+    with _pytest.raises(ValidationError):
+        TradingPlanRequest(
+            name="计划",
+            model="m1",
+            vt_symbol="000001.SZSE",
+            scheme="s1",
+            portfolio={"portfolio_value": 1_000_000.0},
+            trigger_schedule="weekly",  # 非法值（应为 weekly_first）
+        )
+
+
+# ---------------------------------------------------------------------------
+# Property 17: 周/月闸门与调度器集成 — 非触发日计划不执行
+# ---------------------------------------------------------------------------
+def test_property_17_weekly_gate_non_first_day_skipped():
+    """weekly_first 计划在非本周第一个交易日不触发（调度器层集成）。"""
+    # 周二（2026-06-09）→ 普通周，周一（06-08）才是第一个交易日
+    now = datetime(2026, 6, 9, 15, 30)  # 周二
+    cal = TradingCalendar()  # 默认：工作日即交易日
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plan = _make_plan(enabled=True, trigger_time="15:05")
+        plan.trigger_schedule = "weekly_first"  # type: ignore[attr-defined]
+        sched, calls, _state = _scheduler(tmpdir, [plan], now=now, calendar=cal)
+        sched.tick_once()
+        assert calls == []  # 周二不是本周第一个交易日 → 不触发
+
+
+def test_property_17b_weekly_gate_first_day_triggers():
+    """weekly_first 计划在本周第一个交易日触发。"""
+    now = datetime(2026, 6, 8, 15, 30)  # 周一（本周第一个交易日）
+    cal = TradingCalendar()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plan = _make_plan(enabled=True, trigger_time="15:05")
+        plan.trigger_schedule = "weekly_first"  # type: ignore[attr-defined]
+        sched, calls, _state = _scheduler(tmpdir, [plan], now=now, calendar=cal)
+        sched.tick_once()
+        assert calls == [plan.plan_id]  # 周一是本周第一个交易日 → 触发

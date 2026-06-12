@@ -34,7 +34,7 @@ class CNNSignalStrategy(BaseStrategy):
     stop_loss: float = 0.0         # oco：止损幅度（如 0.03=-3%），0=不启用
 
     def on_init(self) -> None:
-        """策略初始化回调"""
+        """策略初始化回调 —— 重置内部持仓状态并记录初始化日志。"""
         # 固定持有/OCO 出场的内部状态
         self._entry_fill_dt: Optional[date] = None   # 当前持仓的建仓成交日
         self._entry_price: Optional[float] = None    # 当前持仓的建仓成交价（OCO 止盈止损基准）
@@ -43,7 +43,14 @@ class CNNSignalStrategy(BaseStrategy):
         self.write_log(f"CNN 信号策略已初始化，出场模式={self.exit_mode}")
 
     def on_trade(self, trade: TradeData) -> None:
-        """成交回报回调 —— 维护固定持有计数与建仓价"""
+        """成交回报回调 —— 维护固定持有计数与建仓价。
+
+        建仓成交时记录成交日期与价格并重置持有计数；
+        平仓成交时清空全部状态，允许后续重新入场。
+
+        Args:
+            trade: 成交回报对象，含 direction/datetime/price 等字段。
+        """
         trade_dt = trade.datetime.date() if trade.datetime else None
         if trade.direction == Direction.LONG:
             # 建仓成交：记录成交日/成交价并重置持有计数
@@ -59,7 +66,11 @@ class CNNSignalStrategy(BaseStrategy):
             self._last_count_dt = None
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
-        """K 线切片回调 —— 核心交易逻辑（按出场模式分派）"""
+        """K 线切片回调 —— 按 exit_mode 分派到对应的交易逻辑。
+
+        Args:
+            bars: 当前时刻各证券的 BarData 字典（vt_symbol → BarData）。
+        """
         if self.exit_mode == "fixed_hold":
             self._on_bars_fixed_hold(bars)
         elif self.exit_mode == "oco":
@@ -71,6 +82,14 @@ class CNNSignalStrategy(BaseStrategy):
     # 阈值出场（默认，向后兼容）
     # ------------------------------------------------------------------
     def _on_bars_threshold(self, bars: dict[str, BarData]) -> None:
+        """阈值出场模式（默认，向后兼容）的 K 线处理逻辑。
+
+        概率 > buy_threshold 且空仓时买入；概率 < sell_threshold 且持仓时平仓。
+        出场完全依赖 CNN 概率信号，realized 持有期不固定。
+
+        Args:
+            bars: 当前时刻各证券的 BarData 字典。
+        """
         signal = self.get_signal()
         if signal.is_empty():
             return
@@ -98,6 +117,15 @@ class CNNSignalStrategy(BaseStrategy):
     # 固定持有出场（与固定持有期 label 对齐）
     # ------------------------------------------------------------------
     def _on_bars_fixed_hold(self, bars: dict[str, BarData]) -> None:
+        """固定持有出场模式的 K 线处理逻辑，与固定持有期 label 对齐。
+
+        出场优先：持有满 hold_days 个交易日后强制平仓（不依赖信号）。
+        入场：空仓且无在途建仓时，概率达标才买入。
+        每个交易日仅计数一次（防同日重复计数），确保 hold_days 为实际交易日数。
+
+        Args:
+            bars: 当前时刻各证券的 BarData 字典。
+        """
         if not self.vt_symbols:
             return
         vt_symbol = self.vt_symbols[0]
@@ -135,6 +163,19 @@ class CNNSignalStrategy(BaseStrategy):
     # OCO 出场（止盈 + 止损，路径依赖；保守假设止损先到）
     # ------------------------------------------------------------------
     def _on_bars_oco(self, bars: dict[str, BarData]) -> None:
+        """OCO 出场模式（止盈 + 止损，路径依赖）的 K 线处理逻辑。
+
+        持仓时，同一根 bar 内 high/low 先后未知时保守假设止损先触发：
+        1. 止损触发（low <= sl_price）→ 按 sl_price 当根 bar 内盘中出场；
+        2. 止盈触发（high >= tp_price）→ 按 tp_price 当根 bar 内盘中出场；
+        3. 最大持有期回退（hold_count >= hold_days）→ 下一根 bar 成交出场。
+        T+1 限制下，买入当日不触发止盈止损。
+
+        空仓时：概率达标则建仓。
+
+        Args:
+            bars: 当前时刻各证券的 BarData 字典。
+        """
         if not self.vt_symbols:
             return
         vt_symbol = self.vt_symbols[0]

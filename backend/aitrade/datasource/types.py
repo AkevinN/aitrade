@@ -9,7 +9,7 @@ from enum import Enum
 
 
 class DataCategory(str, Enum):
-    """Data category — identifies what a Provider can supply."""
+    """数据品类枚举，标识各 Provider 能提供的数据种类，用于管理器路由决策。"""
     CONTRACT = "contract"
     BAR_HISTORY = "bar_history"
     TICK_HISTORY = "tick_history"
@@ -24,7 +24,8 @@ class DataCategory(str, Enum):
 
 
 class ProviderStatus(str, Enum):
-    """Data source availability status."""
+    """数据源可用状态枚举：AVAILABLE（正常）/ DEGRADED（降级）/
+    UNAVAILABLE（不可用）/ NOT_CONFIGURED（未配置）。"""
     AVAILABLE = "available"
     DEGRADED = "degraded"
     UNAVAILABLE = "unavailable"
@@ -33,7 +34,7 @@ class ProviderStatus(str, Enum):
 
 @dataclass
 class ContractInfo:
-    """Unified contract metadata."""
+    """统一合约元信息：代码、交易所、品种类型、最小变动价位等。"""
     symbol: str
     exchange: str
     name: str
@@ -48,12 +49,13 @@ class ContractInfo:
 
     @property
     def vt_symbol(self) -> str:
+        """返回合约全称：``"{symbol}.{exchange}"``，如 ``"600519.SSE"``。"""
         return f"{self.symbol}.{self.exchange}"
 
 
 @dataclass
 class BarRecord:
-    """Unified bar/K-line record."""
+    """统一 K 线记录，兼容日线 / 分钟线，含复权口径标记。"""
     symbol: str
     exchange: str
     datetime: datetime
@@ -72,7 +74,7 @@ class BarRecord:
 
 @dataclass
 class TickRecord:
-    """Unified historical tick record."""
+    """统一历史逐笔行情记录，含最新价、量、买一/卖一价量。"""
     symbol: str
     exchange: str
     datetime: datetime
@@ -87,7 +89,7 @@ class TickRecord:
 
 @dataclass
 class CalendarDay:
-    """Trade calendar entry."""
+    """交易日历条目：日期、交易所与是否开市。"""
     date: str  # YYYYMMDD
     exchange: str
     is_open: bool
@@ -96,7 +98,7 @@ class CalendarDay:
 
 @dataclass
 class FundamentalRecord:
-    """Fundamental data record."""
+    """单日基本面数据记录：PE/PB/市值/换手率等估值与交投指标。"""
     symbol: str
     exchange: str
     trade_date: str
@@ -113,7 +115,7 @@ class FundamentalRecord:
 
 @dataclass
 class ProviderInfo:
-    """Data source description."""
+    """数据源描述：名称、状态、支持品类与优先级，供管理器/前端展示。"""
     name: str
     display_name: str
     status: ProviderStatus

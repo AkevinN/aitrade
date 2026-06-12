@@ -19,8 +19,9 @@ from tqdm import tqdm
 
 from .types import Direction, Offset, OrderData, TradeData, BarData
 from .strategy import BaseStrategy
-from .pnl import ContractDailyResult, PortfolioDailyResult
+from .pnl import PortfolioDailyResult
 from .oco import check_oco_trigger
+from .instrument import infer_limit_ratio, infer_t_plus1
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,19 @@ class BarDataLoader(Protocol):
 
 
 def round_to(value: float, pricetick: float) -> float:
-    """Round price to nearest tick"""
+    """将价格对齐到最小价格跳动（pricetick）的整数倍。
+
+    Args:
+        value: 待对齐的原始价格或价格增量。
+        pricetick: 品种最小价格变动单位，如 0.01（A 股）。
+
+    Returns:
+        经四舍五入后距离 value 最近的 pricetick 整数倍价格。
+
+    Example:
+        >>> round_to(10.234, 0.01)
+        10.23
+    """
     return round(value / pricetick) * pricetick
 
 
@@ -53,7 +66,12 @@ class BacktestingEngine:
     gateway_name: str = "BACKTESTING"
 
     def __init__(self, data_loader: BarDataLoader) -> None:
-        """Constructor"""
+        """初始化回测引擎，绑定数据加载器并清空内部状态。
+
+        Args:
+            data_loader: 实现 BarDataLoader 协议的数据加载对象，负责提供历史 K 线
+                与合约配置；Alpha/CNN 模块可各自注入不同实现。
+        """
         self.data_loader: BarDataLoader = data_loader
 
         self.vt_symbols: list[str] = []
@@ -66,6 +84,9 @@ class BacktestingEngine:
         self.slippages: dict[str, float] = {}      # 每笔成交不利滑点率
         self.sizes: dict[str, float] = {}
         self.priceticks: dict[str, float] = {}
+        # 涨跌停比例：None 表示无限制（转债），float 表示单边比例（如 0.1=10%）。
+        # 由 infer_limit_ratio 自动推断，contract_settings 中的 limit_ratio 优先覆盖。
+        self.limit_ratios: dict[str, float | None] = {}
 
         self.capital: float = 0
         self.risk_free: float = 0
@@ -101,6 +122,17 @@ class BacktestingEngine:
         # T+1：当日买入不可当日卖出（默认关闭，按需开启）
         self.t_plus1: bool = False
         self.buy_dates: dict[str, date] = {}
+        # T+1 豁免标的：contract setting 中 t_plus1=false 的品种（如可转债）。
+        # 豁免标的即使全局 t_plus1=True 也允许当日买当日卖。
+        # 注：全局 t_plus1=False 时本集合不起效果（_t_plus1_locked 短路返回 False）。
+        # 注：contract setting t_plus1=true 且全局 t_plus1=False 的组合不作处理（YAGNI）。
+        self.t_plus1_exempt: set[str] = set()
+
+        # 停牌无量门槛：load_data 时统计至少有一根 volume>0 bar 的标的。
+        # 撮合时若标的在此集合内且当根 bar.volume<=0，视为停牌/合成 bar，跳过撮合。
+        # 从未出现过 volume>0 的标的（如 parquet 缺 volume 列兜底 0.0）不加入，
+        # 豁免门槛，避免此类数据全程零成交且无任何报错。
+        self.volume_supported: set[str] = set()
 
         # 限价单成交价口径（与训练 label 的 price_ref 对齐，杜绝回测↔label 背离）：
         #   open  = 撮合 bar 的开盘价（默认/旧行为，对齐 next_open）
@@ -120,7 +152,20 @@ class BacktestingEngine:
         risk_free: float = 0,
         annual_days: int = 240
     ) -> None:
-        """Set parameters"""
+        """设置回测全局参数：标的列表、时间范围、资金与成本配置。
+
+        从 data_loader 加载合约配置（contract.json），自动填充各标的的佣金率、
+        滑点、涨跌停比例与 T+1 豁免集合；未找到合约配置时按品种规则推断并告警。
+
+        Args:
+            vt_symbols: 回测标的列表，如 ``["000001.SZSE", "600000.SSE"]``。
+            interval: K 线周期，``"d"`` 为日线，``"1m"``/``"30m"`` 为分钟线。
+            start: 回测起始时间（含）。
+            end: 回测截止时间（含）。
+            capital: 初始资金（元），默认 1,000,000。
+            risk_free: 无风险年化利率（小数），用于 Sharpe Ratio 计算，默认 0。
+            annual_days: 年化交易日数，默认 240（A 股）。
+        """
         self.vt_symbols = vt_symbols
         self.interval = interval
 
@@ -137,6 +182,12 @@ class BacktestingEngine:
             setting: dict | None = contract_settings.get(vt_symbol, None)
             if not setting:
                 logger.warning(f"找不到合约{vt_symbol}的交易配置，请检查！")
+                # 无合约配置时仍填充推断的涨跌停比例，避免撮合时缺键
+                if vt_symbol not in self.limit_ratios:
+                    self.limit_ratios[vt_symbol] = infer_limit_ratio(vt_symbol)
+                # 无合约配置时按品种推断 T+1 豁免（转债 T+0）
+                if not infer_t_plus1(vt_symbol):
+                    self.t_plus1_exempt.add(vt_symbol)
                 continue
 
             self.long_rates[vt_symbol] = setting["long_rate"]
@@ -145,9 +196,27 @@ class BacktestingEngine:
             self.slippages[vt_symbol] = setting.get("slippage", 0.0)
             self.sizes[vt_symbol] = setting["size"]
             self.priceticks[vt_symbol] = setting["pricetick"]
+            # limit_ratio：contract.json 显式配置优先，否则按品种推断
+            if vt_symbol not in self.limit_ratios:
+                self.limit_ratios[vt_symbol] = setting.get(
+                    "limit_ratio", infer_limit_ratio(vt_symbol)
+                )
+            # t_plus1 豁免：contract setting 显式配置优先；缺失时按品种推断（转债 T+0）。
+            # setting.get("t_plus1", infer_t_plus1(vt_symbol)) is False 判定豁免：
+            #   - setting["t_plus1"]=False        → 显式配置豁免
+            #   - 键缺失 + infer_t_plus1=False    → 推断豁免（如转债无合约配置）
+            if setting.get("t_plus1", infer_t_plus1(vt_symbol)) is False:
+                self.t_plus1_exempt.add(vt_symbol)
 
     def add_strategy(self, strategy_class: type, setting: dict, signal_df: pl.DataFrame) -> None:
-        """Add strategy"""
+        """实例化策略并注入信号 DataFrame。
+
+        Args:
+            strategy_class: BaseStrategy 子类，将以 self 为引擎、setting 为参数被实例化。
+            setting: 策略参数字典，注入策略实例的同名属性（如 ``exit_mode``/``hold_days``）。
+            signal_df: 外部预计算的模型信号表，列至少含 ``[datetime, vt_symbol, signal]``；
+                策略通过 ``get_signal()`` 在回放时按当前时间戳检索对应行。
+        """
         self.strategy_class = strategy_class
         self.strategy = strategy_class(
             self, strategy_class.__name__, copy(self.vt_symbols), setting
@@ -155,7 +224,17 @@ class BacktestingEngine:
         self.signal_df = signal_df
 
     def load_data(self) -> None:
-        """Load historical data"""
+        """加载所有标的的历史 K 线到内存，并初始化成交量支持集合。
+
+        按 vt_symbols 逐只调用 data_loader.load_bar_data，将每根 bar 按
+        (datetime, vt_symbol) 键写入 self.history_data；同时收集所有出现过的 datetime
+        到 self.dts（用于 run_backtesting 的时间轴排序）。
+
+        副作用：
+        - 对任何历史区间内出现过 volume > 0 的标的，加入 self.volume_supported；
+          全程无量的标的自动豁免停牌不成交门槛并写告警日志。
+        - 无数据的标的记入告警。
+        """
         logger.info("开始加载历史数据")
 
         if not self.end:
@@ -180,6 +259,9 @@ class BacktestingEngine:
             for bar in data:
                 self.dts.add(bar.datetime)
                 self.history_data[(bar.datetime, vt_symbol)] = bar
+                # 只要有一根 bar 的成交量大于 0，即认为该标的数据含有量信息
+                if bar.volume > 0:
+                    self.volume_supported.add(vt_symbol)
 
             data_count = len(data)
             if not data_count:
@@ -188,10 +270,25 @@ class BacktestingEngine:
         if empty_symbols:
             logger.info(f"部分合约历史数据为空：{empty_symbols}")
 
+        # 有 bar 数据但从未出现 volume>0 的标的：自动豁免停牌不成交门槛，并告警
+        symbols_with_bars = {vt_symbol for vt_symbol in self.vt_symbols
+                             if any((bar_dt, vt_symbol) in self.history_data
+                                    for bar_dt in self.dts)}
+        no_volume_symbols = symbols_with_bars - self.volume_supported
+        if no_volume_symbols:
+            logger.warning(
+                f"以下标的全程无 volume 信息，已豁免停牌不成交门槛：{sorted(no_volume_symbols)}"
+            )
+
         logger.info("所有历史数据加载完成")
 
     def run_backtesting(self) -> None:
-        """Start backtesting"""
+        """按时间顺序回放历史 K 线，驱动策略回调与订单撮合。
+
+        先调用 strategy.on_init()，再对 dts 中所有时间戳升序调用 new_bars()。
+        任何异常（含策略层抛出的）都会中止回测并打印 traceback。
+        本方法不返回值；结果存于 self.trades / self.daily_results 供后续统计使用。
+        """
         self.strategy.on_init()
         logger.info("策略初始化完成")
 
@@ -210,7 +307,16 @@ class BacktestingEngine:
         logger.info("历史数据回放结束")
 
     def calculate_result(self) -> pl.DataFrame | None:
-        """Calculate daily results"""
+        """汇总逐日盯市损益，返回每日统计 DataFrame。
+
+        将 self.trades 中的每笔成交分配到对应交易日，依次调用各日
+        PortfolioDailyResult.calculate_pnl()（前收盘价与期末持仓向后传递），
+        最终汇总为逐日 DataFrame 写入 self.daily_df。
+
+        Returns:
+            列为 [date, trade_count, turnover, commission, trading_pnl, holding_pnl,
+            total_pnl, net_pnl] 的 polars DataFrame；无任何交易日结果时返回 None。
+        """
         logger.info("开始计算逐日盯市结果")
 
         if not self.daily_results:
@@ -258,7 +364,24 @@ class BacktestingEngine:
         return self.daily_df
 
     def calculate_statistics(self) -> dict:
-        """Calculate strategy statistics"""
+        """在 daily_df 基础上计算全套策略统计指标并写回 self.daily_df（补充净值列）。
+
+        在 calculate_result() 之后调用。计算流程：
+        1. 用 net_pnl 累加还原每日净值（balance）、最高净值（highlevel）；
+        2. 推导 drawdown / ddpercent / return；
+        3. 若任一交易日资金 <= 0（爆仓），打印告警并返回全零统计；
+        4. 计算 Sharpe Ratio、年化收益、最大回撤等 22 个指标；
+           零回撤时 return_drawdown_ratio 安全返回 0（避免 ZeroDivisionError）。
+
+        Returns:
+            含以下键的 dict（所有 inf / NaN 被规整为 0）：
+            start_date / end_date / total_days / profit_days / loss_days /
+            capital / end_balance / max_drawdown / max_ddpercent /
+            max_drawdown_duration / total_net_pnl / daily_net_pnl /
+            total_commission / daily_commission / total_turnover / daily_turnover /
+            total_trade_count / daily_trade_count / total_return / annual_return /
+            daily_return / return_std / sharpe_ratio / return_drawdown_ratio。
+        """
         logger.info("开始计算策略统计指标")
 
         start_date: str = ""
@@ -427,7 +550,17 @@ class BacktestingEngine:
         return statistics
 
     def update_daily_close(self, bars: dict[str, BarData], dt: datetime) -> None:
-        """Update daily closing price"""
+        """用当前 bar 的收盘价更新或新建当日盯市结果。
+
+        在每个时间戳回放结束时调用，将 bars 中各标的的 close_price 写入对应
+        PortfolioDailyResult.close_prices；当日尚无结果时自动新建。
+        收盘价为 0 的 bar（停牌/合成 fill_bar）回退到 pre_closes 的前收盘价，
+        避免停牌日价格归零拉低持仓估值。
+
+        Args:
+            bars: 当前时间戳的活跃 bar 字典，key 为 vt_symbol。
+            dt: 当前回放时间戳（用于确定日期键）。
+        """
         d: date = dt.date()
 
         close_prices: dict[str, float] = {}
@@ -445,7 +578,15 @@ class BacktestingEngine:
             self.daily_results[d] = PortfolioDailyResult(d, close_prices)
 
     def new_bars(self, dt: datetime) -> None:
-        """Push historical data"""
+        """推送单个时间戳的 K 线切片，触发撮合与策略回调。
+
+        对当前时间戳 dt 在 history_data 中查询每个标的的 bar；
+        若无对应 bar 则以前收盘价合成一根平行 bar（量为 0，用于维持价格向前填充）。
+        流程：cross_order() → strategy.on_bars(bars) → update_daily_close(bars, dt)。
+
+        Args:
+            dt: 当前推送的时间戳，必须在 self.dts 集合中。
+        """
         self.datetime = dt
 
         bars: dict[str, BarData] = {}
@@ -481,9 +622,18 @@ class BacktestingEngine:
         self.update_daily_close(self.bars, dt)
 
     def _bar_reference_price(self, bar: BarData) -> float:
-        """按 fill_price_mode 返回撮合参考价：open / close / vwap(成交额/成交量)。
+        """按 fill_price_mode 返回撮合参考价：open / close / vwap。
 
-        vwap 在量为 0 或无成交额时回退到收盘价，与 dataset 的 next_vwap 口径一致。
+        三种模式对应三种成交价口径，须与训练 label 的 price_ref 对齐（杜绝回测↔label 背离）：
+        - ``open``：撮合 bar 的开盘价（默认/旧行为，对齐 next_open）。
+        - ``close``：撮合 bar 的收盘价（市价化 MOC，对齐 next_close）。
+        - ``vwap``：成交额 / 成交量（对齐 next_vwap）；量或额为 0 时回退到收盘价。
+
+        Args:
+            bar: 当前撮合 bar。
+
+        Returns:
+            大于等于 0 的参考价格浮点数。
         """
         mode = self.fill_price_mode
         if mode == "close":
@@ -496,8 +646,36 @@ class BacktestingEngine:
             return bar.close_price
         return bar.open_price
 
+    def _t_plus1_locked(self, vt_symbol: str) -> bool:
+        """判断当前标的是否受 T+1 卖出限制（当根 bar 不可卖出）。
+
+        同时满足以下三个条件才返回 True：
+        1. 全局 self.t_plus1 开关为 True；
+        2. 该标的不在 self.t_plus1_exempt 豁免集合中；
+        3. 今日（self.datetime.date()）已有该标的的买入记录。
+
+        Args:
+            vt_symbol: 待判定的合约代码，如 ``"000001.SZSE"``。
+
+        Returns:
+            True 表示当日买入不可当日卖出；False 表示允许卖出。
+        """
+        if not self.t_plus1 or vt_symbol in self.t_plus1_exempt:
+            return False
+        if self.datetime is None:
+            return False
+        return self.buy_dates.get(vt_symbol) == self.datetime.date()
+
     def cross_order(self) -> None:
-        """Match orders（先按 OCO 分组撮合止盈止损，再撮合普通限价单）"""
+        """对活跃订单执行撮合，先处理 OCO 括号单，再处理普通限价单。
+
+        撮合优先级：
+        1. _cross_oco_orders()：止盈/止损括号单（保守假设止损先到）；
+        2. 遍历 active_limit_orders 中非 OCO 腿的限价单；
+        3. 对每笔订单检查停牌门槛（有量标的在零量 bar 不撮合）、涨跌停封板、
+           T+1 限制；通过后调用 _settle_fill() 完成成交结算。
+        fill_price_mode 为 close/vwap 时为市价化成交，委托限价不封顶成交价。
+        """
         # OCO 止盈止损括号单优先撮合（含「止损先到」保守假设）
         self._cross_oco_orders()
 
@@ -509,6 +687,12 @@ class BacktestingEngine:
                 continue
 
             bar: BarData = self.bars[order.vt_symbol]
+
+            # 停牌门槛：有量数据标的（volume_supported）在无量 bar（停牌/合成 fill_bar）
+            # 上不撮合，订单留存到下一根真实有量 bar 再成交。
+            # 全程无量的标的（如 parquet 缺 volume 列）豁免此检查，照常撮合。
+            if order.vt_symbol in self.volume_supported and bar.volume <= 0:
+                continue
 
             long_cross_price: float = bar.low_price
             short_cross_price: float = bar.high_price
@@ -522,8 +706,18 @@ class BacktestingEngine:
             pricetick: float = self.priceticks[order.vt_symbol]
             pre_close: float = self.pre_closes.get(order.vt_symbol, 0)
 
-            limit_up: float = round_to(pre_close * 1.1, pricetick)
-            limit_down: float = round_to(pre_close * 0.9, pricetick)
+            # 品种化涨跌停：ratio=None（转债）→ 无限制（inf/0 使所有比较退化为"允许"）
+            _ratio: float | None = self.limit_ratios.get(
+                order.vt_symbol, infer_limit_ratio(order.vt_symbol)
+            )
+            if _ratio is None:
+                # ratio=None 时不依赖 pre_close，首根 bar（pre_close=0）即可成交；
+                # 有涨跌停品种首根 bar 维持旧行为（limit_up=0 不成交）
+                limit_up: float = float("inf")
+                limit_down: float = 0.0
+            else:
+                limit_up = round_to(pre_close * (1 + _ratio), pricetick)
+                limit_down = round_to(pre_close * (1 - _ratio), pricetick)
 
             if market_fill:
                 # 市价化成交（close/vwap）：以参考价成交，委托限价不封顶（对齐 label）。
@@ -556,12 +750,7 @@ class BacktestingEngine:
                 )
 
             # T+1：当日买入的持仓不可当日卖出，跳过本根撮合（订单保留，次日继续尝试）
-            if (
-                short_cross
-                and self.t_plus1
-                and self.datetime is not None
-                and self.buy_dates.get(order.vt_symbol) == self.datetime.date()
-            ):
+            if short_cross and self._t_plus1_locked(order.vt_symbol):
                 continue
 
             if not long_cross and not short_cross:
@@ -604,19 +793,26 @@ class BacktestingEngine:
             if tp_leg is None or sl_leg is None:
                 continue
 
+            # 停牌门槛：有量数据标的在无量 bar 上不撮合 OCO 腿
+            if legs[0].vt_symbol in self.volume_supported and bar.volume <= 0:
+                continue
+
             # T+1：当日买入不可当日卖出，本根跳过（OCO 腿保留待次日）
-            if (
-                self.t_plus1
-                and self.datetime is not None
-                and self.buy_dates.get(bar.vt_symbol) == self.datetime.date()
-            ):
+            if self._t_plus1_locked(bar.vt_symbol):
                 continue
 
             # 跌停封死（最高价仍 ≤ 跌停价）时卖不出，与主撮合 short 口径一致
             pricetick: float = self.priceticks[bar.vt_symbol]
             pre_close: float = self.pre_closes.get(bar.vt_symbol, 0)
-            limit_down: float = round_to(pre_close * 0.9, pricetick)
-            if pre_close and bar.high_price <= limit_down:
+            # 品种化跌停价：ratio=None（转债）→ 0.0，high_price > 0.0 永远满足（无限制）
+            _oco_ratio: float | None = self.limit_ratios.get(
+                bar.vt_symbol, infer_limit_ratio(bar.vt_symbol)
+            )
+            if _oco_ratio is None:
+                oco_limit_down: float = 0.0
+            else:
+                oco_limit_down = round_to(pre_close * (1 - _oco_ratio), pricetick)
+            if pre_close and bar.high_price <= oco_limit_down:
                 continue
 
             trig = check_oco_trigger(
@@ -635,7 +831,23 @@ class BacktestingEngine:
             self.cancel_order(self.strategy, loser.vt_orderid)
 
     def _settle_fill(self, order: OrderData, raw_price: float) -> TradeData:
-        """成交结算：叠加滑点、记录成交、更新现金与持仓。买卖共用，杜绝两处各算。"""
+        """成交结算：叠加滑点、更新订单状态、记录成交、更新现金与持仓。
+
+        买入方向叠加不利滑点（价格更高）；卖出方向叠加不利滑点（价格更低）。
+        成交后：
+        - 从 active_limit_orders 移除已成交订单；
+        - 创建 TradeData 并通知 strategy.update_trade()；
+        - 更新 self.cash（含佣金与卖出印花税）；
+        - 买入时记录 buy_dates，供 T+1 锁仓判定。
+        买卖共用，避免两处各算导致口径不一致。
+
+        Args:
+            order: 待结算的限价单。
+            raw_price: 结算前的原始参考价（滑点将在此基础上叠加）。
+
+        Returns:
+            已写入 self.trades 的 TradeData 对象。
+        """
         pricetick: float = self.priceticks[order.vt_symbol]
         slippage: float = self.slippages.get(order.vt_symbol, 0.0)
 
@@ -697,8 +909,14 @@ class BacktestingEngine:
 
         区别于限价单的「下一根撮合」：止盈/止损是触发价当根成交，这里直接结算一笔
         SHORT/CLOSE 成交（含佣金、卖出印花税、现金更新），保守由调用方决定触发价。
+
+        T+1 保护：全局 t_plus1=True 且标的未豁免且当日有买入时，拒绝成交（直接返回）。
+        此为引擎层防线，确保策略层 can_sell 遗漏时也不会绕过 T+1 约束。
         """
         if volume <= 0:
+            return
+        # T+1：当日买入不可当日 intrabar 平仓（豁免标的除外）
+        if self._t_plus1_locked(vt_symbol):
             return
         pricetick: float = self.priceticks[vt_symbol]
         trade_price: float = round_to(price, pricetick)
@@ -730,7 +948,11 @@ class BacktestingEngine:
         self.trades[trade.vt_tradeid] = trade
 
     def get_signal(self) -> pl.DataFrame:
-        """Get model prediction signal for current time"""
+        """返回当前时间戳对应的模型信号行（从 signal_df 中按 datetime 过滤）。
+
+        Returns:
+            过滤后的 polars DataFrame；当 datetime 为 None 或无匹配行时返回空 DataFrame。
+        """
         if not self.datetime:
             self.write_log("尚未开始数据回放，无法加载模型预测值")
             return pl.DataFrame()
@@ -752,7 +974,22 @@ class BacktestingEngine:
         price: float,
         volume: float,
     ) -> list[str]:
-        """Send order"""
+        """向撮合引擎挂出一笔限价单，返回 vt_orderid 列表（单笔）。
+
+        价格先对齐到 pricetick；新建 OrderData 以 STATUS_SUBMITTING 状态写入
+        active_limit_orders 和 limit_orders，等待下一个 cross_order() 时撮合。
+
+        Args:
+            strategy: 发出委托的策略实例（当前未使用，预留扩展）。
+            vt_symbol: 合约代码，如 ``"000001.SZSE"``。
+            direction: 委托方向，``Direction.LONG`` 或 ``Direction.SHORT``。
+            offset: 开平标志，``Offset.OPEN`` 或 ``Offset.CLOSE``。
+            price: 委托价格（元）。
+            volume: 委托数量（手/股）。
+
+        Returns:
+            含单个 vt_orderid 字符串的列表，如 ``["BACKTESTING.1"]``。
+        """
         price = round_to(price, self.priceticks[vt_symbol])
         symbol, exchange = vt_symbol.rsplit(".", 1)
 
@@ -819,7 +1056,14 @@ class BacktestingEngine:
         return order_ids
 
     def cancel_order(self, strategy: BaseStrategy, vt_orderid: str) -> None:
-        """Cancel order"""
+        """撤销指定活跃限价单，更新状态为 CANCELLED 并通知策略。
+
+        若 vt_orderid 不在 active_limit_orders 中（已成交或不存在），静默返回。
+
+        Args:
+            strategy: 发出撤单请求的策略实例。
+            vt_orderid: 要撤销的订单全局 ID，如 ``"BACKTESTING.3"``。
+        """
         if vt_orderid not in self.active_limit_orders:
             return
         order: OrderData = self.active_limit_orders.pop(vt_orderid)
@@ -828,28 +1072,53 @@ class BacktestingEngine:
         self.strategy.update_order(order)
 
     def write_log(self, msg: str, strategy: BaseStrategy | None = None) -> None:
-        """Output log message"""
+        """记录一条带时间戳前缀的日志消息到 self.logs 列表。
+
+        Args:
+            msg: 日志正文，将被拼接为 ``"{self.datetime}  {msg}"``。
+            strategy: 调用方策略实例（当前仅保留兼容，未使用）。
+        """
         msg = f"{self.datetime}  {msg}"
         self.logs.append(msg)
 
     def get_all_trades(self) -> list[TradeData]:
-        """Get all trade information"""
+        """返回所有历史成交记录列表。
+
+        Returns:
+            按 vt_tradeid 键存储的全部 TradeData 对象列表（顺序不保证）。
+        """
         return list(self.trades.values())
 
     def get_all_orders(self) -> list[OrderData]:
-        """Get all order information"""
+        """返回所有提交过的订单列表（含已成交、已撤销）。
+
+        Returns:
+            全部 OrderData 列表（包括已完成状态的订单）。
+        """
         return list(self.limit_orders.values())
 
     def get_all_daily_results(self) -> list[PortfolioDailyResult]:
-        """Get all daily profit and loss information"""
+        """返回所有交易日的组合盯市结果列表。
+
+        Returns:
+            按日期顺序（dict 插入顺序）排列的 PortfolioDailyResult 列表。
+        """
         return list(self.daily_results.values())
 
     def get_cash_available(self) -> float:
-        """Get current available cash"""
+        """返回当前可用现金余额（已扣除已成交买入金额及手续费）。
+
+        Returns:
+            现金余额浮点数（元），可能为负（爆仓场景）。
+        """
         return self.cash
 
     def get_holding_value(self) -> float:
-        """Get current holding market value"""
+        """按当前 bar 收盘价估算持仓市值。
+
+        Returns:
+            各标的 close_price × pos × size 加总的持仓市值（元）。
+        """
         holding_value: float = 0
 
         for vt_symbol, pos in self.strategy.pos_data.items():

@@ -1,3 +1,5 @@
+"""LightGBM 集成学习模型——基于 GBDT 的 Alpha 因子预测模型。"""
+
 from typing import cast
 
 import numpy as np
@@ -10,7 +12,16 @@ from ...dataset import AlphaDataset, Segment
 
 
 class LgbModel(AlphaModel):
-    """LightGBM ensemble learning algorithm"""
+    """LightGBM（GBDT）集成学习因子预测模型。
+
+    使用 MSE 作为目标函数，支持早停与验证集监控。
+    训练完成后可通过 detail() 生成特征重要性可视化图。
+
+    Example:
+        >>> model = LgbModel(learning_rate=0.05, num_leaves=63)
+        >>> model.fit(dataset)
+        >>> predictions = model.predict(dataset, Segment.TEST)
+    """
 
     def __init__(
         self,
@@ -21,21 +32,15 @@ class LgbModel(AlphaModel):
         log_evaluation_period: int = 1,
         seed: int | None = None
     ):
-        """
-        Parameters
-        ----------
-        learning_rate : float
-            Learning rate
-        num_leaves : int
-            Number of leaf nodes
-        num_boost_round : int
-            Maximum number of training rounds
-        early_stopping_rounds : int
-            Number of rounds for early stopping
-        log_evaluation_period : int
-            Interval rounds for printing training logs
-        seed : int | None
-            Random seed
+        """初始化 LightGBM 模型超参数。
+
+        Args:
+            learning_rate: 学习率，默认 0.1。
+            num_leaves: 每棵树的最大叶子节点数，默认 31。
+            num_boost_round: 最大训练轮数，默认 1000。
+            early_stopping_rounds: 验证集损失连续多少轮不改善时提前终止，默认 50。
+            log_evaluation_period: 每隔多少轮打印一次训练日志，默认 1。
+            seed: 随机种子；为 None 时不固定。
         """
         self.params: dict = {
             "objective": "mse",
@@ -51,8 +56,13 @@ class LgbModel(AlphaModel):
         self.model: lgb.Booster | None = None
 
     def _prepare_data(self, dataset: AlphaDataset) -> list[lgb.Dataset]:
-        """
-        Prepare data for training and validation
+        """从数据集中准备训练集与验证集的 LightGBM Dataset 列表。
+
+        Args:
+            dataset: 已完成预处理的 AlphaDataset 实例。
+
+        Returns:
+            长度为 2 的列表 [train_dataset, valid_dataset]，可直接传入 lgb.train。
         """
         ds: list[lgb.Dataset] = []
 
@@ -68,8 +78,10 @@ class LgbModel(AlphaModel):
         return ds
 
     def fit(self, dataset: AlphaDataset) -> None:
-        """
-        Fit the model using the dataset
+        """训练 LightGBM 模型，含早停机制。
+
+        Args:
+            dataset: 已完成 prepare_data 与 process_data 的 AlphaDataset 实例。
         """
         ds: list[lgb.Dataset] = self._prepare_data(dataset)
 
@@ -86,8 +98,17 @@ class LgbModel(AlphaModel):
         )
 
     def predict(self, dataset: AlphaDataset, segment: Segment) -> np.ndarray:
-        """
-        Make predictions using the trained model
+        """对指定区间的推断数据进行预测。
+
+        Args:
+            dataset: 已拟合完成的数据集，特征列须与训练时一致。
+            segment: 目标区间，Segment.TRAIN / VALID / TEST。
+
+        Returns:
+            一维 numpy 数组，长度等于目标区间样本数，为模型预测值。
+
+        Raises:
+            ValueError: fit 尚未调用（self.model 为 None）时抛出。
         """
         if self.model is None:
             raise ValueError("model is not fitted yet!")
@@ -101,8 +122,10 @@ class LgbModel(AlphaModel):
         return result
 
     def detail(self) -> None:
-        """
-        Display model details with feature importance plots
+        """展示特征重要性图（split 与 gain 两种口径，仅 Jupyter 环境）。
+
+        调用 lightgbm.plot_importance 生成 matplotlib 图表，
+        展示 Top-50 特征。模型未训练时静默返回。
         """
         if not self.model:
             return

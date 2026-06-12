@@ -3,11 +3,22 @@ import { Card, Row, Col, Statistic, Descriptions, Empty } from 'antd'
 
 import type { BacktestStatistics } from '../../types/alpha'
 
+/**
+ * {@link BacktestResults} 组件 props。
+ */
 interface BacktestResultsProps {
+  /** 回测统计指标；未开始回测时为 `undefined`（渲染占位空状态）。 */
   statistics?: BacktestStatistics
+  /** 初始资金（元），用于在统计数据缺失时展示默认余额。 */
   capital: number
 }
 
+/**
+ * 回测统计指标面板：展示总收益、年化、Sharpe、最大回撤等关键指标卡片，
+ * 以及成本假设、基准对比、持仓配置等详细 Descriptions。
+ *
+ * `statistics` 为 `undefined` 时展示「启动回测查看统计结果」占位。
+ */
 const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }) => {
   if (!statistics) {
     return (

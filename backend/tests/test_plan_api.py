@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import datetime
 
 import polars as pl
 import pytest
@@ -185,3 +185,102 @@ def test_scheduler_lock_occupied_does_not_start(tmp_path):
     assert sched.start(lock=second_lock) is False  # 锁被占用 -> 不启动
     assert sched.is_running() is False
     holder.release()
+
+
+# ---------------------------------------------------------------------------
+# 前后端契约测试：rule 计划真实载荷形态
+# ---------------------------------------------------------------------------
+
+def _rule_plan_body(**over) -> dict:
+    """前端 rule 模式提交的真实载荷形态（model/vt_symbol/scheme 为空串）。"""
+    body = {
+        "name": "ETF 动量轮动计划",
+        "model": "",
+        "vt_symbol": "",
+        "scheme": "",
+        "bar_freq": "1d",
+        "trigger_times": ["15:05"],
+        "notify_channels": [],
+        "data_source": "pull",
+        "enabled": False,
+        "buy_threshold": 0,
+        "position_ratio": 0,
+        "min_volume": 0,
+        "model_version": "",
+        "portfolio": {"portfolio_value": 0},
+        "strategy_type": "rule",
+        "signal_source": "etf_momentum",
+        "signal_params": {"universe": ["510300.SSE", "510500.SSE"]},
+        "trigger_schedule": "daily",
+        "portfolio_id": "portfolio-001",
+    }
+    body.update(over)
+    return body
+
+
+def test_rule_plan_frontend_payload_creates_201(client):
+    """前端 rule 模式真实载荷（model/vt_symbol/scheme 为空串）→ 成功落库（200）。"""
+    resp = client.post("/api/live/plans", json=_rule_plan_body())
+    assert resp.status_code == 200, resp.text
+    plan = resp.json()
+    assert plan["strategy_type"] == "rule"
+    assert plan["signal_source"] == "etf_momentum"
+    assert plan["trigger_times"] == ["15:05"]
+    assert plan["model"] == ""
+    assert plan["vt_symbol"] == ""
+    assert plan["scheme"] == ""
+
+
+def test_rule_plan_missing_trigger_times_rejected(client):
+    """rule 计划缺 trigger_times（空列表）→ 422（调度器依赖 trigger_times 确定当日触发时刻）。"""
+    resp = client.post("/api/live/plans", json=_rule_plan_body(trigger_times=[]))
+    assert resp.status_code == 422, resp.text
+
+
+def test_rule_plan_missing_signal_source_rejected(client):
+    """rule 计划缺 signal_source（空串）→ 422。"""
+    resp = client.post("/api/live/plans", json=_rule_plan_body(signal_source=""))
+    assert resp.status_code == 422, resp.text
+
+
+def test_cnn_plan_missing_model_rejected(client):
+    """cnn 计划缺 model（空串）→ 422（既有语义零回归）。"""
+    resp = client.post("/api/live/plans", json=_plan_body(model=""))
+    assert resp.status_code == 422, resp.text
+
+
+def test_cnn_plan_missing_vt_symbol_rejected(client):
+    """cnn 计划缺 vt_symbol（空串）→ 422（既有语义零回归）。"""
+    resp = client.post("/api/live/plans", json=_plan_body(vt_symbol=""))
+    assert resp.status_code == 422, resp.text
+
+
+def test_cnn_plan_missing_scheme_rejected(client):
+    """cnn 计划缺 scheme（空串）→ 422（既有语义零回归）。"""
+    resp = client.post("/api/live/plans", json=_plan_body(scheme=""))
+    assert resp.status_code == 422, resp.text
+
+
+# ---------------------------------------------------------------------------
+# 契约测试：GET /plans 摘要含 strategy_type / portfolio_id / signal_source
+# ---------------------------------------------------------------------------
+
+def test_cnn_plan_summary_contains_strategy_type(client):
+    """cnn 计划的 GET /plans 摘要必须含 strategy_type=='cnn'，portfolio_id/signal_source 为空串。"""
+    pid = client.post("/api/live/plans", json=_plan_body()).json()["plan_id"]
+    summaries = client.get("/api/live/plans").json()
+    summary = next(p for p in summaries if p["plan_id"] == pid)
+    assert summary["strategy_type"] == "cnn", f"摘要 strategy_type 应为 cnn，实际: {summary.get('strategy_type')!r}"
+    assert summary["portfolio_id"] == "", f"cnn 计划摘要 portfolio_id 应为空串，实际: {summary.get('portfolio_id')!r}"
+    assert summary["signal_source"] == "", f"cnn 计划摘要 signal_source 应为空串，实际: {summary.get('signal_source')!r}"
+
+
+def test_rule_plan_summary_contains_strategy_type_and_portfolio_id(client):
+    """rule 计划的 GET /plans 摘要必须含 strategy_type=='rule' 且 portfolio_id 非空。"""
+    body = _rule_plan_body()  # portfolio_id="portfolio-001", signal_source="etf_momentum"
+    pid = client.post("/api/live/plans", json=body).json()["plan_id"]
+    summaries = client.get("/api/live/plans").json()
+    summary = next(p for p in summaries if p["plan_id"] == pid)
+    assert summary["strategy_type"] == "rule", f"摘要 strategy_type 应为 rule，实际: {summary.get('strategy_type')!r}"
+    assert summary["portfolio_id"] == "portfolio-001", f"摘要 portfolio_id 应为 'portfolio-001'，实际: {summary.get('portfolio_id')!r}"
+    assert summary["signal_source"] == "etf_momentum", f"摘要 signal_source 应为 'etf_momentum'，实际: {summary.get('signal_source')!r}"

@@ -42,23 +42,40 @@ _DEFAULT_TTL: dict[str, int] = {
 
 
 class _CacheEntry:
-    """TTL cache entry."""
+    """TTL 缓存条目，存储数据与到期判定。"""
+
     __slots__ = ("data", "ts", "ttl")
 
     def __init__(self, data: Any, ttl: int) -> None:
+        """初始化缓存条目。
+
+        Args:
+            data: 要缓存的数据对象。
+            ttl: 有效期（秒），从创建时刻起计算。
+        """
         self.data = data
         self.ts = time.monotonic()
         self.ttl = ttl
 
     @property
     def expired(self) -> bool:
+        """判断缓存是否已过期。
+
+        Returns:
+            True 表示距创建时刻已超过 ttl 秒；False 表示仍有效。
+        """
         return (time.monotonic() - self.ts) >= self.ttl
 
 
 class DataSourceManager:
-    """Multi-provider manager with TTL cache and per-category fallback routing."""
+    """多 Provider 管理器，支持按品类优先级路由与 TTL 缓存。
+
+    查询流程：按注册优先级依次尝试各 Provider，第一个返回非 None 的结果即采用；
+    若全部失败则返回空列表。部分频繁查询（合约列表、日历等）启用 TTL 缓存。
+    """
 
     def __init__(self) -> None:
+        """初始化管理器，清空 Provider 字典与缓存。"""
         self._providers: dict[str, tuple[BaseProvider, int]] = {}
         self._initialized = False
         self._cache: dict[str, _CacheEntry] = {}
@@ -67,16 +84,34 @@ class DataSourceManager:
     # ---- Registration ----
 
     def register(self, provider: BaseProvider, priority: int = 50) -> None:
-        """Register a data source provider."""
+        """注册一个数据源 Provider。
+
+        同名 Provider 重复注册时覆盖旧注册（热更新场景）。
+
+        Args:
+            provider: 实现 BaseProvider 的数据源对象。
+            priority: 优先级（整数，越小越先尝试），默认 50。
+        """
         self._providers[provider.name] = (provider, priority)
         logger.info(f"DataSourceManager: registered [{provider.name}] priority={priority}")
 
     def unregister(self, name: str) -> None:
-        """Remove a data source provider."""
+        """移除指定名称的数据源 Provider。
+
+        Args:
+            name: Provider 的 name 属性，如 ``"tushare"`` / ``"akshare"``。
+        """
         self._providers.pop(name, None)
 
     def init_all(self, output: Callable = print) -> None:
-        """Initialize all registered providers."""
+        """依次调用所有已注册 Provider 的 init() 方法。
+
+        单个 Provider 初始化失败（抛异常或返回 False）不影响其他 Provider。
+        初始化完成后将 self._initialized 置为 True。
+
+        Args:
+            output: 日志输出函数，默认 print；可替换为 logger.info。
+        """
         for name, (provider, _) in self._providers.items():
             try:
                 result = provider.init(output)
@@ -86,12 +121,23 @@ class DataSourceManager:
         self._initialized = True
 
     def get_provider(self, name: str) -> BaseProvider | None:
-        """Get a specific provider by name."""
+        """按名称获取指定 Provider 实例。
+
+        Args:
+            name: Provider 的 name 属性。
+
+        Returns:
+            对应的 BaseProvider 实例；未注册时返回 None。
+        """
         entry = self._providers.get(name)
         return entry[0] if entry else None
 
     def get_all_providers_info(self) -> list[ProviderInfo]:
-        """Get description info for all registered providers."""
+        """返回所有已注册 Provider 的元信息列表（按优先级升序）。
+
+        Returns:
+            ProviderInfo 列表，priority 越小排越前。
+        """
         result = []
         for name, (provider, priority) in self._providers.items():
             result.append(provider.get_info(priority))
@@ -101,7 +147,14 @@ class DataSourceManager:
     # ---- Provider resolution ----
 
     def _get_providers_for(self, category: DataCategory) -> list[BaseProvider]:
-        """Get providers supporting a category, sorted by priority."""
+        """返回支持指定数据品类的 Provider 列表，按优先级升序排列。
+
+        Args:
+            category: 需要的数据品类（DataCategory 枚举值）。
+
+        Returns:
+            支持该品类的 Provider 列表，priority 越小排越前。
+        """
         candidates: list[tuple[BaseProvider, int]] = []
         for _, (provider, priority) in self._providers.items():
             if category in provider.get_supported_categories():
@@ -114,7 +167,15 @@ class DataSourceManager:
         category: DataCategory,
         provider_name: str = "",
     ) -> list[BaseProvider]:
-        """Resolve which provider(s) to use."""
+        """解析本次查询应使用哪些 Provider。
+
+        Args:
+            category: 请求的数据品类。
+            provider_name: 若非空则锁定使用该名称的 Provider（跳过优先级排序）。
+
+        Returns:
+            有序 Provider 列表，依次尝试直到某个返回非 None 结果。
+        """
         if provider_name:
             provider = self.get_provider(provider_name)
             return [provider] if provider else []
@@ -123,17 +184,40 @@ class DataSourceManager:
     # ---- Cache ----
 
     def _get_cached(self, key: str) -> Any | None:
+        """从内存缓存中取值；过期或不存在时返回 None。
+
+        Args:
+            key: 缓存键字符串。
+
+        Returns:
+            缓存数据对象；过期或未命中时返回 None。
+        """
         entry = self._cache.get(key)
         if entry and not entry.expired:
             return entry.data
         return None
 
     def _set_cached(self, key: str, data: Any, ttl_key: str = "") -> None:
+        """将数据写入内存缓存。
+
+        Args:
+            key: 缓存键字符串。
+            data: 待缓存的数据对象。
+            ttl_key: 用于查询 _ttl 字典的 TTL 类型键（如 ``"contracts"``/``"calendar"``）；
+                未找到时默认 300 秒。
+        """
         ttl = self._ttl.get(ttl_key, 300)
         self._cache[key] = _CacheEntry(data, ttl)
 
     def invalidate_cache(self, prefix: str = "") -> int:
-        """Clear cache entries matching prefix (or all if prefix='')."""
+        """清除匹配前缀的缓存条目（prefix 为空则清除全部）。
+
+        Args:
+            prefix: 缓存键前缀过滤器；空字符串表示清除全部缓存。
+
+        Returns:
+            被清除的缓存条目数量。
+        """
         if not prefix:
             count = len(self._cache)
             self._cache.clear()
@@ -151,6 +235,16 @@ class DataSourceManager:
         exchange: str = "",
         provider_name: str = "",
     ) -> list[ContractInfo]:
+        """查询合约列表（带 TTL 缓存，非指定 Provider 时缓存结果）。
+
+        Args:
+            product_type: 品种类型过滤，如 ``"股票"``；空字符串不过滤。
+            exchange: 交易所过滤，如 ``"SSE"``；空字符串不过滤。
+            provider_name: 锁定使用的 Provider 名；空字符串按优先级尝试所有。
+
+        Returns:
+            ContractInfo 列表；全部 Provider 失败时返回空列表。
+        """
         cache_key = f"contracts:{product_type}:{exchange}"
         if not provider_name:
             cached = self._get_cached(cache_key)
@@ -175,6 +269,16 @@ class DataSourceManager:
         exchange: str,
         provider_name: str = "",
     ) -> ContractInfo | None:
+        """查询单个合约元信息（无缓存，每次透传到 Provider）。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 交易所代码，如 ``"SSE"``。
+            provider_name: 锁定使用的 Provider 名；空字符串按优先级尝试。
+
+        Returns:
+            ContractInfo；全部 Provider 均未找到时返回 None。
+        """
         providers = self._resolve_providers(DataCategory.CONTRACT, provider_name)
         for provider in providers:
             try:
@@ -223,7 +327,18 @@ class DataSourceManager:
         end: datetime | None = None,
         provider_name: str = "",
     ) -> list[TickRecord]:
-        """Query historical ticks with fallback."""
+        """查询历史逐笔行情，按优先级尝试 Provider 直到成功。
+
+        Args:
+            symbol: 合约代码。
+            exchange: 交易所代码。
+            start: 起始时间（含）。
+            end: 截止时间（含）；None 时取当前时间。
+            provider_name: 锁定 Provider 名；空字符串按优先级尝试。
+
+        Returns:
+            TickRecord 列表；全部 Provider 失败时返回空列表。
+        """
         providers = self._resolve_providers(DataCategory.TICK_HISTORY, provider_name)
         for provider in providers:
             try:
@@ -244,6 +359,17 @@ class DataSourceManager:
         end: str,
         provider_name: str = "",
     ) -> list[CalendarDay]:
+        """查询交易日历（带 TTL 缓存）。
+
+        Args:
+            exchange: 交易所代码，如 ``"SSE"``。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+            provider_name: 锁定 Provider 名；空字符串按优先级尝试。
+
+        Returns:
+            CalendarDay 列表；全部 Provider 失败时返回空列表。
+        """
         cache_key = f"calendar:{exchange}:{start}:{end}"
         if not provider_name:
             cached = self._get_cached(cache_key)
@@ -272,6 +398,18 @@ class DataSourceManager:
         end: str,
         provider_name: str = "",
     ) -> list[FundamentalRecord]:
+        """查询基本面数据（PE/PB/流通市值等，带 TTL 缓存）。
+
+        Args:
+            symbol: 合约代码。
+            exchange: 交易所代码。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+            provider_name: 锁定 Provider 名；空字符串按优先级尝试。
+
+        Returns:
+            FundamentalRecord 列表；全部 Provider 失败时返回空列表。
+        """
         cache_key = f"fundamental:{symbol}:{exchange}:{start}:{end}"
         if not provider_name:
             cached = self._get_cached(cache_key)
@@ -300,6 +438,18 @@ class DataSourceManager:
         end: str = "",
         provider_name: str = "",
     ) -> list[dict]:
+        """查询复权因子序列（无缓存）。
+
+        Args:
+            symbol: 合约代码。
+            exchange: 交易所代码。
+            start: 起始日期字符串（YYYYMMDD），空字符串表示不限。
+            end: 截止日期字符串（YYYYMMDD），空字符串表示不限。
+            provider_name: 锁定 Provider 名；空字符串按优先级尝试。
+
+        Returns:
+            含 ``trade_date`` 与 ``adj_factor`` 字段的 dict 列表；全部失败时返回空列表。
+        """
         providers = self._resolve_providers(DataCategory.REFERENCE, provider_name)
         for provider in providers:
             try:

@@ -7,7 +7,7 @@
 """
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -70,6 +70,40 @@ class LiveDecisionRequest(BaseModel):
     model_version: str = Field(default="", description="模型版本，参与 signal_id")
     halted: bool = Field(default=False, description="目标标的当日是否停牌/封死")
     should_exit: bool = Field(default=False, description="是否触发出场，见“出场逻辑”")
+
+    @field_validator("bar_freq")
+    @classmethod
+    def _valid_bar_freq(cls, v: str) -> str:
+        if v not in SUPPORTED_BAR_FREQS:
+            raise ValueError(f"bar_freq 仅支持 {SUPPORTED_BAR_FREQS}：{v!r}")
+        return v
+
+
+class RebalanceRequest(BaseModel):
+    """手动触发一次组合调仓决策的请求体。
+
+    优先使用 plan_id 引用已有 rule 计划（展开参数），也可内联传参。
+    plan_id 与内联参数二选一：传入 plan_id 时以计划配置为准；否则使用内联字段。
+    """
+
+    # -- plan_id 引用模式（从 _plan_store 取 rule 计划展开参数）--
+    plan_id: str | None = Field(
+        default=None,
+        description="已存在的 rule 计划 ID；传入时内联字段被忽略",
+    )
+
+    # -- 内联模式字段（plan_id 缺失时使用）--
+    plan_name: str = Field(default="", description="计划名（用于 scheme 命名空间）")
+    signal_source: str = Field(default="", description="注册表信号源名（如 'etf_momentum'）")
+    signal_params: dict[str, Any] = Field(default_factory=dict, description="信号参数")
+    strategy_params: dict[str, Any] = Field(
+        default_factory=lambda: {"top_k": 5},
+        description="组合选股参数（top_k 等）",
+    )
+    portfolio_id: str = Field(default="", description="持仓账本 ID")
+    capital: float = Field(default=1_000_000.0, description="组合目标市值（计算目标仓位用）")
+    as_of: datetime | None = Field(default=None, description="决策时刻，缺省=当前")
+    bar_freq: str = Field(default="1d", description="决策 bar 频率")
 
     @field_validator("bar_freq")
     @classmethod

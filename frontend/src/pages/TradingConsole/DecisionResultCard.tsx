@@ -27,7 +27,13 @@ const ACTION_META: Record<
   hold: { color: 'default', label: '观望', icon: <PauseCircleOutlined /> },
 }
 
-/** 数字字段安全格式化：null/undefined → 占位符。 */
+/**
+ * 安全格式化数字字段，`null`/`undefined`/`NaN` 时返回「—」占位符。
+ *
+ * @param value - 待格式化的数值。
+ * @param suffix - 可选后缀（如 `'手'`、`'%'`）。
+ * @returns 格式化后的字符串，如 `"1000手"` 或 `"—"`。
+ */
 function fmtNumber(value: number | null | undefined, suffix = ''): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—'
   return `${value}${suffix}`

@@ -37,6 +37,16 @@ def check_torch_available() -> bool:
 
 
 def _normalize_symbol_list(symbols: list[str]) -> list[str]:
+    """规范化证券代码列表并去重（保持首次出现顺序）。
+
+    空字符串与纯空白项会被过滤掉；代码格式经 normalize_vt_symbol 标准化。
+
+    Args:
+        symbols: 原始证券代码列表，允许含空项。
+
+    Returns:
+        去重后的规范化代码列表，顺序与首次出现一致。
+    """
     from ..alpha.lab import normalize_vt_symbol
 
     return list(dict.fromkeys(
@@ -52,12 +62,24 @@ def normalize_observation_groups(
     observation_groups: list[dict[str, Any]] | None,
     vt_symbols: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Build a normalized semantic group list.
+    """构建规范化的语义分组列表。
 
-    Compatibility behavior:
-    - if observation_groups is empty, map legacy vt_symbols into target + custom
-    - target group is always injected as the first group
+    - target 组始终插入为第一组（role="target"，symbols=[target_symbol]）。
+    - observation_groups 为空时，将 vt_symbols[1:] 打包为单一 "custom" 组（兼容旧接口）。
+    - 来自 API 的 Pydantic 枚举 role（如 "ObservationRole.sector"）统一规整为小写字符串。
+
+    Args:
+        target_symbol: 预测目标证券代码；None 时取 vt_symbols[0]（两者均缺则抛 ValueError）。
+        observation_groups: 语义分组配置列表，每项含 role/name/symbols；None 或空列表触发兼容逻辑。
+        vt_symbols: 旧版兼容用的证券代码列表；observation_groups 有内容时仅用于推断 target_symbol。
+
+    Returns:
+        (target_symbol, groups)：
+        - target_symbol: 规范化后的目标证券代码。
+        - groups: 规范化后的分组列表，第一项始终为 target 组。
+
+    Raises:
+        ValueError: 未能确定 target_symbol，或最终分组列表为空时抛出。
     """
     from ..alpha.lab import normalize_vt_symbol
 
@@ -121,7 +143,24 @@ def _load_market_frame(
     input_data_kind: str,
     input_interval: str,
 ) -> pl.DataFrame:
-    """Load local raw/derived bar frame for CNN input."""
+    """加载单只证券的本地 K 线/Tick 聚合数据帧，供 CNN 输入使用。
+
+    先尝试精确区间加载，失败或为空时查询本地已有区间范围并给出更明确的报错提示。
+    代码经 normalize_vt_symbol 规范化，返回结果按 datetime 升序排列。
+
+    Args:
+        vt_symbol: 证券代码（允许未规范化格式，内部自动转换）。
+        start: 加载起始日期（含）。
+        end: 加载结束日期（含）。
+        input_data_kind: 数据种类，"bar" 或 "tick"。
+        input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
+
+    Returns:
+        按 datetime 升序排列的 polars DataFrame，含 open/high/low/close/volume 等列。
+
+    Raises:
+        ValueError: 指定区间内无数据，或本地完全无该证券数据时抛出，并提示本地已有区间。
+    """
     from ..alpha import AlphaLab
     from ..alpha.lab import normalize_vt_symbol
     from ..config import ALPHA_LAB_PATH
@@ -158,7 +197,22 @@ def _load_market_frame(
 
 
 def _align_frames_by_datetime(symbol_frames: dict[str, pl.DataFrame]) -> tuple[list[str], pl.DataFrame]:
-    """Inner join all symbols by common datetimes."""
+    """按公共时间轴内连接所有证券的 K 线帧，生成宽表。
+
+    对每只证券重命名列（open → {vt_symbol}__open 等），逐只 inner join，
+    保留所有证券均有数据的时间点，结果按 datetime 升序排列。
+
+    Args:
+        symbol_frames: 证券代码 → 单证券 K 线 DataFrame 的映射，每帧须含 datetime 列。
+
+    Returns:
+        (symbols, merged)：
+        - symbols: 参与对齐的证券代码列表（与 symbol_frames 键顺序一致）。
+        - merged: 宽格式 DataFrame，列名形如 {vt_symbol}__open/close/… 及 datetime。
+
+    Raises:
+        ValueError: 所有证券对齐后没有公共时间点（宽表为空）时抛出。
+    """
     merged: pl.DataFrame | None = None
     symbols = list(symbol_frames.keys())
 
@@ -179,7 +233,19 @@ def _align_frames_by_datetime(symbol_frames: dict[str, pl.DataFrame]) -> tuple[l
 
 
 def _extract_aligned_bars(aligned_df: pl.DataFrame, vt_symbol: str) -> list[dict[str, Any]]:
-    """Extract one symbol's aligned OHLCV sequence from the joined frame."""
+    """从对齐宽表中提取单只证券的 OHLCV 序列。
+
+    将宽表中 {vt_symbol}__open/high/low/close/volume 等列展开为行字典列表，
+    附带 datetime 字段，与 _compute_features 的输入格式一致。
+
+    Args:
+        aligned_df: _align_frames_by_datetime 返回的对齐宽表，含 datetime 列。
+        vt_symbol: 目标证券代码，用于定位 {vt_symbol}__* 列。
+
+    Returns:
+        长度与 aligned_df 行数相同的字典列表，每项含
+        datetime/open/high/low/close/volume 键。
+    """
     rows: list[dict[str, Any]] = []
     for row in aligned_df.iter_rows(named=True):
         rows.append(
@@ -196,7 +262,23 @@ def _extract_aligned_bars(aligned_df: pl.DataFrame, vt_symbol: str) -> list[dict
 
 
 def _compute_features(bars: list[dict[str, Any]]) -> np.ndarray:
-    """Calculate six simple technical channels for one symbol."""
+    """为单只证券计算六个技术特征通道。
+
+    特征列表（与 FEATURE_NAMES 顺序对应）：
+    0. pct_change    — 日涨跌幅（close 一阶差分归一化）
+    1. volume_ratio  — 成交量相对 5 日均量的比值
+    2. amplitude     — 振幅（(high-low)/前收）
+    3. ma5_diff      — 收盘价相对 5 日均价的偏离度
+    4. ma20_diff     — 收盘价相对 20 日均价的偏离度
+    5. high_low_ratio — (high-low)/close，衡量当日价格区间
+
+    Args:
+        bars: _extract_aligned_bars 返回的 OHLCV 行字典列表，顺序为时间升序。
+
+    Returns:
+        形状 [T, 6] 的 float32 ndarray，T 为 bars 长度；
+        前几行因均线/比值窗口未满而保持 0 值，属正常行为。
+    """
     closes = np.array([bar["close"] for bar in bars], dtype=np.float64)
     highs = np.array([bar["high"] for bar in bars], dtype=np.float64)
     lows = np.array([bar["low"] for bar in bars], dtype=np.float64)

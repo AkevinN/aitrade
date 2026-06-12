@@ -2,6 +2,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { App as AntApp } from 'antd'
+import userEvent from '@testing-library/user-event'
 
 import PlanForm from './PlanForm'
 import { makePlan } from './testFixtures'
@@ -14,12 +16,23 @@ vi.mock('../../api/cnn', () => ({
   },
 }))
 
+vi.mock('../../api/strategy', () => ({
+  strategyService: {
+    listSources: vi.fn().mockResolvedValue([
+      { name: 'momentum', description: '动量信号', param_spec: null },
+      { name: 'mean_reversion', description: '均值回归', param_spec: null },
+    ]),
+  },
+}))
+
 function renderForm(props: Partial<React.ComponentProps<typeof PlanForm>> = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const onSubmit = props.onSubmit ?? vi.fn()
   render(
     <QueryClientProvider client={qc}>
-      <PlanForm onSubmit={onSubmit} {...props} />
+      <AntApp>
+        <PlanForm onSubmit={onSubmit} {...props} />
+      </AntApp>
     </QueryClientProvider>,
   )
   return { onSubmit }
@@ -89,5 +102,80 @@ describe('PlanForm', () => {
     const req = onSubmit.mock.calls[0][0]
     expect(req.bar_freq).toBe('30m')
     expect(req.trigger_times).toEqual([])
+  })
+
+  // ---- rule 模式测试（v2）----
+
+  it('切换到 rule 模式后 signal_source 必填校验阻止提交', async () => {
+    const onSubmit = vi.fn()
+    renderForm({ onSubmit })
+
+    // 点击「规则调仓」Radio
+    fireEvent.click(screen.getByText('规则调仓'))
+    // 等待 rule 模式字段出现
+    await waitFor(() => expect(screen.getByText('信号源')).toBeInTheDocument())
+
+    // 先填写计划名称（避免 name 必填阻断）
+    const nameInput = screen.getByPlaceholderText('如：平安银行尾盘买入计划')
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, '测试规则计划')
+
+    // 填写组合 ID
+    const portfolioInput = screen.getByPlaceholderText('portfolio-001')
+    await userEvent.type(portfolioInput, 'p-001')
+
+    // 不填 signal_source，直接提交
+    fireEvent.click(screen.getByText('创建计划'))
+    // onSubmit 不应被调用（校验失败）
+    await new Promise((r) => setTimeout(r, 100))
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('rule 模式提交载荷含 trigger_times 且 model/vt_symbol/scheme 为空串', async () => {
+    const onSubmit = vi.fn()
+    // 用已有 rule 计划回填，绕过 jsdom 中 antd Select pointer-events 限制
+    const rulePlan = makePlan({
+      strategy_type: 'rule' as const,
+      model: '',
+      vt_symbol: '',
+      scheme: '',
+      signal_source: 'etf_momentum',
+      trigger_schedule: 'daily' as const,
+      portfolio_id: 'p-001',
+      trigger_times: ['15:05'],
+    } as Parameters<typeof makePlan>[0])
+    renderForm({ initialPlan: rulePlan, onSubmit })
+
+    // 等待 rule 模式字段出现
+    await waitFor(() => expect(screen.getByText('信号源')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText('保存计划'))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled())
+    const req = onSubmit.mock.calls[0][0]
+    // 契约：model/vt_symbol/scheme 为空串（后端已接受此形态）
+    expect(req.model).toBe('')
+    expect(req.vt_symbol).toBe('')
+    expect(req.scheme).toBe('')
+    // 契约：trigger_times 非空（["15:05"]）
+    expect(req.trigger_times).toEqual(['15:05'])
+    expect(req.strategy_type).toBe('rule')
+    expect(req.signal_source).toBe('etf_momentum')
+  })
+
+  it('cnn 模式载荷不含 rule 专属字段（strategy_type=cnn）', async () => {
+    const onSubmit = vi.fn()
+    renderForm({ initialPlan: makePlan(), onSubmit })
+
+    // 确保还在 cnn 模式（默认）
+    expect(screen.getByText('CNN 决策')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('保存计划'))
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled())
+    const req = onSubmit.mock.calls[0][0]
+    // cnn 模式：strategy_type=cnn，不含 signal_source / trigger_schedule
+    expect(req.strategy_type).toBe('cnn')
+    expect(req.signal_source).toBeUndefined()
+    expect(req.trigger_schedule).toBeUndefined()
+    expect(req.portfolio_id).toBeUndefined()
   })
 })

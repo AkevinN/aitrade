@@ -52,7 +52,7 @@ const DEFAULT_BACKTEST: CNNBacktestParams = {
   buy_threshold: 0.6,
   sell_threshold: 0.4,
   commission_rate: 0.0003,
-  stamp_duty: 0.001,
+  stamp_duty: 0.0005,
   slippage: 0.0005,
   price_add: 0.002,
   exit_mode: 'auto',
@@ -69,6 +69,15 @@ const DEFAULT_GATE: CNNPromotionGate = {
   require_positive_oos: true,
 }
 
+/**
+ * 从表单值构建 CNN 候选训练请求体（`CNNCandidateTrainRequest`）。
+ *
+ * 集中处理日期格式化、label_spec 组装与 backtest_params 默认值合并，
+ * 避免各提交入口重复实现。
+ *
+ * @param values - Ant Design Form.getFieldsValue() 返回的表单值字典
+ * @returns 完整的候选训练请求体，可直接传给 governanceService.trainCandidate
+ */
 function baseRequest(values: Record<string, any>): CNNCandidateTrainRequest {
   const [start, end] = values.range
   return {

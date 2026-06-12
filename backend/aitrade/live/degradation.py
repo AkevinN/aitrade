@@ -11,6 +11,16 @@ from typing import Optional
 
 
 def is_data_fresh(last_data_time: Optional[datetime], now: datetime, max_staleness_seconds: float) -> bool:
+    """判断行情数据是否在容忍陈旧度内（新鲜）。
+
+    Args:
+        last_data_time:        最近一次行情更新时刻；None 表示从未收到行情，直接视为过期。
+        now:                   当前时刻参照。
+        max_staleness_seconds: 最大允许陈旧秒数。
+
+    Returns:
+        True 表示数据新鲜（差值 ≤ 阈值），False 表示过期或 last_data_time 为 None。
+    """
     if last_data_time is None:
         return False
     return (now - last_data_time).total_seconds() <= max_staleness_seconds

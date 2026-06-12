@@ -30,6 +30,12 @@ import type { CNNModelInfo } from '../../types/cnn'
 
 const { Title, Text } = Typography
 
+/**
+ * 资源管理页面：统一管理本地数据资源、Alpha 数据集、Alpha 模型、交易信号与 CNN 模型。
+ *
+ * 按标签页分组展示各类资源列表，支持查看详情和删除操作，
+ * 并通过 `location.state.tab` 支持从其他页面跳转时预激活指定标签。
+ */
 const Resource: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()

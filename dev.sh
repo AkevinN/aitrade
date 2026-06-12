@@ -312,6 +312,18 @@ start_backend() {
     load_env_file "${BACKEND_DIR}/.env"
     load_env_file "${ROOT_DIR}/.env"
 
+    # R7.3：启动前检查 backend.log 大小；超过 50MB 则归档为带时间戳的旧文件（shell 层兜底轮转）
+    if [[ -f "${BACKEND_LOG}" ]]; then
+        local _log_size
+        _log_size=$(wc -c < "${BACKEND_LOG}")
+        if (( _log_size > 50 * 1024 * 1024 )); then
+            local _ts
+            _ts=$(date +%Y%m%d%H%M%S)
+            mv "${BACKEND_LOG}" "${BACKEND_LOG}.${_ts}"
+            info "backend.log 超过 50MB，已归档为 backend.log.${_ts}"
+        fi
+    fi
+
     info "启动后端 (uv run) -> http://${BACKEND_HOST}:${BACKEND_PORT}"
     (
         cd "${BACKEND_DIR}"

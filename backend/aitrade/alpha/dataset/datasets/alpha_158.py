@@ -1,10 +1,30 @@
+"""Alpha158 因子数据集——Qlib 158 基础 Alpha 因子库。"""
+
 import polars as pl
 
 from ..template import AlphaDataset
 
 
 class Alpha158(AlphaDataset):
-    """158 basic factors from Qlib"""
+    """Qlib 158 基础 Alpha 因子数据集。
+
+    在 AlphaDataset 基础上，构造器内自动注册 158 个因子表达式，
+    涵盖 K 线形态特征（9 个）、价格比率特征（4 个）及时序统计特征（145 个）。
+    因子来源于微软 Qlib 框架的 Alpha158 配置，常用于 A 股量化因子研究。
+
+    时序特征统一计算 5/10/20/30/60 日五个窗口，包含：
+    roc（历史收益）、ma（移动均值）、std（波动率）、beta（斜率）、rsqr（R²）、
+    resi（残差）、max/min（滚动极值）、qtlu/qtld（分位数）、rank（百分位排名）、
+    rsv（RSV）、imax/imin/imxd（极值位置）、corr/cord（量价相关）、
+    cntp/cntn/cntd（涨跌天数比）、sump/sumn/sumd（涨跌幅占比）、
+    vma/vstd/wvma/vsump/vsumn/vsumd（成交量统计）。
+
+    标签为 3 日后收益率：ts_delay(close, -3) / ts_delay(close, -1) - 1。
+
+    Example:
+        >>> ds = Alpha158(bar_df, ("20200101", "20211231"), ("20220101", "20221231"), ("20230101", "20231231"))
+        >>> ds.prepare_data()
+    """
 
     def __init__(
         self,
@@ -13,7 +33,15 @@ class Alpha158(AlphaDataset):
         valid_period: tuple[str, str],
         test_period: tuple[str, str]
     ) -> None:
-        """Constructor"""
+        """初始化并批量注册 158 个 Qlib Alpha 表达式及标签。
+
+        Args:
+            df: 原始行情 DataFrame，必须包含 datetime、vt_symbol、
+                open、high、low、close、volume、vwap 列。
+            train_period: 训练区间 (start, end)，格式 "YYYYMMDD" 或 "YYYY-MM-DD"。
+            valid_period: 验证区间，格式同上。
+            test_period: 测试区间，格式同上。
+        """
         super().__init__(
             df=df,
             train_period=train_period,

@@ -23,6 +23,9 @@ import DecisionTracePanel from './DecisionTracePanel'
 
 const { Text } = Typography
 
+/**
+ * {@link HistoryTable} 组件 props。
+ */
 interface HistoryTableProps {
   /**
    * 当前决策任务（来自 useTask 订阅）。当任务完成时刷新历史列表，

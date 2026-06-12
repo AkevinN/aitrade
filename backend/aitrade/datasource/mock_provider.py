@@ -41,20 +41,41 @@ MOCK_BASE_PRICES: dict[str, float] = {
 
 
 class MockProvider(BaseProvider):
-    """Mock fallback data source — always available."""
+    """模拟数据源：全功能兜底降级，数据随机生成，仅供开发/演示使用。
+
+    始终返回 AVAILABLE 状态，无需 token/网络，适用于测试和前端集成调试。
+    """
 
     name = "mock"
     display_name = "Mock 模拟数据"
     description = "全功能兜底降级数据源，提供模拟合约、历史K线、交易日历等数据"
 
     def init(self, output: Callable = print) -> bool:
+        """初始化 Mock Provider（始终成功，无外部依赖）。
+
+        Args:
+            output: 日志输出函数（未使用，保持接口一致）。
+
+        Returns:
+            始终返回 True。
+        """
         self._inited = True
         return True
 
     def get_status(self) -> ProviderStatus:
+        """返回当前状态：初始化后为 AVAILABLE，否则为 UNAVAILABLE。
+
+        Returns:
+            ProviderStatus 枚举值。
+        """
         return ProviderStatus.AVAILABLE if self._inited else ProviderStatus.UNAVAILABLE
 
     def get_supported_categories(self) -> list[DataCategory]:
+        """返回 Mock Provider 支持的全部数据品类。
+
+        Returns:
+            含 CONTRACT / BAR_HISTORY / TRADE_CALENDAR / FUNDAMENTAL / REFERENCE 的列表。
+        """
         return [
             DataCategory.CONTRACT,
             DataCategory.BAR_HISTORY,
@@ -70,6 +91,15 @@ class MockProvider(BaseProvider):
         product_type: str = "",
         exchange: str = "",
     ) -> list[ContractInfo] | None:
+        """返回预定义模拟合约列表，可按品种和交易所过滤。
+
+        Args:
+            product_type: 品种过滤（如 ``"股票"``/``"期货"``），空字符串不过滤。
+            exchange: 交易所过滤（如 ``"SSE"``），空字符串不过滤。
+
+        Returns:
+            ContractInfo 列表；过滤后为空则返回 None。
+        """
         result = []
         for c in MOCK_CONTRACTS:
             if product_type and c["product_type"] != product_type:
@@ -80,6 +110,15 @@ class MockProvider(BaseProvider):
         return result if result else None
 
     def get_contract(self, symbol: str, exchange: str) -> ContractInfo | None:
+        """按代码和交易所查询单个模拟合约。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀）。
+            exchange: 交易所代码。
+
+        Returns:
+            ContractInfo；未找到时返回 None。
+        """
         for c in MOCK_CONTRACTS:
             if c["symbol"] == symbol and c["exchange"] == exchange:
                 return ContractInfo(**c)
@@ -95,6 +134,21 @@ class MockProvider(BaseProvider):
         start: datetime,
         end: datetime | None = None,
     ) -> list[BarRecord] | None:
+        """生成指定区间的随机模拟 K 线数据。
+
+        基于 MOCK_BASE_PRICES 中的基准价格，按正态分布随机游走，
+        生成 OHLCV 数据（最多 5000 根 bar）。周末在日线/周线时跳过。
+
+        Args:
+            symbol: 合约代码。
+            exchange: 交易所代码。
+            interval: K 线周期，支持 1m/5m/15m/30m/1h/d/w。
+            start: 起始时间（含）。
+            end: 截止时间（含）；None 时取当前时间。
+
+        Returns:
+            BarRecord 列表；无任何数据时返回 None。
+        """
         if end is None:
             end = datetime.now()
 
@@ -151,6 +205,16 @@ class MockProvider(BaseProvider):
         start: str,
         end: str,
     ) -> list[CalendarDay] | None:
+        """生成指定区间的模拟交易日历（以自然日周一至周五视为交易日）。
+
+        Args:
+            exchange: 交易所代码（仅用于填充 CalendarDay.exchange 字段）。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+
+        Returns:
+            CalendarDay 列表；日期格式不合法时返回 None。
+        """
         try:
             start_dt = datetime.strptime(start, "%Y%m%d")
             end_dt = datetime.strptime(end, "%Y%m%d")
@@ -180,6 +244,17 @@ class MockProvider(BaseProvider):
         start: str,
         end: str,
     ) -> list[FundamentalRecord] | None:
+        """生成指定区间的随机模拟基本面数据（仅工作日）。
+
+        Args:
+            symbol: 合约代码。
+            exchange: 交易所代码。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+
+        Returns:
+            FundamentalRecord 列表（PE/PB/市值等随机生成）；日期格式不合法时返回 None。
+        """
         base_price = MOCK_BASE_PRICES.get(symbol, 100.0)
 
         try:
@@ -217,6 +292,17 @@ class MockProvider(BaseProvider):
         start: str = "",
         end: str = "",
     ) -> list[dict] | None:
+        """生成指定区间的模拟复权因子序列（每日因子恒为 1.0，仅供接口测试）。
+
+        Args:
+            symbol: 合约代码（未使用，保持接口一致）。
+            exchange: 交易所代码（未使用）。
+            start: 起始日期字符串（YYYYMMDD）；空字符串默认 2024-01-01。
+            end: 截止日期字符串（YYYYMMDD）；空字符串默认当前时间。
+
+        Returns:
+            含 ``trade_date`` 与 ``adj_factor`` 字段的 dict 列表；日期格式不合法时返回 None。
+        """
         try:
             start_dt = datetime.strptime(start, "%Y%m%d") if start else datetime(2024, 1, 1)
             end_dt = datetime.strptime(end, "%Y%m%d") if end else datetime.now()

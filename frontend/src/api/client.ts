@@ -1,3 +1,11 @@
+/**
+ * 全局 Axios 实例（baseURL、超时、拦截器）。
+ *
+ * - 请求拦截：对非 FormData 请求自动补充 `Content-Type: application/json`；
+ *   FormData 请求不设 Content-Type，由浏览器自动附带 multipart boundary。
+ * - 响应拦截：请求失败时统一提取 `detail` 或 `message`，写入 `console.error` 后透传异常。
+ * - baseURL 优先读 `VITE_API_BASE_URL` 环境变量，缺省为 `http://localhost:8000`。
+ */
 import axios from 'axios'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'

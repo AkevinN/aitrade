@@ -21,11 +21,11 @@ API 分类：
 """
 
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import polars as pl
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import ValidationError
 
 from .. import __version__
@@ -161,10 +161,76 @@ async def get_alpha_status() -> dict:
 # =============================================================================
 
 @router.get("/tasks")
-async def list_tasks() -> list[dict]:
-    """获取所有任务状态列表。"""
-    tasks = task_manager.get_all_tasks()
-    return [task.model_dump() for task in tasks]
+async def list_tasks(
+    request: Request,
+    status: str | None = None,
+    task_type: str | None = None,
+    include_history: bool = False,
+    limit: int = 200,
+    history_days: int = 90,
+) -> list[dict]:
+    """获取任务状态列表（R2.3）。
+
+    默认行为（无参数）与现状完全一致：返回内存中所有任务，按 updated_at 倒序，上限 200。
+
+    Args:
+        status:          按状态过滤（completed/failed/running/pending）。
+        task_type:       按任务类型过滤（data_download/model_train 等）。
+        include_history: True 时合并归档历史（同 task_id 以内存为准），默认 False。
+        limit:           最多返回条数，默认 200。
+        history_days:    include_history=True 时回看天数，默认 90，上限 365。
+    """
+    # 内存任务
+    mem_tasks = task_manager.get_all_tasks()
+
+    # 过滤内存任务
+    if status is not None:
+        mem_tasks = [t for t in mem_tasks if t.status.value == status]
+    if task_type is not None:
+        mem_tasks = [t for t in mem_tasks if t.type.value == task_type]
+
+    # 按 updated_at 倒序
+    mem_tasks = sorted(mem_tasks, key=lambda t: t.updated_at, reverse=True)
+    # model_dump(mode="json") 将所有 datetime 序列化为 ISO 字符串（T 分隔），
+    # 确保与历史侧字符串格式一致，排序键可直接字符串比较
+    mem_dicts = [t.model_dump(mode="json") for t in mem_tasks]
+
+    if not include_history:
+        return mem_dicts[:limit]
+
+    # 合并历史（R2.3）：同 task_id 以内存为准
+    mem_ids = {t.task_id for t in mem_tasks}
+
+    # 获取 history_store（从 app.state 注入，或从全局 task_manager 取）
+    hist_store = getattr(getattr(request, "app", None), "state", None)
+    hist_store = getattr(hist_store, "history_store", None)
+    if hist_store is None:
+        # 回退到 task_manager 内置 store
+        hist_store = task_manager._history_store
+
+    today = date.today()
+    # 回看 history_days 天（上限 365），避免全量扫描
+    history_days = max(1, min(history_days, 365))
+    from datetime import timedelta
+    hist_start = today - timedelta(days=history_days - 1)
+
+    hist_records = hist_store.query(
+        status=status,
+        task_type=task_type,
+        start=hist_start,
+        end=today,
+        limit=None,
+    )
+
+    # 历史中去掉已在内存的 task_id
+    extra_hist = [r for r in hist_records if r.get("task_id") not in mem_ids]
+
+    # 合并后按 updated_at 字符串倒序截断
+    # mem_dicts 已经过 model_dump(mode="json")，updated_at 为 ISO "T" 格式字符串，
+    # 与 extra_hist（从 JSONL 读出，同为 ISO "T" 格式）可直接字符串比较
+    combined = mem_dicts + extra_hist
+    combined.sort(key=lambda d: d.get("updated_at") or "", reverse=True)
+    return combined[:limit]
 
 
 @router.get("/tasks/{task_id}")
@@ -518,13 +584,28 @@ async def add_contract_setting(
     short_rate: float = 0.0001,
     size: float = 1,
     pricetick: float = 0.01,
+    stamp_duty: float | None = None,
+    slippage: float | None = None,
+    limit_ratio: float | None = None,
+    t_plus1: bool | None = None,
 ) -> dict:
-    """添加合约配置。"""
+    """添加或更新合约配置。
+
+    可选字段 stamp_duty / slippage / limit_ratio / t_plus1 传值时写入 JSON；
+    不传（None）则忽略，保持已有配置不被意外清空。
+    t_plus1 字段本任务只打通写入与存储，引擎消费在下一任务实现。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     vt_symbol = normalize_vt_symbol(vt_symbol)
     lab = _get_alpha_lab()
-    lab.add_contract_setting(vt_symbol, long_rate, short_rate, size, pricetick)
+    lab.add_contract_setting(
+        vt_symbol, long_rate, short_rate, size, pricetick,
+        stamp_duty=stamp_duty,
+        slippage=slippage,
+        limit_ratio=limit_ratio,
+        t_plus1=t_plus1,
+    )
     return {"success": True, "message": f"合约 {vt_symbol} 配置已保存"}
 
 

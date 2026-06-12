@@ -24,6 +24,9 @@ interface SignalRow {
   signal: number
 }
 
+/**
+ * 信号生成页面：选择 Alpha 模型与目标标的，启动信号生成任务，并在完成后展示信号列表与分布图。
+ */
 const Signal: React.FC = () => {
   const [signalName, setSignalName] = useState('')
   const [selectedModel, setSelectedModel] = useState('')

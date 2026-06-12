@@ -49,6 +49,12 @@ const BLOCK_LABEL: Record<MetricBlock['block'], string> = {
   predictability: '可预测性',
 }
 
+/**
+ * 将置信度枚举值渲染为带 Tooltip 的 Ant Design Tag。
+ *
+ * @param confidence - 置信度枚举值。
+ * @returns 带颜色和 Tooltip 说明的 Tag 节点。
+ */
 function confidenceTag(confidence: ConfidenceLevel) {
   const style = confidenceStyle(confidence)
   return (
@@ -60,11 +66,23 @@ function confidenceTag(confidence: ConfidenceLevel) {
   )
 }
 
+/**
+ * 从任意异常对象中提取可读的错误文本。
+ *
+ * @param error - 任意异常对象（通常为 AxiosError）。
+ * @returns 后端 `detail` 字段、`message` 字段或兜底文案。
+ */
 function errorText(error: unknown): string {
   const maybe = error as { response?: { data?: { detail?: string } }; message?: string }
   return maybe.response?.data?.detail || maybe.message || '画像请求失败'
 }
 
+/**
+ * 根据错误类型给出下一步操作提示文案。
+ *
+ * @param isArtifactError - 是否为 Artifact 查询错误（404）。
+ * @returns 针对性的操作提示字符串。
+ */
 function errorNextStep(isArtifactError: boolean): string {
   return isArtifactError
     ? '请确认 artifact_id 是否完整，或重新运行画像并持久化后再查看。'
@@ -97,6 +115,11 @@ const profileSectionStyle: React.CSSProperties = {
   background: 'rgba(17, 27, 38, 0.68)',
 }
 
+/**
+ * 单个画像指标块（数据质量/流动性/波动性/可预测性）的展示组件。
+ *
+ * @param block - 待渲染的 {@link MetricBlock} 数据。
+ */
 export const MetricBlockView: React.FC<{ block: MetricBlock }> = ({ block }) => {
   return (
     <section style={profileSectionStyle}>
@@ -148,6 +171,12 @@ export const MetricBlockView: React.FC<{ block: MetricBlock }> = ({ block }) => 
   )
 }
 
+/**
+ * 画像参数建议展示组件：渲染「方案建议」列表并提供「一键应用」按钮。
+ *
+ * @param suggestion - 画像返回的参数建议；`null`/`undefined` 时不渲染。
+ * @param onApply - 点击「应用建议」时的回调，传入可映射字段值和未映射条目数。
+ */
 export const SuggestionView: React.FC<{
   suggestion: SchemeSuggestion | null | undefined
   onApply: (values: Record<string, unknown>, unmappedCount: number) => void
@@ -213,6 +242,11 @@ export const SuggestionView: React.FC<{
   )
 }
 
+/**
+ * 观测组关联性表格组件：展示每个观测标的与目标标的的相关系数，并给出保留/剔除建议。
+ *
+ * @param groupProfile - 观测组关联性数据；`null`/`undefined` 或成员列表为空时不渲染。
+ */
 export const GroupProfileView: React.FC<{ groupProfile: GroupProfile | null | undefined }> = ({
   groupProfile,
 }) => {
@@ -263,17 +297,43 @@ export const GroupProfileView: React.FC<{ groupProfile: GroupProfile | null | un
   )
 }
 
+/**
+ * {@link ProfilingPanel} 组件 props。
+ */
 export interface ProfilingPanelProps {
+  /** 是否展开 Drawer。 */
   open: boolean
+  /** 关闭 Drawer 的回调。 */
   onClose: () => void
+  /** 待画像的目标合约代码。 */
   targetSymbol: string
+  /** K 线周期（如 `d`、`30m`）。 */
   interval: string
+  /** 默认画像基准时刻（dayjs 实例）。 */
   defaultAsOf: Dayjs
+  /** 观测分组列表，用于收集 observation_symbols。 */
   observationGroups: ObservationGroup[]
+  /**
+   * 应用参数建议的回调；调用方据此批量更新 Form 字段。
+   *
+   * @param values - 已映射的字段值。
+   * @param unmappedCount - 未能自动映射的建议条目数。
+   */
   onApplySuggestion: (values: Record<string, unknown>, unmappedCount: number) => void
+  /**
+   * 画像结果变化回调（运行新画像或切换历史时均触发）。
+   *
+   * @param profile - 最新的画像响应。
+   * @param historical - 是否为历史 Artifact 查询（非当次运行）。
+   */
   onResultChange?: (profile: SymbolProfileResponse, historical: boolean) => void
 }
 
+/**
+ * 品种画像侧边 Drawer：提供运行画像、查看历史 Artifact、展示指标块与参数建议的一体化面板。
+ *
+ * 常在 CNNTrain 页面中使用，帮助用户在配置训练方案前评估目标标的的画像质量。
+ */
 const ProfilingPanel: React.FC<ProfilingPanelProps> = ({
   open,
   onClose,

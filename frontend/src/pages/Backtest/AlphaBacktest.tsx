@@ -18,6 +18,9 @@ import type { BacktestResultPayload, BacktestStatistics } from '../../types/alph
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/**
+ * Alpha 模型回测页面：选择信号、资金、区间与基准，启动回测任务并展示统计指标与图表。
+ */
 const AlphaBacktest: React.FC = () => {
   const [backtestName, setBacktestName] = useState('')
   const [selectedSignal, setSelectedSignal] = useState('')

@@ -80,6 +80,9 @@ export function makePlanSummary(overrides: Partial<TradingPlanSummary> = {}): Tr
     trigger_times: ['15:05'],
     enabled: false,
     last_triggered: null,
+    strategy_type: 'cnn',
+    portfolio_id: '',
+    signal_source: '',
     ...overrides,
   }
 }

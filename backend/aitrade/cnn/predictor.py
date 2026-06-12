@@ -42,12 +42,31 @@ def predict_cnn_signals(
     on_progress: Optional[Callable[[float, str], None]] = None,
     on_meta: Optional[Callable[[dict], None]] = None,
 ) -> pl.DataFrame:
-    """
-    Load a trained CNN model and generate prediction signals.
+    """加载已训练的 CNN 模型并在指定区间生成预测信号。
+
+    流程：
+    1. 加载 checkpoint，重建模型结构并恢复权重；
+    2. 以 warmup_days 向前扩展 start 日期，加载预热数据；
+    3. 对齐多证券时间轴、计算技术特征、填入分组张量；
+    4. 使用训练时的归一化统计量对特征标准化；
+    5. 滑动窗口批量推理，仅保留 [start, end] 区间内的信号。
+
+    Args:
+        model_name: 模型名称（不含 .pt 后缀），对应 CNN_MODEL_DIR/<name>.pt。
+        start: 信号生成起始日期（含）；实际加载数据会向前扩展 warmup_days 天。
+        end: 信号生成结束日期（含）。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+        on_meta: 推理完成后调用一次的元信息回调 ``(meta_dict) -> None``，可为 None；
+            meta_dict 含 target_symbol/lookback/input_interval 等观测信息，不含凭证。
 
     Returns:
-        DataFrame with columns [datetime, vt_symbol, signal]
-        where signal is 0~1 probability (higher = more bullish).
+        polars DataFrame，列为 [datetime, vt_symbol, signal]：
+        - signal 分类模型为上涨概率（0~1），回归模型为预测收益（无界）。
+        - datetime 去除时区信息，与回测引擎的 bar datetime 对齐。
+
+    Raises:
+        FileNotFoundError: 模型文件不存在时抛出。
+        ValueError: 加载观测证券数据失败，或推理后无结果时抛出。
     """
     import torch
 

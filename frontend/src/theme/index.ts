@@ -1,3 +1,10 @@
+/**
+ * 全局 Ant Design 暗色主题配置。
+ *
+ * 基于 `theme.darkAlgorithm`，覆盖主色（蓝 #1668dc）、成功/警告/错误色，
+ * 以及背景层、边框、字体族、字号等 token，并针对 Layout / Menu / Table / Card / Modal
+ * 做组件级配色微调，与设计稿的深色风格保持一致。
+ */
 import { theme } from 'antd'
 import type { ThemeConfig } from 'antd'
 

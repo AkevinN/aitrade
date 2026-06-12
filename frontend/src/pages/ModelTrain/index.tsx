@@ -17,6 +17,9 @@ const { Text } = Typography
 const { RangePicker } = DatePicker
 const CheckableTag = Tag.CheckableTag
 
+/**
+ * Alpha 模型训练页面：创建数据集、配置并启动 LGB/MLP/Lasso 模型训练，展示任务进度。
+ */
 const ModelTrain: React.FC = () => {
   const [dsName, setDsName] = useState('')
   const [dsSymbolsText, setDsSymbolsText] = useState('')

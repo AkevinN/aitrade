@@ -25,16 +25,18 @@ _DEFAULT_TRIGGER_TIME = "15:05"
 def migrate_decision(raw: dict[str, Any]) -> dict[str, Any]:
     """旧 Decision JSON（含 `trade_date`）→ 新结构（`decision_bar_dt`/`as_of`/`bar_freq`）。
 
-    幂等：已是新结构（含 `decision_bar_dt`）则原样返回。
+    幂等：已是新结构（含 `decision_bar_dt`）则仅补全可能缺失的新字段默认值。
+    同时兼容 Wave 2c 新增字段：trigger_source（默认 ""）。
     """
-    if "decision_bar_dt" in raw or "trade_date" not in raw:
-        return raw
     out = dict(raw)
-    d = date.fromisoformat(out.pop("trade_date"))
-    close_iso = session_close(d, "1d").isoformat()
-    out["decision_bar_dt"] = close_iso
-    out.setdefault("as_of", close_iso)
-    out.setdefault("bar_freq", "1d")
+    if "trade_date" in out and "decision_bar_dt" not in out:
+        d = date.fromisoformat(out.pop("trade_date"))
+        close_iso = session_close(d, "1d").isoformat()
+        out["decision_bar_dt"] = close_iso
+        out.setdefault("as_of", close_iso)
+        out.setdefault("bar_freq", "1d")
+    # Wave 2c：新字段向后兼容（旧 JSON 缺失时注入默认值）
+    out.setdefault("trigger_source", "")
     return out
 
 
@@ -53,4 +55,10 @@ def migrate_plan(raw: dict[str, Any]) -> dict[str, Any]:
     # 清除旧字段（零残留）。
     for key in ("data_basis", "decision_time", "decision_times"):
         out.pop(key, None)
+    # Phase 3 M2：新增 v2 字段默认值（幂等 setdefault，已有值不覆盖）。
+    out.setdefault("strategy_type", "cnn")
+    out.setdefault("signal_source", "")
+    out.setdefault("signal_params", {})
+    out.setdefault("trigger_schedule", "daily")
+    out.setdefault("portfolio_id", "")
     return out

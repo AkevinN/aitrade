@@ -32,8 +32,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, time
-from typing import Any, Callable, Optional
+from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .calendar import TradingCalendar
 from .decision_instant import INTRADAY_BAR_FREQS
@@ -42,6 +42,9 @@ from .runtime_state import RuntimeStateStore
 from .scheduler import due_bar_slot, due_slots
 from .single_instance import SingleInstanceLock
 from .trading_plan import TradingPlan, TradingPlanStore, effective_trigger_times
+
+if TYPE_CHECKING:
+    from .scheduler_run_log import SchedulerRunLog
 
 logger = logging.getLogger("aitrade.live.plan_scheduler")
 
@@ -55,6 +58,45 @@ _LEGACY_ALL_DONE = "*"
 # 单机研究环境：无独立行情新鲜度源，降级判定主要依赖 health_fn；
 # last_data_time 传 now、放宽 staleness，使「健康」时不因数据时点误判暂停。
 _STALENESS_SECONDS = 86400.0
+
+
+def _schedule_matches_today(plan: TradingPlan, today: date, calendar: TradingCalendar) -> bool:
+    """判断 today 是否满足计划的 trigger_schedule 调度粒度（周/月闸门，纯函数）。
+
+    - "daily"         → 恒真（交易日判定由 due_slots 内部负责，闸门不重复判）。
+    - "weekly_first"  → today 是本 ISO 周内第一个交易日：
+                        从本周周一扫到 today 前一天，若已存在任何交易日则返回 False；
+                        且 today 自身必须是交易日。
+    - "monthly_first" → 同理从当月 1 日扫到 today 前一天，若已存在任何交易日则 False；
+                        且 today 自身必须是交易日。
+
+    已知局限：默认 TradingCalendar 以工作日-节假日近似判定交易日，月初多天连续
+    节假日可能导致首个交易日判定偏差——需使用精确日历（trading_days 参数）消除。
+    """
+    if plan.trigger_schedule == "daily":
+        return True
+    if not calendar.is_trading_day(today):
+        return False
+    if plan.trigger_schedule == "weekly_first":
+        # 从本周一扫到 today 前一天，若有任何交易日则今日非本周第一个交易日
+        week_start = today - timedelta(days=today.weekday())  # ISO 周一
+        d = week_start
+        while d < today:
+            if calendar.is_trading_day(d):
+                return False
+            d += timedelta(days=1)
+        return True
+    if plan.trigger_schedule == "monthly_first":
+        # 从当月 1 日扫到 today 前一天，若有任何交易日则今日非本月第一个交易日
+        month_start = today.replace(day=1)
+        d = month_start
+        while d < today:
+            if calendar.is_trading_day(d):
+                return False
+            d += timedelta(days=1)
+        return True
+    # 未知值视为 daily（宽松降级）
+    return True
 
 
 def _normalize_last_triggered(raw: dict) -> dict[str, str]:
@@ -86,7 +128,20 @@ class PlanScheduler:
         tick_seconds: float = 30.0,
         now_fn: Callable[[], datetime] = datetime.now,
         health_fn: Optional[Callable[[], tuple[bool, str]]] = None,
+        run_log: SchedulerRunLog | None = None,
     ) -> None:
+        """初始化 PlanScheduler。
+
+        Args:
+            store:        计划存储，用于 list_all()。
+            state:        运行时状态存储，用于 Last_Triggered_Map 读写。
+            trigger_fn:   触发回调 (plan) -> result dict；注入 run_live_decision 或 run_rebalance_decision。
+            calendar:     交易日历，None 时使用默认工作日日历。
+            tick_seconds: 调度轮询周期（秒），默认 30。
+            now_fn:       时刻注入函数，默认 datetime.now（测试可注入固定时间）。
+            health_fn:    系统健康检查函数 () -> (ok, reason)，默认始终健康。
+            run_log:      调度运行日志，None 时跳过日志写入（best-effort）。
+        """
         self._store = store
         self._state = state
         self._trigger_fn = trigger_fn
@@ -94,9 +149,39 @@ class PlanScheduler:
         self._tick = tick_seconds
         self._now = now_fn
         self._health = health_fn or (lambda: (True, ""))
+        self._run_log: SchedulerRunLog | None = run_log
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock: Optional[SingleInstanceLock] = None
+
+    # —— SchedulerRunLog 包装方法（None 时 no-op；调用包 try/except，R3.5）——
+
+    def _log_skip(self, plan_id: str, reason: str, detail: str = "") -> None:
+        """记录跳过事件，失败仅 WARNING 不传播（best-effort）。"""
+        if self._run_log is None:
+            return
+        try:
+            self._run_log.record_skip(plan_id, reason, detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[plan %s] _log_skip 失败（best-effort）: %s", plan_id, exc)
+
+    def _log_trigger(self, plan_id: str, slot: str, detail: str = "") -> None:
+        """记录触发事件，失败仅 WARNING 不传播（best-effort）。"""
+        if self._run_log is None:
+            return
+        try:
+            self._run_log.record_trigger(plan_id, slot, detail)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[plan %s] _log_trigger 失败（best-effort）: %s", plan_id, exc)
+
+    def _log_error(self, plan_id: str, error: str) -> None:
+        """记录触发错误事件，失败仅 WARNING 不传播（best-effort）。"""
+        if self._run_log is None:
+            return
+        try:
+            self._run_log.record_error(plan_id, error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[plan %s] _log_error 失败（best-effort）: %s", plan_id, exc)
 
     # —— Last_Triggered_Map 读写（按时点 slot 去重；兼容旧字符串值）——
     def _triggered_slots(self, plan_id: str, today: date) -> set[str]:
@@ -152,16 +237,33 @@ class PlanScheduler:
         return ok
 
     def _tick_daily_plan(self, plan: TradingPlan, now: datetime, today: date, done: set[str]) -> None:
-        """日频路径：用户配置的唤醒时刻 + due_slots（行为与历史逐位一致）。"""
+        """日频路径：用户配置的唤醒时刻 + due_slots（行为与历史逐位一致）。
+
+        Phase 3 M2：先经 trigger_schedule 闸门（周/月首日）判定；非触发日直接返回，
+        slot 去重状态机无需修改——非触发日无记录，天然兼容（跨日重置语义不受影响）。
+        """
+        if not _schedule_matches_today(plan, today, self._calendar):
+            self._log_skip(plan.plan_id, "schedule_gate")  # R3.1/R3.2
+            return
         times = [self._parse_time(t) for t in effective_trigger_times(plan)]
         slots = due_slots(now, times, self._calendar, done)
         if not slots:
+            # due_slots 为空有两种语义：
+            # (a) 已到达时刻的 slot 都触发过 → passed 非空，应记 already_done
+            # (b) 当日还没到任何 slot 时刻（now.time() < 所有 trigger_times）→ passed 为空，
+            #     属正常等待，不记任何 skip 事件（I1 修复）
+            if self._calendar.is_trading_day(today):
+                passed = [t for t in times if now.time() >= t]
+                if passed:
+                    self._log_skip(plan.plan_id, "already_done")  # R3.1/R3.2
             return
         if not self._trading_allowed(plan, now):
+            self._log_skip(plan.plan_id, "degraded")  # R3.1/R3.2
             return
         # 逐到期 slot 触发；决策层幂等使同日多 slot 收敛为当日一次决策（Req 3.1）
         for slot in slots:
             logger.info("[plan %s] 触发今日决策 @ %s", plan.plan_id, slot)
+            self._log_trigger(plan.plan_id, slot)  # R3.3
             self._trigger_fn(plan)
             self._mark_slot(plan.plan_id, today, slot)  # Req 2.3
 
@@ -175,9 +277,11 @@ class PlanScheduler:
         if slot is None:
             return
         if not self._trading_allowed(plan, now):
+            self._log_skip(plan.plan_id, "degraded")  # R3.1/R3.2
             return
         expected = datetime.combine(today, self._parse_time(slot))
         logger.info("[plan %s] 监控触发：%s bar @ %s", plan.plan_id, plan.bar_freq, slot)
+        self._log_trigger(plan.plan_id, slot)  # R3.3
         result = self._trigger_fn(plan)
         actual = datetime.fromisoformat(str(result["decision"]["decision_bar_dt"]))
         if actual >= expected:
@@ -189,6 +293,7 @@ class PlanScheduler:
                 actual.isoformat(),
                 expected.isoformat(),
             )
+            self._log_skip(plan.plan_id, "data_lag", f"decision_bar={actual.isoformat()} < 网格={expected.isoformat()}")  # R3.1/R3.2
 
     def tick_once(self) -> None:
         """单次 Tick：遍历启用计划，按 bar_freq 分派日频/监控路径。异常逐计划隔离（Req 7.3）。"""
@@ -196,11 +301,17 @@ class PlanScheduler:
         today = now.date()
         for plan in self._store.list_all():
             if not plan.enabled:
+                self._log_skip(plan.plan_id, "disabled")  # R3.1/R3.2 当日首次才落盘（去重）
                 continue  # 停用计划跳过（Req 4.5）
             try:
                 done = self._triggered_slots(plan.plan_id, today)
                 if _LEGACY_ALL_DONE in done:
                     continue  # 旧状态：当日整日已触发，跳过（Req 4.2）
+                # not_trading_day 探测（仅用于记录，不改变后续判定路径）：
+                # 日频路径中 due_slots 内部会判定交易日；此处仅探测用于记录，判定仍由原逻辑负责。
+                # 监控路径（INTRADAY）由 due_bar_slot 内部判定，探测逻辑不适用，故仅对日频记录。
+                if plan.bar_freq not in INTRADAY_BAR_FREQS and not self._calendar.is_trading_day(today):
+                    self._log_skip(plan.plan_id, "not_trading_day")
                 if plan.bar_freq in INTRADAY_BAR_FREQS:
                     self._tick_monitor_plan(plan, now, today, done)
                 else:
@@ -209,6 +320,7 @@ class PlanScheduler:
                 logger.warning(
                     "[plan %s] 调度触发异常（已隔离）：%s", plan.plan_id, exc
                 )
+                self._log_error(plan.plan_id, str(exc))
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -219,7 +331,14 @@ class PlanScheduler:
             self._stop.wait(self._tick)
 
     def start(self, lock: Optional[SingleInstanceLock] = None) -> bool:
-        """启动调度线程；若单实例锁被占用则不启动并返回 False（Req 7.2）。"""
+        """启动调度线程；若单实例锁被占用则不启动并返回 False（Req 7.2）。
+
+        Args:
+            lock: 可选的单实例互斥锁；传入时尝试 acquire()，失败则放弃启动，返回 False。
+
+        Returns:
+            True 表示线程启动成功；False 表示锁被占用，未启动。
+        """
         if lock is not None and not lock.acquire():
             logger.warning("单实例锁被占用，PlanScheduler 不启动")
             return False
@@ -232,6 +351,7 @@ class PlanScheduler:
         return True
 
     def stop(self) -> None:
+        """停止调度线程并释放单实例锁（等待当前 tick 完成，超时 tick+1 秒）。"""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self._tick + 1)
@@ -241,7 +361,9 @@ class PlanScheduler:
             self._lock = None
 
     def is_running(self) -> bool:
+        """返回调度线程是否正在运行（线程存活 且 未收到停止信号）。"""
         return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
     def enabled_plan_count(self) -> int:
+        """返回当前启用（enabled=True）的计划数量。"""
         return sum(1 for p in self._store.list_all() if p.enabled)

@@ -1,3 +1,9 @@
+/**
+ * CNN 模块 API 服务对象——封装所有与后端 `/api/cnn/` 端点的 HTTP 交互。
+ *
+ * 提供 CNN 模型的训练、查询、删除、架构探查、推理（predict）及回测能力。
+ * 所有方法均返回 `Promise<T>`，错误由全局 Axios 拦截器透传。
+ */
 import api from './client'
 import type {
   CNNArchitecture,

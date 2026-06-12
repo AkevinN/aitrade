@@ -105,8 +105,22 @@ const RESOURCE_COLUMN_LABELS: Record<string, string> = {
   ask_volume_1: '卖一量',
 }
 
+/**
+ * 将原始列名映射为中文可读标签；无映射时返回原始列名。
+ *
+ * @param column - 数据列名，如 "close" / "vt_symbol"
+ * @returns 中文标签，如 "收盘价" / "合约代码"
+ */
 const formatResourceColumnLabel = (column: string) => RESOURCE_COLUMN_LABELS[column] || column
 
+/**
+ * 将多行或逗号分隔的标的代码文本解析为字符串数组。
+ *
+ * 支持换行符与英文逗号两种分隔方式，自动去除首尾空白和空项。
+ *
+ * @param raw - 原始文本，如 "000001.SZSE\n600000.SSE" 或 "000001.SZSE,600000.SSE"
+ * @returns 合约代码数组，如 ["000001.SZSE", "600000.SSE"]
+ */
 const parseSymbols = (raw: string) => (
   raw
     .split(/[\n,]+/)
@@ -114,8 +128,20 @@ const parseSymbols = (raw: string) => (
     .filter(Boolean)
 )
 
+/**
+ * 去除合约代码末尾多余的小数点（如 "000001." → "000001"）。
+ *
+ * @param value - 原始合约代码字符串
+ * @returns 去除末尾点的字符串
+ */
 const formatResourceSymbol = (value: string) => value.replace(/\.$/, '')
 
+/**
+ * 将行情周期代码映射为中文标签；无映射时返回原始值，null/undefined 时返回 "-"。
+ *
+ * @param value - 周期代码，如 "d" / "1m" / "tick"
+ * @returns 中文标签，如 "日线" / "1分钟"
+ */
 const formatIntervalLabel = (value?: string | null) => {
   if (!value) {
     return '-'
@@ -123,6 +149,13 @@ const formatIntervalLabel = (value?: string | null) => {
   return INTERVAL_LABELS[value] || value
 }
 
+/**
+ * 将 ISO 时间字符串格式化为 "YYYY-MM-DD HH:mm:ss"；无效时返回原值或 fallback。
+ *
+ * @param value - ISO 时间字符串；null/undefined 时返回 fallback
+ * @param fallback - 缺省值，默认 "-"
+ * @returns 格式化后的时间字符串
+ */
 const formatDateTime = (value?: string | null, fallback = '-') => {
   if (!value) {
     return fallback
@@ -417,6 +450,7 @@ const DataPrepare: React.FC = () => {
       range: [dayjs().subtract(1, 'year'), dayjs()],
       source_interval: 'd',
       provider: 'auto',
+      asset_class: 'stock',
     })
     barImportForm.setFieldsValue({
       interval: 'd',
@@ -475,6 +509,7 @@ const DataPrepare: React.FC = () => {
         start: values.range[0].format('YYYY-MM-DD'),
         end: values.range[1].format('YYYY-MM-DD'),
         provider: values.provider && values.provider !== 'auto' ? values.provider : undefined,
+        asset_class: (values.asset_class as 'stock' | 'etf' | 'cbond') || 'stock',
       })
       setTaskId(result.task_id)
       message.success('原始K线下载任务已启动')
@@ -778,9 +813,21 @@ const DataPrepare: React.FC = () => {
                           <TextArea rows={4} placeholder="000001.SZSE&#10;399300.SZSE" />
                         </Form.Item>
                         <Form.Item
+                          label="品种"
+                          name="asset_class"
+                        >
+                          <Select
+                            options={[
+                              { label: 'A股股票', value: 'stock' },
+                              { label: 'ETF', value: 'etf' },
+                              { label: '可转债', value: 'cbond' },
+                            ]}
+                          />
+                        </Form.Item>
+                        <Form.Item
                           label="数据源"
                           name="provider"
-                          tooltip="选择行情数据源用于下载或补充；自动模式按优先级 tushare → akshare 选择。AKShare 仅支持 A 股，1 分钟数据仅近 5 个交易日。"
+                          tooltip="选择行情数据源用于下载或补充；自动模式按优先级 tushare → akshare 选择。AKShare 仅支持 A 股股票，ETF 请用 Tushare；1 分钟数据仅近 5 个交易日。"
                         >
                           <Select options={providerOptions} />
                         </Form.Item>

@@ -1,11 +1,20 @@
 import type { LabelSpec, ObservationGroup, TaskStartResponse } from './alpha'
 
+/**
+ * 治理回演基准类型：与当前候选模型比较的基准策略。
+ *
+ * - `fixed_initial_model`：固定初始模型不更新；
+ * - `always_retrain`：每期强制重训；
+ * - `governed_promotion`：治理晋升策略；
+ * - `buy_and_hold`：买入持有基准。
+ */
 export type GovernanceBaseline =
   | 'fixed_initial_model'
   | 'always_retrain'
   | 'governed_promotion'
   | 'buy_and_hold'
 
+/** CNN 治理全局配置（`GET /PUT /api/cnn/governance/config`）。 */
 export interface CNNGovernanceConfig {
   enabled: boolean
   evaluation_period_days: number
@@ -16,6 +25,7 @@ export interface CNNGovernanceConfig {
   auto_promote: boolean
 }
 
+/** CNN 训练超参数集合（用于治理/候选训练请求）。 */
 export interface CNNTrainingParams {
   epochs: number
   batch_size: number
@@ -26,6 +36,7 @@ export interface CNNTrainingParams {
   loss_weighting: 'none' | 'magnitude'
 }
 
+/** CNN 回测参数集合（用于治理/候选评估请求）。 */
 export interface CNNBacktestParams {
   buy_threshold: number
   sell_threshold: number
@@ -40,6 +51,7 @@ export interface CNNBacktestParams {
   t_plus1: boolean
 }
 
+/** CNN 候选模型晋升门槛配置。 */
 export interface CNNPromotionGate {
   min_win_rate: number
   min_core_score_delta: number
@@ -47,6 +59,7 @@ export interface CNNPromotionGate {
   require_positive_oos: boolean
 }
 
+/** CNN Walk-Forward 评估请求（`POST /api/cnn/governance/evaluate`）。 */
 export interface CNNWalkForwardRequest {
   name: string
   target_symbol: string
@@ -66,11 +79,13 @@ export interface CNNWalkForwardRequest {
   production_model?: string
 }
 
+/** CNN 候选模型完整训练请求（`POST /api/cnn/governance/candidates/train`），在 Walk-Forward 基础上增加最终训练区间。 */
 export interface CNNCandidateTrainRequest extends CNNWalkForwardRequest {
   final_train_start?: string
   final_train_end?: string
 }
 
+/** CNN 治理历史重演请求（`POST /api/cnn/governance/replay/run`）。 */
 export interface CNNGovernanceReplayRequest {
   name: string
   target_symbol: string
@@ -91,6 +106,7 @@ export interface CNNGovernanceReplayRequest {
   baselines: GovernanceBaseline[]
 }
 
+/** 当前生产模型状态（`GET /api/cnn/governance/production` 响应体）。 */
 export interface CNNProductionModel {
   model_name: string
   model_version: string
@@ -104,6 +120,7 @@ export interface CNNProductionModel {
   previous_model_version: string
 }
 
+/** CNN 候选模型记录（`GET /api/cnn/governance/candidates` 列表元素）。 */
 export interface CNNCandidate {
   candidate_id: string
   created_at: string
@@ -118,6 +135,7 @@ export interface CNNCandidate {
   request?: Record<string, unknown>
 }
 
+/** CNN 治理评估报告（`GET /api/cnn/governance/reports/{reportId}` 响应体）。 */
 export interface CNNGovernanceReport {
   report_id: string
   type: string
@@ -128,6 +146,7 @@ export interface CNNGovernanceReport {
   summary: Record<string, unknown>
 }
 
+/** CNN 治理历史重演结果报告（`GET /api/cnn/governance/replay/{replayId}` 响应体）。 */
 export interface CNNGovernanceReplayReport {
   replay_id: string
   name: string
@@ -143,6 +162,7 @@ export interface CNNGovernanceReplayReport {
   conclusion: Record<string, unknown>
 }
 
+/** 治理历史事件条目（`GET /api/cnn/governance/history` 列表元素）。 */
 export interface GovernanceHistoryEvent {
   ts: string
   event_type: string

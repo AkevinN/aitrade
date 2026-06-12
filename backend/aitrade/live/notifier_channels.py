@@ -36,9 +36,29 @@ class WebhookNotifier:
         self._name = name
 
     def _payload(self, title: str, message: str) -> dict:
+        """构造 HTTP 请求 JSON payload，子类可覆盖以定制格式。
+
+        Args:
+            title:   通知标题。
+            message: 通知正文。
+
+        Returns:
+            默认格式 {"title": ..., "text": ...}。
+        """
         return {"title": title, "text": message}
 
     def send(self, title: str, message: str) -> bool:
+        """POST 到 webhook_url，HTTP 状态码 < 400 视为成功。
+
+        网络异常时记 WARNING 日志并返回 False（由 MultiNotifier 隔离）。
+
+        Args:
+            title:   通知标题。
+            message: 通知正文。
+
+        Returns:
+            HTTP 响应状态码 < 400 返回 True，网络异常或 4xx/5xx 返回 False。
+        """
         try:
             resp = httpx.post(self._url, json=self._payload(title, message), timeout=_TIMEOUT)
             return resp.status_code < 400

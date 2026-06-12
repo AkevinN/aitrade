@@ -1,3 +1,13 @@
+/**
+ * Alpha 模块 API 服务对象——封装所有与后端 `/api/alpha/` 端点的 HTTP 交互。
+ *
+ * 方法命名遵循 CRUD 惯例（`list*` / `get*` / `create*` / `delete*`），
+ * 所有方法均返回 `Promise<T>`，T 为对应后端响应 DTO。
+ *
+ * @remarks
+ * 文件上传（CSV 导入）使用 `FormData`，其余请求均为 JSON。
+ * 错误由全局 Axios 拦截器记录并透传，调用方捕获 `AxiosError` 即可。
+ */
 import api from './client'
 import type {
   AlphaStatus,
@@ -161,6 +171,13 @@ export const alphaService = {
       .then((r) => r.data),
 
   // CSV Import
+  /**
+   * 预览 K 线 CSV 文件的导入结果（列映射、样本行、符号与日期范围）。
+   *
+   * @param file - 待预览的 CSV 文件。
+   * @param field_mapping - 自定义列名映射（{csv列名: 标准列名}）；缺省时后端自动推断。
+   * @returns 预览结果，含匹配列、缺失列、样本行与符号列表。
+   */
   previewCsvImport: (file: File, field_mapping?: Record<string, string>) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -172,6 +189,16 @@ export const alphaService = {
       .then((r) => r.data)
   },
 
+  /**
+   * 正式导入 K 线 CSV 文件到本地 K 线库。
+   *
+   * @param file - 待导入的 CSV 文件。
+   * @param interval - 目标周期（`d` 日线；`1m` / `5m` / `15m` / `30m` / `60m` 分钟线）。
+   * @param import_mode - `merge` 合并（保留已有数据）；`replace` 全量覆盖。
+   * @param save_mode - `batch` 暂存批次（默认）；`official` 直接写入官方库。
+   * @param field_mapping - 自定义列名映射；缺省时后端自动推断。
+   * @returns 导入结果，含成功/跳过/错误计数。
+   */
   importCsvData: (
     file: File,
     interval: 'd' | '1m' | '5m' | '15m' | '30m' | '60m',
@@ -192,6 +219,13 @@ export const alphaService = {
       .then((r) => r.data)
   },
 
+  /**
+   * 预览 Tick CSV 文件的导入结果。
+   *
+   * @param file - 待预览的 Tick CSV 文件。
+   * @param field_mapping - 自定义列名映射；缺省时后端自动推断。
+   * @returns 预览结果，含匹配列、缺失列、样本行与符号列表。
+   */
   previewTickCsvImport: (file: File, field_mapping?: Record<string, string>) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -203,6 +237,15 @@ export const alphaService = {
       .then((r) => r.data)
   },
 
+  /**
+   * 正式导入 Tick CSV 文件到本地 Tick 库。
+   *
+   * @param file - 待导入的 Tick CSV 文件。
+   * @param import_mode - `merge` 合并；`replace` 全量覆盖。
+   * @param save_mode - `batch` 暂存批次（默认）；`official` 直接写入官方库。
+   * @param field_mapping - 自定义列名映射；缺省时后端自动推断。
+   * @returns 导入结果，含成功/跳过/错误计数。
+   */
   importTickCsvData: (
     file: File,
     import_mode: 'merge' | 'replace',

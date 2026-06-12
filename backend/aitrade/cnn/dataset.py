@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 
 def _normalize_label_spec(label_spec: dict[str, Any] | None) -> dict[str, Any]:
+    """规整 label 配置字典，补全缺省值并统一 enum 为字符串值。
+
+    负责将 API 传入的 Pydantic 枚举（如 LabelMode.OCO）转为底层字符串（"oco"），
+    并为 horizon_bars/oco/threshold/neutral_policy/price_ref 等字段设置默认值。
+
+    Args:
+        label_spec: 原始 label 配置字典；None 等价于 mode=next_bar 的默认配置。
+
+    Returns:
+        规整后的配置字典，所有枚举字段均为字符串，缺省字段已补全。
+
+    Raises:
+        ValueError: oco 模式的 max_hold < 1，或 take_profit/stop_loss 非正时抛出。
+    """
     spec = dict(label_spec or {})
     mode = spec.get("mode") or "next_bar"
     # mode 可能来自 API 的 pydantic 枚举（LabelMode）；统一规整为字符串值，
@@ -121,15 +135,31 @@ def _compute_label_return(
     total_steps: int,
     vwap_series: np.ndarray | None = None,
 ) -> float | None:
-    """按计价口径计算未来收益。
+    """按计价口径计算锚点到未来时刻的收益率。
 
+    口径说明：
     - close（旧/研究口径）：close[anchor] → close[future_index]。
-    - next_open（可执行）：open[anchor+1] → open[future_index+1]，对应「T 收盘出信号、
-      T+1 开盘建仓、目标周期后开盘平仓」，剔除 close[anchor]→open[anchor+1] 的隔夜跳空。
-    - next_close（可执行）：close[anchor+1] → close[future_index+1]，对应「T+1 收盘价(MOC)成交」。
-    - next_vwap（可执行）：vwap[anchor+1] → vwap[future_index+1]，对应「T+1 全天均价(VWAP)成交」。
+    - next_open（可执行）：open[anchor+1] → open[future_index+1]，
+      对应「T 收盘出信号、T+1 开盘建仓、目标周期后开盘平仓」，
+      剔除 close[anchor]→open[anchor+1] 的隔夜跳空。
+    - next_close（可执行）：close[anchor+1] → close[future_index+1]，
+      对应「T+1 收盘价(MOC)成交」。
+    - next_vwap（可执行）：vwap[anchor+1] → vwap[future_index+1]，
+      对应「T+1 全天均价(VWAP)成交」；vwap_series 为 None 时回退到 close。
 
-    next_* 口径需要 anchor+1 / future_index+1 的价格，越界返回 None 由调用方跳过（无前视）。
+    next_* 口径需要 anchor+1/future_index+1 的价格；越界返回 None（无前视）。
+
+    Args:
+        anchor: 当前锚点在时间序列中的下标。
+        future_index: 未来出场时刻的下标。
+        price_ref: 计价口径，"close" | "next_open" | "next_close" | "next_vwap"。
+        open_series: 目标证券开盘价序列，形状 [T]。
+        close_series: 目标证券收盘价序列，形状 [T]。
+        total_steps: 时间序列总长度（即 T）。
+        vwap_series: 均价序列，形状 [T]；仅 next_vwap 口径使用，None 时退化为 close。
+
+    Returns:
+        收益率（浮点，如 0.023 表示 +2.3%）；越界时返回 None。
     """
     if price_ref in ("next_open", "next_close", "next_vwap"):
         entry_index = anchor + 1
@@ -219,6 +249,19 @@ def _oco_label_value(
 
 
 def _build_session_last_index(datetimes: list[datetime]) -> tuple[dict[Any, int], list[Any]]:
+    """构建「交易日 → 该日最后一根 bar 下标」的映射表。
+
+    遍历 datetimes，每个交易日的最后出现下标即为该日最后一根 bar 的位置，
+    供 session_close/next_session_close 标签模式定位出场时刻。
+
+    Args:
+        datetimes: 对齐后的时间序列，每项为 datetime 对象；顺序与 K 线行序一致。
+
+    Returns:
+        (day_to_last_index, ordered_days)：
+        - day_to_last_index: date → 该日最后一根 bar 在 datetimes 中的下标。
+        - ordered_days: 按首次出现顺序排列的交易日列表（date 对象）。
+    """
     day_to_last_index: dict[Any, int] = {}
     ordered_days: list[Any] = []
     for index, dt in enumerate(datetimes):
@@ -236,6 +279,26 @@ def _label_future_index(
     *,
     input_interval: str,
 ) -> int | None:
+    """计算锚点对应的 label 未来出场时刻的下标。
+
+    按 label_spec["mode"] 分派：
+    - next_bar           → anchor + 1。
+    - horizon_bars       → anchor + spec["horizon"]。
+    - session_close      → 当日最后一根 bar（日线下禁用）。
+    - next_session_close → 次交易日最后一根 bar。
+
+    Args:
+        anchor: 当前锚点在时间序列中的下标。
+        datetimes: 对齐后的完整时间序列（datetime 对象列表）。
+        label_spec: 规整后的 label 配置字典（已经 _normalize_label_spec 处理）。
+        input_interval: K 线周期，如 "d"、"30m"；影响 session_close 的合法性校验。
+
+    Returns:
+        未来出场时刻在 datetimes 中的下标；越界或找不到时返回 None。
+
+    Raises:
+        ValueError: session_close 用于日线周期，或 mode 不在支持列表内时抛出。
+    """
     mode = label_spec["mode"]
     if mode == "next_bar":
         future = anchor + 1
@@ -279,14 +342,36 @@ def build_dataset(
     label_spec: dict[str, Any] | None = None,
     objective: str = "classification",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
-    """
-    Build grouped CNN samples.
+    """构建分组感知的 CNN 训练样本集。
+
+    加载各证券本地 K 线 → 按公共时间轴对齐 → 计算技术特征 →
+    填入 [C, T, S, G] 张量 → 为每个锚点生成标签，返回样本矩阵与元数据。
+    训练与推理共用同一套底层逻辑（features 模块），避免两处实现漂移。
+
+    Args:
+        vt_symbols: 参与训练的全量证券代码列表；observation_groups 为空时用于构造默认分组。
+        start: 数据起始日期（含）。
+        end: 数据结束日期（含）。
+        lookback: 每个样本的回看 bar 数（时间窗口长度 T）。
+        target_symbol: 预测目标证券代码；None 时取 vt_symbols[0]。
+        on_progress: 进度回调 ``(percent: float, message: str) -> None``，可为 None。
+        observation_groups: 语义分组配置列表；None 时退化为旧版兼容逻辑。
+        input_data_kind: 数据种类，"bar"（K 线）或 "tick"（Tick 聚合）。
+        input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
+        label_spec: label 配置字典（mode/horizon/threshold/price_ref 等）；None → 默认 next_bar。
+        objective: 训练目标，"classification"（方向二分类）或 "regression"（收益回归）。
 
     Returns:
-        X: [N, C, T, S, G]
-        y: [N]
-        mask: [1, 1, 1, S, G]
-        info: metadata for model saving / UI display
+        四元组 ``(X, y, group_mask, info)``：
+        - X: 形状 [N, C, T, S, G]，float32，归一化前的特征张量（归一化在 trainer 中进行）。
+        - y: 形状 [N]，float32；分类为 {0.0, 1.0}，回归为连续收益率。
+        - group_mask: 形状 [1, 1, 1, S, G]，float32；有效证券位置为 1.0，占位为 0.0。
+        - info: 元数据字典，含 symbols/groups/feature_names/dates/sample_anchor_dates 等，
+          供 trainer 写入 checkpoint 和前端展示；sample_returns 键含每样本带符号收益，
+          仅用于幅度加权训练，不写入 checkpoint。
+
+    Raises:
+        ValueError: 证券本地数据缺失、公共时间步不足、无法生成任何有效样本等情况时抛出。
     """
     if on_progress:
         on_progress(5, "解析观测分组...")

@@ -6,8 +6,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import PlanList from './PlanList'
 import PlanForm from './PlanForm'
 import SchedulerStatusCard from './SchedulerStatusCard'
+import SchedulerRunsCard from './SchedulerRunsCard'
 import ProgressCard from './ProgressCard'
 import DecisionResultCard from './DecisionResultCard'
+import RebalancePlanCard from './RebalancePlanCard'
 import RiskDetailPanel from './RiskDetailPanel'
 import { liveService } from '../../api/liveApi'
 import { useTask } from '../../hooks/useTask'
@@ -32,6 +34,8 @@ const PlanManager: React.FC = () => {
   const [taskId, setTaskId] = useState<string | null>(null)
   const [runningId, setRunningId] = useState<string | null>(null)
   const [togglingId, setTogglingId] = useState<string | null>(null)
+  /** 最近被触发的计划（用于判断 strategy_type 以切换结果渲染组件）。 */
+  const [triggeredPlan, setTriggeredPlan] = useState<TradingPlan | null>(null)
 
   const plansQuery = useQuery({
     queryKey: ['live-plans'],
@@ -47,6 +51,11 @@ const PlanManager: React.FC = () => {
   const task = taskQuery.data ?? null
   const isRunning = task?.status === 'running' || task?.status === 'pending'
 
+  /**
+   * 使计划列表与调度状态查询失效，触发自动重拉。
+   *
+   * 在计划创建/更新/删除/启停操作后调用。
+   */
   const invalidatePlans = () => {
     void queryClient.invalidateQueries({ queryKey: ['live-plans'] })
     void queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
@@ -73,6 +82,12 @@ const PlanManager: React.FC = () => {
     onError: (e: unknown) => message.error(e instanceof Error ? e.message : '删除失败'),
   })
 
+  /**
+   * 切换计划的自动调度开关。
+   *
+   * @param planId - 要切换的计划 ID
+   * @param enabled - 目标状态：true=启用；false=停用
+   */
   const handleToggle = async (planId: string, enabled: boolean) => {
     setTogglingId(planId)
     try {
@@ -85,9 +100,27 @@ const PlanManager: React.FC = () => {
     }
   }
 
+  /**
+   * 立即触发指定计划（忽略调度时间，直接产出今日决策）。
+   *
+   * 先拉取计划详情（getPlan）记录 strategy_type，再调用 runPlan 获取 task_id 开始轮询。
+   * getPlan 失败不阻断触发，结果区默认渲染 cnn 卡片。
+   * strategy_type=rule 时结果区切换为 RebalancePlanCard。
+   *
+   * @param planId - 要触发的计划 ID
+   */
   const handleRun = async (planId: string) => {
     setRunningId(planId)
+    setTriggeredPlan(null)
     try {
+      // 先拉取计划详情，记录 strategy_type 以便结果区切换渲染组件
+      let plan: TradingPlan | null = null
+      try {
+        plan = await liveService.getPlan(planId)
+        setTriggeredPlan(plan)
+      } catch {
+        // 拉取失败不阻断触发，结果区默认渲染 cnn 卡片
+      }
       const res = await liveService.runPlan(planId)
       setTaskId(res.task_id)
       message.success(res.message || '已按计划触发')
@@ -98,6 +131,11 @@ const PlanManager: React.FC = () => {
     }
   }
 
+  /**
+   * 加载计划详情并打开编辑弹窗。
+   *
+   * @param planId - 要编辑的计划 ID
+   */
   const handleEdit = async (planId: string) => {
     try {
       const plan = await liveService.getPlan(planId)
@@ -108,6 +146,7 @@ const PlanManager: React.FC = () => {
     }
   }
 
+  /** 打开新建计划弹窗（清除编辑状态）。 */
   const handleNew = () => {
     setEditingPlan(null)
     setFormOpen(true)
@@ -151,12 +190,21 @@ const PlanManager: React.FC = () => {
         </Col>
       </Row>
 
+      <SchedulerRunsCard plans={plansQuery.data ?? []} />
+
       {taskId ? (
         <Card title="立即触发结果">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <ProgressCard task={task} hasTaskId={taskId !== null} />
-            <DecisionResultCard task={task} />
-            <RiskDetailPanel task={task} />
+            {/* 根据被触发计划的 strategy_type 切换渲染：rule → RebalancePlanCard，cnn → 原有三卡 */}
+            {triggeredPlan?.strategy_type === 'rule' ? (
+              <RebalancePlanCard task={task} />
+            ) : (
+              <>
+                <DecisionResultCard task={task} />
+                <RiskDetailPanel task={task} />
+              </>
+            )}
             {isRunning ? <Text type="secondary">决策任务执行中…</Text> : null}
           </Space>
         </Card>

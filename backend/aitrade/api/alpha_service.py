@@ -41,7 +41,24 @@ def _build_feature_dataset(
     test_period: tuple[str, str],
     feature_names: list[str],
 ):
-    """Build a combined feature dataset using selected feature libraries."""
+    """按特征库列表构建合并特征数据集。
+
+    逐个加载 alpha101 / alpha158 等特征库，校验特征名不冲突后合并到
+    一个 ``AlphaDataset`` 实例中，供下游数据预处理与模型训练使用。
+
+    Args:
+        df:            K 线原始 DataFrame（含 datetime / vt_symbol / open / high / low / close / volume 等列）。
+        train_period:  训练期 ``(start_str, end_str)``，格式 "YYYY-MM-DD"。
+        valid_period:  验证期 ``(start_str, end_str)``。
+        test_period:   测试期 ``(start_str, end_str)``。
+        feature_names: 特征库名列表，支持 "alpha101" / "alpha158"。
+
+    Returns:
+        合并了所有指定特征库表达式与结果的 ``AlphaDataset`` 实例（未调用 ``prepare_data``）。
+
+    Raises:
+        ValueError: 特征库名不支持、特征名冲突，或特征表达式预校验失败时抛出。
+    """
     from ..alpha.dataset import AlphaDataset
     from ..alpha.dataset.datasets.alpha_101 import Alpha101
     from ..alpha.dataset.datasets.alpha_158 import Alpha158
@@ -93,11 +110,33 @@ def _build_feature_dataset(
 
 
 def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
+    """归一化合约代码列表：去空串、标准化格式、去重保序。
+
+    Args:
+        vt_symbols: 原始合约代码列表（可含空串或格式不规范的代码）。
+
+    Returns:
+        归一化后的合约代码列表（已去空、格式对齐、去重保序）。
+    """
     return list(dict.fromkeys(normalize_vt_symbol(item) for item in vt_symbols if item))
 
 
 def _apply_default_preprocessing(dataset: Any) -> None:
-    """Apply the default Alpha preprocessing pipeline."""
+    """对数据集应用默认 Alpha 预处理流水线（Robust Z-Score 标准化 + 缺失值填充）。
+
+    流水线步骤：
+    1. 以训练期的有效（无空标签）样本拟合 Robust Z-Score 统计量；
+    2. 将标准化后的特征缺失值填 0.0；
+    3. 结果写入 ``dataset.infer_df``（全样本）和 ``dataset.learn_df``（过滤空标签）；
+    4. 统计量保存到 ``dataset.preprocess_stats``（供信号生成阶段复用）。
+
+    Args:
+        dataset: 已调用 ``prepare_data`` 的 ``AlphaDataset`` 实例；
+                 ``raw_df`` 须含特征列（列索引 2:-1）与 label 列。
+
+    Raises:
+        ValueError: 数据集无特征列，或过滤空标签后训练数据为空时抛出。
+    """
     from ..alpha.dataset import Segment
     from ..alpha.dataset.processor import (
         apply_robust_zscore_stats,
@@ -136,7 +175,14 @@ def _apply_default_preprocessing(dataset: Any) -> None:
 
 
 def _is_usable_bar_provider(name: str) -> bool:
-    """判断指定数据源是否可用且支持历史K线（拒绝 mock）。"""
+    """判断指定数据源是否可用且支持历史 K 线（拒绝 mock）。
+
+    Args:
+        name: 数据源名称（如 "tushare" / "akshare" / "mock"）。
+
+    Returns:
+        True 表示可用且支持 ``DataCategory.BAR_HISTORY``；"mock" 固定返回 False。
+    """
     if name == "mock":
         return False
     provider = datasource_manager.get_provider(name)
@@ -145,14 +191,44 @@ def _is_usable_bar_provider(name: str) -> bool:
     return DataCategory.BAR_HISTORY in provider.get_supported_categories()
 
 
-def _pick_bar_provider(preferred: str = "") -> str:
-    """为 Alpha 研究数据选择最佳数据源（拒绝 mock）。
+def _pick_bar_provider(preferred: str = "", asset_class: str = "stock") -> str:
+    """为 Alpha 研究数据选择最佳可用数据源（拒绝 mock）。
 
-    指定 preferred 且其可用时优先返回；否则按优先级自动选择。
+    品种限制：
+    - ETF：跳过 akshare（其 ``_fetch_daily`` 固定调股票接口，对 ETF 必然返回空数据）；
+    - 可转债（cbond）：只允许 akshare（tushare ``pro_bar`` 会把 11/12 开头代码误判为股票资产）；
+      显式指定 tushare 时抛 RuntimeError，自动选源时跳过 tushare/gateway。
+
+    Args:
+        preferred:   优先指定的数据源名（如 "tushare" / "akshare"）；空串为自动选择。
+        asset_class: 资产类型，支持 "stock" / "etf" / "cbond"，影响可用源过滤规则。
+
+    Returns:
+        选中的数据源名（如 "tushare"）；无可用源时返回空串。
+
+    Raises:
+        RuntimeError: preferred 与品种限制不兼容时（如 akshare + etf / tushare + cbond）。
     """
-    if preferred and _is_usable_bar_provider(preferred):
-        return preferred
+    if preferred:
+        if preferred == "akshare" and asset_class == "etf":
+            raise RuntimeError(
+                "AKShare 数据源不支持 ETF 行情，请改用 Tushare"
+            )
+        if asset_class == "cbond" and preferred == "tushare":
+            raise RuntimeError(
+                "Tushare 数据源不支持可转债行情（pro_bar 会误判代码为股票）；"
+                "请改用 AKShare 或选择自动模式"
+            )
+        if _is_usable_bar_provider(preferred):
+            return preferred
+    if asset_class == "cbond":
+        # 可转债只走 akshare
+        if _is_usable_bar_provider("akshare"):
+            return "akshare"
+        return ""
     for name in ("tushare", "akshare", "gateway"):
+        if name == "akshare" and asset_class == "etf":
+            continue
         if _is_usable_bar_provider(name):
             return name
     return ""
@@ -166,7 +242,23 @@ def _load_required_local_bar_df(
     end: date | datetime,
     extended_days: int = 0,
 ) -> pl.DataFrame:
-    """Load local bar data and require full symbol coverage."""
+    """加载本地 K 线数据并要求全量合约覆盖，任意缺失则抛错。
+
+    Args:
+        lab:           AlphaLab 实例，提供 ``load_bar_df`` 方法。
+        vt_symbols:    目标合约代码列表（已归一化）。
+        interval:      K 线周期（"d" / "1m" / "30m" 等）。
+        start:         加载起始日（含），date 或 datetime 均可。
+        end:           加载截止日（含），date 或 datetime 均可。
+        extended_days: 向前额外加载天数（供特征计算的 look-back 窗口），默认 0。
+
+    Returns:
+        合并后的 polars DataFrame，包含所有 vt_symbols 的 K 线数据。
+
+    Raises:
+        ValueError: 本地无数据，或指定合约中有任意一只缺失本地 K 线时抛出，
+                    错误信息列出所有缺失合约，指引用户先下载/导入。
+    """
     vt_symbols = _normalize_symbol_list(vt_symbols)
     df = lab.load_bar_df(
         vt_symbols=vt_symbols,
@@ -198,7 +290,25 @@ def _download_bar_data(
     req: DataDownloadRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
 ) -> dict[str, Any]:
-    """从数据源下载K线数据，保存到 AlphaLab。"""
+    """从数据源下载 K 线数据并存为待合并批次（import_batch）。
+
+    下载结果不直接写入正式 K 线存储，而是经 ``save_bars_as_import_batch`` 暂存为
+    待合并批次，用户须在「数据资源」界面做连续性/一致性校验后再并入正式资源。
+    按合约逐只下载，部分失败不中断整体（best-effort）。
+
+    AKShare 1 分钟线限制：仅支持近 5 个交易日，时间跨度 > 7 天时服务端直接拒绝并报错。
+
+    Args:
+        req:         ``DataDownloadRequest``，含合约列表、周期、时间范围、数据源偏好等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``，
+                     每只合约完成后回调一次（0–100）。
+
+    Returns:
+        包含 total / success / failed / failed_symbols / provider / batches / saved_as 的 dict。
+
+    Raises:
+        RuntimeError: 数据源不支持指定品种/周期，或无任何可用真实数据源时抛出。
+    """
     from .alpha import _get_alpha_lab, _normalize_market_interval
 
     lab = _get_alpha_lab()
@@ -222,8 +332,17 @@ def _download_bar_data(
         raise RuntimeError(f"当前不支持下载周期 {requested_interval}")
 
     requested_provider = (req.provider or "").strip()
-    provider_name = _pick_bar_provider(requested_provider)
+    asset_class = getattr(req, "asset_class", "stock") or "stock"
+    provider_name = _pick_bar_provider(requested_provider, asset_class=asset_class)
     if not provider_name:
+        if asset_class == "etf":
+            raise RuntimeError(
+                "ETF 下载当前需要 Tushare 数据源（请配置 TUSHARE_TOKEN）"
+            )
+        if asset_class == "cbond":
+            raise RuntimeError(
+                "可转债下载需要 AKShare 数据源（请确认已安装 akshare 依赖且 AKSHARE_ENABLED=true）"
+            )
         raise RuntimeError(
             "没有可用的真实数据源。请配置 Tushare token 或启用 AKShare。"
             "Alpha 研究需要真实历史数据，不支持 Mock 数据。"
@@ -289,6 +408,7 @@ def _download_bar_data(
                     adjust_type=adjust_type,
                     source="download",
                     file_name=f"{provider_name}_{requested_interval}_{req.start}_{req.end}",
+                    extra_meta={"asset_class": asset_class},
                 )
                 batches.append(batch)
                 success_count += 1
@@ -329,7 +449,18 @@ def _aggregate_data(
     req: DataAggregateRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """聚合本地原始数据为派生K线。"""
+    """将本地原始 K 线聚合为派生周期 K 线（如 1m → 5m / 30m）。
+
+    调用 ``AlphaLab.aggregate_market_data`` 完成聚合，结果写入 AlphaLab 存储。
+
+    Args:
+        req:         ``DataAggregateRequest``，含合约列表、源/目标周期、时间范围、
+                     盘中会话配置等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``。
+
+    Returns:
+        聚合结果 dict，含 success / total / target_interval 等字段（由 AlphaLab 返回）。
+    """
     from .alpha import _get_alpha_lab
 
     lab = _get_alpha_lab()
@@ -362,7 +493,23 @@ def _create_dataset(
     req: DatasetCreateRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
 ) -> dict[str, Any]:
-    """创建数据集（含特征计算）。"""
+    """创建 AlphaDataset：加载 K 线 → 构建特征 → 设置标签 → 预处理 → 持久化。
+
+    完整流水线（含 ``prepare_data`` 特征计算与默认预处理）。数据集存储到
+    AlphaLab，可直接用于后续模型训练。
+
+    Args:
+        req:         ``DatasetCreateRequest``，含合约列表、特征库、时间三段
+                     （start/train_end/end）、标签周期（label_period）、数据集名等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``，
+                     逐阶段（10→90）回调。
+
+    Returns:
+        ``{"name": str, "feature_count": int, "sample_count": int}``。
+
+    Raises:
+        ValueError: 日期段顺序非法、本地缺少 K 线数据，或特征库/标签计算失败时抛出。
+    """
     from .alpha import _get_alpha_lab
 
     lab = _get_alpha_lab()
@@ -436,7 +583,23 @@ def _train_model(
     req: ModelTrainRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
 ) -> dict[str, Any]:
-    """训练机器学习模型。"""
+    """训练机器学习模型并持久化到 AlphaLab。
+
+    支持 lgb / mlp / lasso 三种模型类型；对 mlp 自动处理 hidden_sizes 类型转换
+    与 device 选择（CUDA 优先）；对 lgb 将 n_estimators 重命名为 num_boost_round。
+    训练后将 dataset_name / preprocess_stats / feature_libraries 作为元信息附加到模型，
+    供信号生成阶段复用。
+
+    Args:
+        req:         ``ModelTrainRequest``，含数据集名、模型名、模型类型、超参数等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``。
+
+    Returns:
+        ``{"name": str, "model_type": str}``。
+
+    Raises:
+        ValueError: 数据集不存在、模型类型不支持，或训练数据为空时抛出（含中文指引）。
+    """
     from ..alpha.model.models.lgb_model import LgbModel
     from ..alpha.model.models.mlp_model import MlpModel
     from ..alpha.model.models.lasso_model import LassoModel
@@ -524,7 +687,23 @@ def _generate_signal(
     req: SignalGenerateRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
 ) -> dict[str, Any]:
-    """使用训练好的模型生成交易信号。"""
+    """使用已训练模型对指定区间产生逐日交易信号，并持久化到 AlphaLab。
+
+    信号生成时复用模型随附的 preprocess_stats 和 feature_expressions，
+    保证信号与训练期的标准化口径一致（不重新拟合统计量）。
+    预测结果对齐到 infer_df（TEST 段），逐行与 (datetime, vt_symbol) 索引拼接。
+
+    Args:
+        req:         ``SignalGenerateRequest``，含模型名、合约列表、信号名、时间范围等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``。
+
+    Returns:
+        ``{"name": str, "row_count": int}``。
+
+    Raises:
+        ValueError: 模型/模板数据集不存在、缺少预处理统计量、本地 K 线缺失，
+                    或预测与索引长度不一致时抛出。
+    """
     from ..alpha.dataset import AlphaDataset, Segment
     from ..alpha.dataset.processor import apply_robust_zscore_stats, fill_feature_nan
 
@@ -622,7 +801,23 @@ def _run_backtest(
     req: BacktestRunRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
 ) -> dict[str, Any]:
-    """基于信号运行策略回测。"""
+    """基于已有信号运行策略回测，返回统计指标、成交明细与逐日净值曲线。
+
+    使用 ``BacktestingEngine + EquityDemoStrategy``；基准（买入持有）优先取
+    ``req.benchmark``，单标的回测时其次取该标的本身。无成交记录时返回零值统计
+    与空 trades/equity_curve（不报错），供前端正常展示。
+
+    Args:
+        req:         ``BacktestRunRequest``，含信号名、回测区间、资金、基准标的等。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``。
+
+    Returns:
+        包含 name / target_symbol / statistics / trades / equity_curve 的 dict。
+        ``statistics`` 包含夏普、年化收益、最大回撤、基准对比等指标。
+
+    Raises:
+        ValueError: 信号不存在、指定区间内无信号，或本地缺少回测所需历史 K 线时抛出。
+    """
     from ..alpha.strategy import BacktestingEngine
     from ..alpha.strategy.strategies.equity_demo_strategy import EquityDemoStrategy
     from ..backtest.artifacts import (

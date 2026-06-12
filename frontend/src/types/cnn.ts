@@ -1,3 +1,4 @@
+/** CNN 模型列表条目（`GET /api/cnn/models` 元素）。 */
 export interface CNNModelInfo {
   name: string
   created_at: string
@@ -14,6 +15,7 @@ export interface CNNModelInfo {
   observation_groups?: Array<Record<string, unknown>>
 }
 
+/** CNN 训练历史单个 Epoch 指标（`CNNModelDetail.history` 元素）。 */
 export interface CNNHistoryItem {
   epoch: number
   train_loss: number
@@ -42,6 +44,7 @@ export interface CNNHistoryItem {
   lr?: number
 }
 
+/** CNN 模型完整详情（`GET /api/cnn/models/{name}` 响应体）。 */
 export interface CNNModelDetail extends CNNModelInfo {
   train_config: Record<string, unknown>
   model_config: Record<string, unknown>
@@ -88,11 +91,15 @@ export interface CNNArchitecture {
   layers: CNNArchitectureLayer[]
 }
 
+/** CNN 模块状态（`GET /api/cnn/status` 响应体）。 */
 export interface CNNStatus {
+  /** PyTorch 是否已安装。 */
   torch_installed: boolean
+  /** 当前使用的推理设备（`cpu` / `cuda`）。 */
   device: string
 }
 
+/** CNN 回测运行请求（`POST /api/cnn/backtest/run`）。 */
 export interface CNNBacktestRequest {
   name: string
   model: string
@@ -121,6 +128,7 @@ export interface CNNBacktestRequest {
   t_plus1?: boolean
 }
 
+/** CNN 推理（生成信号）请求（`POST /api/cnn/predict`）。 */
 export interface CNNPredictRequest {
   name: string
   model: string
