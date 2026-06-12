@@ -11,6 +11,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from .dataset import PATH_TP_FIRST, PATH_SL_FIRST, PATH_TIME_UP, PATH_TIME_DOWN
 from .model import build_dataset, create_market_cnn, normalize_observation_groups
 from .storage import save_cnn_model
 
@@ -205,19 +206,116 @@ def _regression_metrics(
     }
 
 
+def _path_class_metrics(
+    y_true: "list[float] | np.ndarray",
+    y_logits: "list[list[float]] | np.ndarray",
+) -> dict[str, Any]:
+    """path_class 四分类评估指标：逐类 precision/recall、macro_f1、tp_auc/sl_auc。
+
+    基于 raw logits 矩阵计算：先做 softmax（numpy 实现，减 max 防溢出）得到四类概率，
+    然后用 argmax 得到预测类别，再分别计算各类指标。
+
+    类别对应关系（与 dataset.py 常量一致）：
+    - 0 = tp_first（止盈先触发）
+    - 1 = sl_first（止损先触发）
+    - 2 = time_up（时间止损 + 方向向上）
+    - 3 = time_down（时间止损 + 方向向下）
+
+    macro_f1 的均值只统计 support > 0 的类，support=0 的类不参与分母，
+    避免「预测了 0 个样本的类别」人为拉低整体 F1。
+
+    tp_auc / sl_auc 均为 one-vs-rest AUC（复用 _rank_auc），单类缺失时返回 None。
+
+    Args:
+        y_true: 形状 [N] 的真值类别数组，float32，值域 {0.0, 1.0, 2.0, 3.0}。
+        y_logits: 形状 [N, 4] 的 raw logits 矩阵；支持 list[list[float]] 或 np.ndarray。
+
+    Returns:
+        指标字典，含：
+        - "tp_auc": float | None，TP First 类（类 0）的 one-vs-rest AUC。
+        - "sl_auc": float | None，SL First 类（类 1）的 one-vs-rest AUC。
+        - "macro_f1": float，各有效类 F1 的均值（无有效类时为 0.0）。
+        - "class_report": 嵌套字典，键为类别名，值含 precision/recall/support。
+
+    Example:
+        >>> y_t = np.array([0, 1, 2, 3], dtype=np.float32)
+        >>> logits = np.eye(4) * 10  # 完美预测
+        >>> m = _path_class_metrics(y_t, logits)
+        >>> m["macro_f1"]  # 1.0
+    """
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    lgt = np.asarray(y_logits, dtype=np.float64)
+    if lgt.ndim != 2 or lgt.shape[1] != 4:
+        lgt = lgt.reshape(-1, 4)
+
+    # softmax：减 row-max 防数值溢出
+    lgt_shifted = lgt - lgt.max(axis=1, keepdims=True)
+    exp_lgt = np.exp(lgt_shifted)
+    probs = exp_lgt / exp_lgt.sum(axis=1, keepdims=True)  # [N, 4]
+
+    y_pred = np.argmax(probs, axis=1).astype(np.float64)  # [N]
+
+    class_names = ("tp_first", "sl_first", "time_up", "time_down")
+    class_labels = (0.0, 1.0, 2.0, 3.0)
+
+    class_report: dict[str, dict[str, Any]] = {}
+    f1_list: list[float] = []
+
+    for name, label in zip(class_names, class_labels):
+        support = int(np.sum(yt == label))
+        tp = float(np.sum((y_pred == label) & (yt == label)))
+        fp = float(np.sum((y_pred == label) & (yt != label)))
+        fn = float(np.sum((y_pred != label) & (yt == label)))
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        class_report[name] = {
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "support": support,
+        }
+        if support > 0:
+            f1_list.append(f1)
+
+    macro_f1 = float(np.mean(f1_list)) if f1_list else 0.0
+
+    # one-vs-rest AUC（复用 _rank_auc）：单类缺失（全为正/负）时自然返回 None
+    tp_auc_raw = _rank_auc((yt == 0.0).astype(np.float64), probs[:, 0])
+    sl_auc_raw = _rank_auc((yt == 1.0).astype(np.float64), probs[:, 1])
+    tp_auc = round(float(tp_auc_raw), 4) if tp_auc_raw is not None else None
+    sl_auc = round(float(sl_auc_raw), 4) if sl_auc_raw is not None else None
+
+    return {
+        "tp_auc": tp_auc,
+        "sl_auc": sl_auc,
+        "macro_f1": round(macro_f1, 4),
+        "class_report": class_report,
+    }
+
+
 # 选优/早停的业务指标权重（仅回归用）：
 # rank_ic 衡量排序能力，excess_acc 衡量相对基线的方向超额准确率，二者越大越好。
 _SEL_RANK_IC_WEIGHT = 1.0
 _SEL_EXCESS_ACC_WEIGHT = 1.0
 
 
-def _selection_score(epoch_row: dict[str, Any], is_regression: bool) -> float:
+def _selection_score(epoch_row: dict[str, Any], is_regression: bool, objective: str = "classification") -> float:
     """计算用于选最佳 epoch / 早停的业务指标分数，越大越好。
 
     - 回归：综合 RankIC（排序能力）与 excess_acc（方向超额准确率），
       避免单看 val_loss（MSE）导致选中"loss 低但方向差"的模型。
-    - 分类：优先用 AUC，缺失时回退到 excess_acc。
-    None 值按 0 处理，保证可比较。
+    - 分类（classification）：优先用 AUC，缺失时回退到 excess_acc。
+    - 路径多分类（path_class）：tp_auc + sl_auc（止盈/止损判别能力之和）；
+      任一 AUC 为 None 时按 0.5（随机基线）代入，保证可比较。
+    None 值均按 0 处理，保证可比较。
+
+    Args:
+        epoch_row: 单个 epoch 的指标字典（history 中的一行）。
+        is_regression: 是否为回归目标。
+        objective: 训练目标字符串，"classification"/"regression"/"path_class"。
+
+    Returns:
+        业务指标分数（float，越大越好）。
     """
     if is_regression:
         rank_ic = epoch_row.get("val_rank_ic")
@@ -225,6 +323,12 @@ def _selection_score(epoch_row: dict[str, Any], is_regression: bool) -> float:
         rank_ic = float(rank_ic) if rank_ic is not None else 0.0
         excess = float(excess) if excess is not None else 0.0
         return _SEL_RANK_IC_WEIGHT * rank_ic + _SEL_EXCESS_ACC_WEIGHT * excess
+    if objective == "path_class":
+        tp_auc = epoch_row.get("val_tp_auc")
+        sl_auc = epoch_row.get("val_sl_auc")
+        tp = float(tp_auc) if tp_auc is not None else 0.5
+        sl = float(sl_auc) if sl_auc is not None else 0.5
+        return tp + sl
     auc = epoch_row.get("val_auc")
     if auc is not None:
         return float(auc)
@@ -280,15 +384,22 @@ def train_cnn_model(
         input_data_kind: 数据种类，"bar" 或 "tick"。
         input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
         label_spec: label 配置字典；None → 默认 next_bar。
-        loss_weighting: 损失加权策略，"none"（均匀）或 "magnitude"（幅度加权，仅分类）。
-        objective: 训练目标，"classification"（BCELoss）或 "regression"（HuberLoss）。
+        loss_weighting: 损失加权策略，"none"（均匀）或 "magnitude"（幅度加权，仅 classification）；
+            path_class 与 regression 下强制回退为 "none"（权重恒 1）。
+        objective: 训练目标：
+            - "classification"：BCELoss，输出上涨概率 [B,1]。
+            - "regression"：HuberLoss，输出无界预测收益 [B,1]。
+            - "path_class"：CrossEntropyLoss，输出四分类路径 logits [B,4]；
+              需配合 label_spec.mode="oco"。
 
     Returns:
         训练结果字典，含 name/model_path/history_path/best_epoch/best_val_loss/
         best_val_acc/beats_baseline/total_params/train_samples/val_samples/
         elapsed_seconds/history/tensor_shape 等键；
-        回归模式下额外含 best_val_ic/best_val_rank_ic/best_val_mae/best_val_dir_acc，
-        分类模式下额外含 best_val_auc/best_val_f1。
+        回归模式下额外含 best_val_ic/best_val_rank_ic/best_val_mae/best_val_dir_acc；
+        分类模式下额外含 best_val_auc/best_val_f1；
+        path_class 模式下额外含 num_classes=4/best_val_tp_auc/best_val_sl_auc/
+        best_val_macro_f1/class_distribution（四类样本数字典）。
 
     Raises:
         ValueError: 样本数不足（< 50）、训练集或验证集为空时抛出。
@@ -330,6 +441,7 @@ def train_cnn_model(
         objective=objective,
     )
     is_regression = objective == "regression"
+    is_path_class = objective == "path_class"
     n = len(X)
 
     if n < 50:
@@ -343,24 +455,33 @@ def train_cnn_model(
     X, normalization = _normalize_grouped_tensor(X[:n_train], X, group_mask)
     X_train, y_train = X[:n_train], y[:n_train]
     X_val, y_val = X[n_train:], y[n_train:]
-    # 上涨样本占比（分类: y∈{0,1}; 回归: y>0），用于方向基线，戳破「接近随机却看起来还行」
-    train_pos_ratio = float(np.mean(y_train > 0)) if len(y_train) else 0.0
-    val_pos_ratio = float(np.mean(y_val > 0)) if len(y_val) else 0.0
+    # 上涨/TP 样本占比，用于方向基线，戳破「接近随机却看起来还行」的假象。
+    # - 分类: y∈{0,1}；y>0 即为上涨正样本。
+    # - 回归: y 为连续收益；y>0 为方向向上。
+    # - path_class: y∈{0,1,2,3}；用 TP_FIRST 类（y==0）占比作为代表性正样本比率，
+    #   语义：模型多大概率可预测到「止盈先触发」路径。y>0 在此无正确语义（会把 sl/time 混入）。
+    if is_path_class:
+        train_pos_ratio = float(np.mean(y_train == PATH_TP_FIRST)) if len(y_train) else 0.0
+        val_pos_ratio = float(np.mean(y_val == PATH_TP_FIRST)) if len(y_val) else 0.0
+    else:
+        train_pos_ratio = float(np.mean(y_train > 0)) if len(y_train) else 0.0
+        val_pos_ratio = float(np.mean(y_val > 0)) if len(y_val) else 0.0
 
     # #1 幅度加权：让 +5% 比 +0.01% 在损失里权重更大；none 时权重恒为 1（等价旧 BCE）。
     # 回归目标本身即幅度，无需再加权，权重恒为 1。
+    # path_class 使用 CrossEntropyLoss，类别 index 无幅度语义，强制回退 none。
     weight_cap = 10.0  # 防止单根涨跌停样本独占梯度
     sample_returns = np.asarray(info.get("sample_returns", []), dtype=np.float32)
-    if not is_regression and loss_weighting == "magnitude" and len(sample_returns) == n:
+    if not is_regression and not is_path_class and loss_weighting == "magnitude" and len(sample_returns) == n:
         abs_returns = np.abs(sample_returns)
         train_scale = float(abs_returns[:n_train].mean())
         scale = train_scale if train_scale > 1e-12 else 1.0
         sample_weights = np.clip(abs_returns / scale, 0.0, weight_cap).astype(np.float32)
     else:
-        if loss_weighting == "magnitude" and not is_regression:
+        if loss_weighting == "magnitude" and not is_regression and not is_path_class:
             logger.warning("幅度加权不可用（缺少样本收益），回退为普通 BCE")
             loss_weighting = "none"
-        elif is_regression:
+        elif is_regression or is_path_class:
             loss_weighting = "none"
         sample_weights = np.ones(n, dtype=np.float32)
     w_train = sample_weights[:n_train]
@@ -399,8 +520,13 @@ def train_cnn_model(
     model = create_market_cnn(C, T, S, G, dropout, objective=objective).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    # 分类: BCE（reduction=none 以便幅度加权）；回归: Huber（对涨跌停等离群更稳健）
-    if is_regression:
+    # 三路损失选择：
+    # - path_class: CrossEntropyLoss（pred [B,4] vs target long [B]，reduction=none 保留样本维度）
+    # - regression: HuberLoss（对涨跌停等离群收益更稳健）
+    # - classification: BCELoss（reduction=none 以便幅度加权）
+    if is_path_class:
+        criterion = nn.CrossEntropyLoss(reduction="none")
+    elif is_regression:
         criterion = nn.HuberLoss(reduction="none", delta=0.03)
     else:
         criterion = nn.BCELoss(reduction="none")
@@ -423,22 +549,31 @@ def train_cnn_model(
         train_loss, train_correct, train_total = 0.0, 0, 0
         for xb, yb, mb, wb in train_loader:
             xb = xb.to(device)
-            yb = yb.to(device).unsqueeze(1)
             mb = mb.to(device)
-            wb = wb.to(device).unsqueeze(1)
 
             optimizer.zero_grad()
             pred = model(xb, mb)
-            loss = (criterion(pred, yb) * wb).mean()
+
+            if is_path_class:
+                # CrossEntropyLoss 要求 target 为 long [B]，pred 为 [B, 4]
+                target = yb.to(device).long()  # [B]
+                wb_squeezed = wb.to(device)     # [B]
+                loss = (criterion(pred, target) * wb_squeezed).mean()
+                train_correct += (pred.argmax(dim=1) == target).sum().item()
+            else:
+                yb = yb.to(device).unsqueeze(1)   # [B, 1]
+                wb_squeezed = wb.to(device).unsqueeze(1)  # [B, 1]
+                loss = (criterion(pred, yb) * wb_squeezed).mean()
+                if is_regression:
+                    train_correct += ((pred > 0) == (yb > 0)).sum().item()
+                else:
+                    train_correct += ((pred > 0.5).float() == yb).sum().item()
+
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             train_loss += loss.item() * len(xb)
-            if is_regression:
-                train_correct += ((pred > 0) == (yb > 0)).sum().item()
-            else:
-                train_correct += ((pred > 0.5).float() == yb).sum().item()
             train_total += len(xb)
 
         scheduler.step()
@@ -449,23 +584,34 @@ def train_cnn_model(
         val_loss, val_correct, val_total = 0.0, 0, 0
         val_probs: list[float] = []
         val_labels: list[float] = []
+        val_logits_rows: list[list[float]] = []   # [N, 4]，仅 path_class 使用
+        val_class_labels: list[float] = []        # [N]，仅 path_class 使用
         with torch.no_grad():
             for xb, yb, mb, _wb in val_loader:
                 xb = xb.to(device)
-                yb = yb.to(device).unsqueeze(1)
                 mb = mb.to(device)
 
                 pred = model(xb, mb)
+
                 # 验证损失保持不加权，便于早停/选模与历史口径一致可比
-                loss = criterion(pred, yb).mean()
-                val_loss += loss.item() * len(xb)
-                if is_regression:
-                    val_correct += ((pred > 0) == (yb > 0)).sum().item()
+                if is_path_class:
+                    target = yb.to(device).long()  # [B]
+                    loss = criterion(pred, target).mean()
+                    val_correct += (pred.argmax(dim=1) == target).sum().item()
+                    val_logits_rows.extend(pred.detach().cpu().numpy().tolist())
+                    val_class_labels.extend(yb.numpy().reshape(-1).tolist())
                 else:
-                    val_correct += ((pred > 0.5).float() == yb).sum().item()
+                    yb = yb.to(device).unsqueeze(1)
+                    loss = criterion(pred, yb).mean()
+                    if is_regression:
+                        val_correct += ((pred > 0) == (yb > 0)).sum().item()
+                    else:
+                        val_correct += ((pred > 0.5).float() == yb).sum().item()
+                    val_probs.extend(pred.detach().cpu().numpy().reshape(-1).tolist())
+                    val_labels.extend(yb.detach().cpu().numpy().reshape(-1).tolist())
+
+                val_loss += loss.item() * len(xb)
                 val_total += len(xb)
-                val_probs.extend(pred.detach().cpu().numpy().reshape(-1).tolist())
-                val_labels.extend(yb.detach().cpu().numpy().reshape(-1).tolist())
 
         val_loss /= max(val_total, 1)
         val_acc = val_correct / max(val_total, 1)
@@ -478,7 +624,18 @@ def train_cnn_model(
             "val_acc": round(val_acc, 4),
             "lr": round(current_lr, 8),
         }
-        if is_regression:
+        if is_path_class:
+            pc_metrics = _path_class_metrics(
+                np.asarray(val_class_labels, dtype=np.float32),
+                np.asarray(val_logits_rows, dtype=np.float64),
+            )
+            epoch_row.update({
+                "val_tp_auc": pc_metrics["tp_auc"],
+                "val_sl_auc": pc_metrics["sl_auc"],
+                "val_macro_f1": pc_metrics["macro_f1"],
+                "val_class_report": pc_metrics["class_report"],
+            })
+        elif is_regression:
             reg_metrics = _regression_metrics(val_labels, val_probs, val_pos_ratio)
             epoch_row.update({
                 "val_ic": reg_metrics["ic"],
@@ -501,9 +658,9 @@ def train_cnn_model(
             })
         history.append(epoch_row)
 
-        # 用业务指标（回归: RankIC+超额方向准确率 / 分类: AUC）选最佳 epoch，
-        # 而非单看 val_loss，避免选中"loss 低但方向/排序差"的模型。
-        current_score = _selection_score(epoch_row, is_regression)
+        # 用业务指标（回归: RankIC+超额方向准确率 / 分类: AUC / path_class: tp_auc+sl_auc）
+        # 选最佳 epoch，而非单看 val_loss，避免选中"loss 低但方向/排序差"的模型。
+        current_score = _selection_score(epoch_row, is_regression, objective=objective)
         if current_score > best_score + 0.0001:
             best_score = current_score
             best_val_loss = val_loss
@@ -515,7 +672,15 @@ def train_cnn_model(
 
         if on_progress:
             pct = 62 + 35 * epoch / epochs
-            if is_regression:
+            if is_path_class:
+                tp_text = f"{epoch_row['val_tp_auc']:.3f}" if epoch_row["val_tp_auc"] is not None else "N/A"
+                sl_text = f"{epoch_row['val_sl_auc']:.3f}" if epoch_row["val_sl_auc"] is not None else "N/A"
+                on_progress(
+                    pct,
+                    f"Epoch {epoch}/{epochs} | val_loss={val_loss:.5f} | "
+                    f"tp_auc={tp_text} sl_auc={sl_text} macro_f1={epoch_row['val_macro_f1']:.3f}",
+                )
+            elif is_regression:
                 ic_text = f"{epoch_row['val_ic']:.3f}" if epoch_row["val_ic"] is not None else "N/A"
                 on_progress(
                     pct,
@@ -542,15 +707,41 @@ def train_cnn_model(
     if best_state:
         model.load_state_dict(best_state)
 
+    model_config: dict[str, Any] = {
+        "in_channels": C,
+        "time_steps": T,
+        "max_group_width": S,
+        "group_count": G,
+        "dropout": dropout,
+    }
+    if is_path_class:
+        model_config["num_classes"] = 4
+
+    dataset_info: dict[str, Any] = {
+        "feature_names": info["feature_names"],
+        "feature_channels": info["feature_channels"],
+        "group_count": info["group_count"],
+        "max_group_width": info["max_group_width"],
+        "sample_anchor_dates": info["sample_anchor_dates"],
+        "skipped_for_label": info["skipped_for_label"],
+        "skipped_for_neutral": info.get("skipped_for_neutral", 0),
+        "label_threshold": info.get("label_threshold", 0.0),
+        "train_pos_ratio": round(train_pos_ratio, 4),
+        "val_pos_ratio": round(val_pos_ratio, 4),
+    }
+    if is_path_class and info.get("class_distribution"):
+        dataset_info["class_distribution"] = info["class_distribution"]
+
+    if is_path_class:
+        selection_metric = "tp_auc+sl_auc"
+    elif is_regression:
+        selection_metric = "rank_ic+excess_acc"
+    else:
+        selection_metric = "auc"
+
     save_data = {
         "model_state_dict": model.state_dict(),
-        "model_config": {
-            "in_channels": C,
-            "time_steps": T,
-            "max_group_width": S,
-            "group_count": G,
-            "dropout": dropout,
-        },
+        "model_config": model_config,
         "train_config": {
             "symbols": info["symbols"],
             "target_symbol": info["target_symbol"],
@@ -569,22 +760,11 @@ def train_cnn_model(
             "objective": objective,
         },
         "normalization": normalization,
-        "dataset_info": {
-            "feature_names": info["feature_names"],
-            "feature_channels": info["feature_channels"],
-            "group_count": info["group_count"],
-            "max_group_width": info["max_group_width"],
-            "sample_anchor_dates": info["sample_anchor_dates"],
-            "skipped_for_label": info["skipped_for_label"],
-            "skipped_for_neutral": info.get("skipped_for_neutral", 0),
-            "label_threshold": info.get("label_threshold", 0.0),
-            "train_pos_ratio": round(train_pos_ratio, 4),
-            "val_pos_ratio": round(val_pos_ratio, 4),
-        },
+        "dataset_info": dataset_info,
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
         "best_score": round(best_score, 6),
-        "selection_metric": "rank_ic+excess_acc" if is_regression else "auc",
+        "selection_metric": selection_metric,
     }
 
     model_path, history_path = save_cnn_model(name, save_data, history)
@@ -592,12 +772,27 @@ def train_cnn_model(
     best_metrics: dict[str, Any] = history[best_epoch - 1] if best_epoch > 0 else {}
     best_val_acc = round(best_metrics.get("val_acc", 0.0), 4)
     best_excess_acc = best_metrics.get("val_excess_acc", 0.0)
-    # 跑赢基线 = 方向准确率超过「始终预测多数类」的水平，是模型是否有方向 edge 的底线判据
-    beats_baseline = bool(best_excess_acc is not None and best_excess_acc > 0)
+
+    # 跑赢基线判据：
+    # - path_class: val_tp_auc > 0.5（止盈路径的判别优于随机）
+    # - 其余: 方向准确率超过多数类基线（excess_acc > 0）
+    if is_path_class:
+        best_tp_auc = best_metrics.get("val_tp_auc")
+        beats_baseline = bool(best_tp_auc is not None and best_tp_auc > 0.5)
+    else:
+        beats_baseline = bool(best_excess_acc is not None and best_excess_acc > 0)
 
     if on_progress:
         verdict = "✅ 跑赢基线" if beats_baseline else "⚠️ 未跑赢多数类基线"
-        if is_regression:
+        if is_path_class:
+            tp_auc_val = best_metrics.get("val_tp_auc")
+            tp_text = f"{tp_auc_val:.3f}" if tp_auc_val is not None else "N/A"
+            on_progress(
+                100,
+                f"训练完成 | 最佳 Epoch={best_epoch} | tp_auc={tp_text} | "
+                f"macro_f1={best_metrics.get('val_macro_f1', 0):.3f} | {verdict} | 耗时={elapsed:.0f}s",
+            )
+        elif is_regression:
             ic_val = best_metrics.get("val_ic")
             ic_text = f"{ic_val:.3f}" if ic_val is not None else "N/A"
             on_progress(
@@ -633,7 +828,15 @@ def train_cnn_model(
         "history": history,
         "tensor_shape": [int(C), int(T), int(S), int(G)],
     }
-    if is_regression:
+    if is_path_class:
+        result.update({
+            "num_classes": 4,
+            "best_val_tp_auc": best_metrics.get("val_tp_auc"),
+            "best_val_sl_auc": best_metrics.get("val_sl_auc"),
+            "best_val_macro_f1": best_metrics.get("val_macro_f1"),
+            "class_distribution": info.get("class_distribution"),
+        })
+    elif is_regression:
         result.update({
             "best_val_ic": best_metrics.get("val_ic"),
             "best_val_rank_ic": best_metrics.get("val_rank_ic"),
