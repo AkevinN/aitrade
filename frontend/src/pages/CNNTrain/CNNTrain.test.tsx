@@ -136,6 +136,13 @@ describe('CNNTrain path_class：选中后 label 模式锁定为 OCO', () => {
 
     // 标签模式的 Select 当前值应被设置为 OCO（通过 title 属性查找）
     expect(screen.getByTitle('OCO 止盈止损（路径依赖）')).toBeInTheDocument()
+
+    // 断言「标签模式」Select 的容器已被 disabled：
+    // AntD Select 在禁用时会为 .ant-select 元素添加 .ant-select-disabled 类。
+    // getByTitle 找到的是内部 input，要向上找到 .ant-select 容器再检查类名。
+    const ocoSelectInput = screen.getByTitle('OCO 止盈止损（路径依赖）')
+    const antSelectContainer = ocoSelectInput.closest('.ant-select')
+    expect(antSelectContainer).toHaveClass('ant-select-disabled')
   })
 })
 

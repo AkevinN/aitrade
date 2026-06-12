@@ -123,7 +123,7 @@ const num3 = (value?: number | null) => (value === undefined || value === null ?
  * - `path_class`：tp_auc / sl_auc / macro_f1（四分类专属指标）
  * - 其余（`classification`）：val_acc / AUC / F1
  *
- * 空值（null / undefined）统一渲染为 '—'。
+ * 空值（null / undefined）统一渲染为 '-'。
  *
  * @param history - 后端 history 数组，元素为 {@link CNNHistoryItem}。
  * @param objective - 训练目标，决定列配置分支。
@@ -741,12 +741,17 @@ const CNNTrain: React.FC = () => {
 
   const handleApplyProfilingSuggestion = (values: Record<string, unknown>, unmappedCount: number) => {
     if (Object.keys(values).length > 0) {
-      form.setFieldsValue(values)
-      message.success(
+      // path_class 必须使用 OCO 标签，若建议中携带了其他 label_mode，强制覆盖为 'oco'
+      // 并额外提示用户，避免禁用的 Select 显示非法值。
+      const isPathClass = objective === 'path_class'
+      const overrodeLabel = isPathClass && values.label_mode !== undefined && values.label_mode !== 'oco'
+      const merged = isPathClass ? { ...values, label_mode: 'oco' } : values
+      form.setFieldsValue(merged)
+      const baseMsg =
         unmappedCount > 0
           ? `已填充可映射建议，${unmappedCount} 条需人工处理`
-          : '已填充画像建议，请确认后再训练',
-      )
+          : '已填充画像建议，请确认后再训练'
+      message.success(overrodeLabel ? `${baseMsg}（建议的标签模式已被锁定为 OCO）` : baseMsg)
     } else {
       message.warning('当前建议没有可直接填充的训练字段')
     }
@@ -1330,6 +1335,10 @@ const CNNTrain: React.FC = () => {
                       const classDist = (viewDetail.dataset_info as Record<string, unknown> | undefined)?.class_distribution as
                         | { tp_first?: number; sl_first?: number; time_up?: number; time_down?: number }
                         | undefined
+                      // path_class 的"跑赢"判据：TP AUC > 0.5（先触止盈识别力超随机）。
+                      // 后端 epoch_row 不写 val_excess_acc，不能复用通用 beats/excess 变量。
+                      const tpAuc = best.val_tp_auc
+                      const tpBeats = tpAuc !== undefined && tpAuc !== null && tpAuc > 0.5
                       return (
                         <Card size="small" title="模型评估（最佳 Epoch · 路径形态分类）" style={{ marginBottom: 16 }}>
                           <Descriptions size="small" bordered column={2}>
@@ -1337,15 +1346,12 @@ const CNNTrain: React.FC = () => {
                             <Descriptions.Item label="SL AUC（先触止损）">{num3(best.val_sl_auc)}</Descriptions.Item>
                             <Descriptions.Item label="Macro F1">{num3(best.val_macro_f1)}</Descriptions.Item>
                             <Descriptions.Item label="验证损失">{best.val_loss?.toFixed(4) ?? '-'}</Descriptions.Item>
-                            <Descriptions.Item label="超额准确率">
-                              <Space size={6}>
-                                <span style={{ color: beats ? '#49aa19' : '#dc4446' }}>
-                                  {hasExcess ? `${excess > 0 ? '+' : ''}${(excess * 100).toFixed(1)}%` : '-'}
-                                </span>
-                                <Tag color={beats ? 'green' : 'red'}>{beats ? '跑赢基线' : '未跑赢基线'}</Tag>
-                              </Space>
+                            <Descriptions.Item label="TP 识别力">
+                              <Tag color={tpBeats ? 'green' : 'red'}>
+                                {tpBeats ? 'TP 识别力超随机' : 'TP 识别力未超随机'}
+                              </Tag>
                             </Descriptions.Item>
-                            <Descriptions.Item label="正样本比例(验证)">{pct(valPosRatio)}</Descriptions.Item>
+                            <Descriptions.Item label="先触止盈占比(验证)">{pct(valPosRatio)}</Descriptions.Item>
                           </Descriptions>
                           {classDist ? (
                             <Descriptions
