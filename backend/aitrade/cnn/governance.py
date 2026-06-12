@@ -748,7 +748,8 @@ def _gate_result(
     Args:
         folds: WF 各折结果列表，每项含 candidate_score/score_delta 等键。
         gate: 晋级门禁配置（CNNPromotionGate）。
-        objective: 训练目标，"classification" 或 "regression"。
+        objective: 训练目标，"classification" | "regression" | "path_class"；
+            门禁判定本身不区分目标（目标间的评分差异已在 _core_score 中体现）。
         has_production: 当前是否存在生产模型；False 时跳过对比类门禁。
 
     Returns:
