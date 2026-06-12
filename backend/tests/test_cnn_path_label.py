@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
 import pytest
 from hypothesis import given, settings
@@ -152,38 +154,53 @@ class TestPathClassExamples:
 def ohlc_path_strategy(draw):
     """生成合法 OHLC 序列及 OCO 参数（供 Property 1 使用）。
 
+    价格用围绕入场价的小步随机游走生成，使 tp/sl/time/skip 四种分支均有可观概率出现：
+    - scale ∈ [0.001, 0.2] 控制步幅：小值→安静走到期（time），大值→快速触发障碍（tp/sl）。
+    - 序列长度在 [max_hold+1, max_hold+5] 随机，使 skip 分支（fallback 越界）真实可达。
+
     Returns:
         (opens, highs, lows, spec, threshold, neutral_policy)：
-        - opens/highs/lows 是 float64 numpy 数组，长度 >= max_hold+3。
-        - spec 是规整后的 OCO label_spec 字典。
+        - opens/highs/lows 是 float64 numpy 数组，长度在 [max_hold+1, max_hold+5]。
+        - spec 是规整后的 OCO label_spec 字典，mode="oco"。
         - threshold ∈ [0, 0.01]。
         - neutral_policy ∈ {"drop", "negative"}。
     """
-    take_profit = draw(st.floats(min_value=0.005, max_value=0.2))
-    stop_loss = draw(st.floats(min_value=0.005, max_value=0.2))
+    take_profit = draw(st.floats(min_value=0.02, max_value=0.2))
+    stop_loss = draw(st.floats(min_value=0.02, max_value=0.2))
     max_hold = draw(st.integers(min_value=1, max_value=10))
     threshold = draw(st.floats(min_value=0.0, max_value=0.01))
     neutral_policy = draw(st.sampled_from(["drop", "negative"]))
 
-    n = max_hold + 3  # 保证 fallback_index = 1 + max_hold + 1 = max_hold+2 < n
+    # 长度在 [max_hold+1, max_hold+5]：
+    #   - max_hold+1 对应 fallback_index = 1+max_hold+1 = max_hold+2 > max_hold+1 → skip
+    #   - max_hold+5 保证 fallback 可访问，路径有机会走完
+    n = draw(st.integers(min_value=max_hold + 1, max_value=max_hold + 5))
 
     base = draw(st.floats(min_value=10.0, max_value=1000.0))
-    opens_vals = []
-    highs_vals = []
-    lows_vals = []
+    # 步幅尺度：上限 0.2 使 time 出场占 ~20%、skip 占 ~40%，四分类均可观
+    scale = draw(st.floats(min_value=0.001, max_value=0.2))
+
+    opens_vals: list[float] = []
+    highs_vals: list[float] = []
+    lows_vals: list[float] = []
+
+    close_prev = base
     for _ in range(n):
-        o = draw(st.floats(min_value=base * 0.5, max_value=base * 1.5))
-        c = draw(st.floats(min_value=base * 0.5, max_value=base * 1.5))
-        hi = draw(st.floats(min_value=max(o, c), max_value=max(o, c) * 1.1 + 0.01))
-        lo = draw(st.floats(min_value=min(o, c) * 0.9, max_value=min(o, c)))
-        # 保证正数
-        o = max(o, 0.01)
-        c = max(c, 0.01)
-        hi = max(hi, max(o, c))
-        lo = max(min(lo, min(o, c)), 0.01)
+        # 开盘价：上一根收盘价附近小幅跳空
+        gap = draw(st.floats(min_value=-scale * 0.5, max_value=scale * 0.5))
+        o = close_prev * (1.0 + gap)
+        # 收盘价：开盘价随机游走一小步
+        step = draw(st.floats(min_value=-scale, max_value=scale))
+        c = o * (1.0 + step)
+        # 当根震幅：再向两侧各延伸 0~50% 的步幅
+        wick = draw(st.floats(min_value=0.0, max_value=abs(scale) * 0.5))
+        hi = max(o, c) * (1.0 + wick)
+        lo = min(o, c) / (1.0 + wick)
+        # 采样下界已保证正数（base >= 10，scale <= 0.8），无需额外钳制
         opens_vals.append(o)
         highs_vals.append(hi)
         lows_vals.append(lo)
+        close_prev = c
 
     spec = {
         "mode": "oco",
@@ -218,9 +235,6 @@ def test_property1_path_class_consistent_with_simulate_oco_exit(params) -> None:
     # 直接调用 simulate_oco_exit 得到"真值"
     entry_index = 1
     entry_price = float(opens[entry_index])
-    if entry_price <= 0:
-        assert status == "skip"
-        return
 
     result = simulate_oco_exit(
         entry_index,
@@ -235,7 +249,7 @@ def test_property1_path_class_consistent_with_simulate_oco_exit(params) -> None:
     )
 
     if result is None:
-        # 越界 → _oco_label_value 也应 skip
+        # 越界（n 较小时真实可达）→ _oco_label_value 也应 skip
         assert status == "skip"
         return
 
@@ -245,9 +259,11 @@ def test_property1_path_class_consistent_with_simulate_oco_exit(params) -> None:
     if sim_reason == "tp":
         assert status == "ok"
         assert label == PATH_TP_FIRST
+        assert ret == pytest.approx(sim_ret, abs=1e-9)
     elif sim_reason == "sl":
         assert status == "ok"
         assert label == PATH_SL_FIRST
+        assert ret == pytest.approx(sim_ret, abs=1e-9)
     else:
         # reason == "time"
         assert ret == pytest.approx(sim_ret, abs=1e-9)
@@ -286,8 +302,8 @@ def test_property6_path_class_requires_oco_mode(mode: str) -> None:
     with pytest.raises(ValueError, match="path_class"):
         build_dataset(
             vt_symbols=["FAKE.SSE"],
-            start=__import__("datetime").date(2024, 1, 1),
-            end=__import__("datetime").date(2024, 3, 31),
+            start=date(2024, 1, 1),
+            end=date(2024, 3, 31),
             lookback=10,
             label_spec=label_spec,
             objective="path_class",

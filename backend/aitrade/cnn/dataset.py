@@ -651,7 +651,7 @@ def build_dataset(
         }
 
     if on_progress:
-        neutral_note = f", 去噪丢弃={skipped_neutral}" if threshold > 0 else ""
+        neutral_note = f", 去噪丢弃={skipped_neutral}" if skipped_neutral > 0 else ""
         if objective == "regression":
             label_stat = f"收益均值={y.mean():.3%}, 标准差={y.std():.3%}"
         elif objective == "path_class" and class_distribution is not None:
