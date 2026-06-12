@@ -135,57 +135,11 @@ def _make_checkpoint(
         "normalization": {
             "channel_mean": [0.0] * FEATURE_CHANNELS,
             "channel_std": [1.0] * FEATURE_CHANNELS,
-            "group_mask": [[[[[1.0]] for _ in range(GROUP_COUNT)]
-                            for _ in range(MAX_GROUP_WIDTH)]
-                           for _ in range(1)],
         },
     }
     name = f"test_{objective}"
     torch.save(save_data, str(tmp_path / f"{name}.pt"))
     return name
-
-
-def _predict(tmp_path, model_name: str, frame: pl.DataFrame | None = None):
-    """辅助推理：patch CNN_MODEL_DIR 和 _load_market_frame 后调用 predict_cnn_signals。
-
-    Args:
-        tmp_path: pytest tmp_path fixture（已含 .pt 文件）。
-        model_name: 模型名称（不含 .pt 后缀）。
-        frame: 若非 None，使用该行情帧；否则生成默认合成帧。
-
-    Returns:
-        predict_cnn_signals 返回的 polars DataFrame。
-    """
-    from aitrade.cnn.predictor import predict_cnn_signals
-
-    if frame is None:
-        frame = _make_trading_frame()
-
-    # 取第 30 行日期作为 start，确保 anchor >= lookback-1 后有有效时间点
-    start_dt = frame["datetime"][30].date()
-    end_dt = frame["datetime"][-1].date()
-
-    return predict_cnn_signals(
-        model_name=model_name,
-        start=start_dt,
-        end=end_dt,
-    )
-
-
-@pytest.fixture(autouse=False)
-def patch_storage_and_loader(monkeypatch, tmp_path):
-    """patch CNN_MODEL_DIR → tmp_path，_load_market_frame → 合成行情。
-
-    作为 fixture 注入，所有使用此 fixture 的测试均可直接调用 predict_cnn_signals。
-    """
-    frame = _make_trading_frame()
-
-    def fake_loader(vt_symbol, _start, _end, *, input_data_kind, input_interval):
-        return frame
-
-    monkeypatch.setattr(cnn_storage, "CNN_MODEL_DIR", tmp_path)
-    monkeypatch.setattr(cnn_model, "_load_market_frame", fake_loader)
-    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +267,8 @@ class TestNumClassesValidation:
 
     def test_absent_num_classes_no_error(self, monkeypatch, tmp_path) -> None:
         """path_class checkpoint 缺少 num_classes 键（旧格式）→ 不报错，向后兼容。"""
-        import torch
         pytest.importorskip("torch")
+        import torch
         frame = _make_trading_frame()
 
         def fake_loader(vt_symbol, _s, _e, *, input_data_kind, input_interval):
@@ -367,8 +321,8 @@ class TestNumClassesValidation:
 # Feature: cnn-path-multiclass-head, Property 3:
 # 对任意 path_class 推理输出的 Signal_Frame，逐行 signal == prob_tp 严格相等。
 
-# 注：max_examples=25 而非 100——模型推理（含权重随机化+前向传播）每例约 200ms；
-# 25 例覆盖足够的随机权重空间，整文件目标 <60s。
+# 注：max_examples=25 而非 100——模型推理（含权重随机化+前向传播）耗时不稳定
+# （torch 首例有预热开销），25 例覆盖足够的随机权重空间，整文件目标 <60s。
 @pytest.mark.skipif(
     importlib.util.find_spec("torch") is None,
     reason="需要 torch",
@@ -376,7 +330,7 @@ class TestNumClassesValidation:
 @given(seed=st.integers(min_value=0, max_value=9999))
 @settings(
     max_examples=25,
-    # deadline=None：模型推理（权重随机化+前向传播）约 400ms，超出 Hypothesis 默认 200ms 限制。
+    # deadline=None：torch 首例预热导致耗时超出 Hypothesis 默认 200ms 限制，禁用 deadline。
     deadline=None,
     # monkeypatch/tmp_path 是函数级 fixture，patch 在测试函数层面只设置一次：
     # CNN_MODEL_DIR → tmp_path（每例写入不同的 .pt 文件名，不会冲突）；
@@ -630,24 +584,9 @@ def test_property7_train_save_load_predict_roundtrip(tmp_path, monkeypatch) -> N
     # patch build_dataset（不走真实行情 IO）
     monkeypatch.setattr(trainer_mod, "build_dataset", lambda **_kw: (X, y, group_mask, info))
 
-    # patch CNN_MODEL_DIR → tmp_path（trainer 内 save_cnn_model 使用 storage.CNN_MODEL_DIR）
+    # patch CNN_MODEL_DIR → tmp_path；trainer 内 save_cnn_model 读 storage 模块全局
+    # CNN_MODEL_DIR，因此仅替换此变量即可让真实 save_cnn_model 落盘到 tmp_path。
     monkeypatch.setattr(cnn_storage, "CNN_MODEL_DIR", tmp_path)
-
-    # patch storage 模块内的 save_cnn_model：让它真实落盘到 tmp_path
-    import torch as _torch
-
-    _original_save = trainer_mod.save_cnn_model
-
-    def _patched_save(name: str, data: dict, hist: list):
-        pt_path = tmp_path / f"{name}.pt"
-        _torch.save(data, str(pt_path))
-        import json
-        hist_path = tmp_path / f"{name}_history.json"
-        with open(hist_path, "w") as f:
-            json.dump(hist, f)
-        return pt_path, hist_path
-
-    monkeypatch.setattr(trainer_mod, "save_cnn_model", _patched_save)
 
     from aitrade.cnn.trainer import train_cnn_model
 

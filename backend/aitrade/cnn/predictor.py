@@ -69,7 +69,7 @@ def predict_cnn_signals(
         - **path_class**（七列）：
           ``[datetime, vt_symbol, signal, prob_tp, prob_sl, prob_time_up, prob_time_down]``；
           signal 恒等于 prob_tp（止盈先触发的概率）；
-          四列概率由 softmax 计算，行内和严格为 1。
+          四列概率由 softmax 计算，行内和在数值误差内为 1。
 
         所有 objective 下 datetime 均去除时区信息，与回测引擎的 bar datetime 对齐。
 
