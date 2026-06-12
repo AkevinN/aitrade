@@ -109,13 +109,28 @@ const LOSS_WEIGHTING_OPTIONS = [
 const OBJECTIVE_OPTIONS = [
   { label: '方向分类（输出上涨概率）', value: 'classification' },
   { label: '收益回归（直接预测涨跌幅）', value: 'regression' },
+  { label: '路径形态分类（四类剧本概率）', value: 'path_class' },
 ]
 
 const pct = (value?: number) => (value === undefined || value === null ? '-' : `${(value * 100).toFixed(1)}%`)
 const num3 = (value?: number | null) => (value === undefined || value === null ? '-' : value.toFixed(3))
 
+/**
+ * 训练历史 Epoch 明细表。
+ *
+ * 根据 `objective` 自动切换列配置：
+ * - `regression`：IC / RankIC / MAE / 方向准确率
+ * - `path_class`：tp_auc / sl_auc / macro_f1（四分类专属指标）
+ * - 其余（`classification`）：val_acc / AUC / F1
+ *
+ * 空值（null / undefined）统一渲染为 '—'。
+ *
+ * @param history - 后端 history 数组，元素为 {@link CNNHistoryItem}。
+ * @param objective - 训练目标，决定列配置分支。
+ */
 const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = ({ history, objective }) => {
   const isReg = objective === 'regression'
+  const isPathClass = objective === 'path_class'
   const columns = isReg
     ? [
         { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
@@ -126,27 +141,36 @@ const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = (
         { title: '方向准确率', dataIndex: 'val_dir_acc', width: 100, render: (v?: number) => pct(v) },
         { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (v?: number) => pct(v) },
       ]
-    : [
-        { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
-        { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
-        { title: 'Val Acc', dataIndex: 'val_acc', width: 90, render: (value: number) => pct(value) },
-        { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (value?: number) => pct(value) },
-        {
-          title: '超额',
-          dataIndex: 'val_excess_acc',
-          width: 90,
-          render: (value?: number) =>
-            value === undefined || value === null ? (
-              '-'
-            ) : (
-              <span style={{ color: value > 0 ? '#49aa19' : '#dc4446' }}>
-                {value > 0 ? '+' : ''}{(value * 100).toFixed(1)}%
-              </span>
-            ),
-        },
-        { title: 'AUC', dataIndex: 'val_auc', width: 80, render: num3 },
-        { title: 'F1', dataIndex: 'val_f1', width: 80, render: (value?: number) => (value === undefined ? '-' : value.toFixed(3)) },
-      ]
+    : isPathClass
+      ? [
+          { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+          { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+          { title: 'TP AUC', dataIndex: 'val_tp_auc', width: 90, render: num3 },
+          { title: 'SL AUC', dataIndex: 'val_sl_auc', width: 90, render: num3 },
+          { title: 'Macro F1', dataIndex: 'val_macro_f1', width: 100, render: num3 },
+          { title: 'LR', dataIndex: 'lr', width: 80, render: (v?: number) => (v === undefined || v === null ? '—' : v.toExponential(2)) },
+        ]
+      : [
+          { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+          { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+          { title: 'Val Acc', dataIndex: 'val_acc', width: 90, render: (value: number) => pct(value) },
+          { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (value?: number) => pct(value) },
+          {
+            title: '超额',
+            dataIndex: 'val_excess_acc',
+            width: 90,
+            render: (value?: number) =>
+              value === undefined || value === null ? (
+                '-'
+              ) : (
+                <span style={{ color: value > 0 ? '#49aa19' : '#dc4446' }}>
+                  {value > 0 ? '+' : ''}{(value * 100).toFixed(1)}%
+                </span>
+              ),
+          },
+          { title: 'AUC', dataIndex: 'val_auc', width: 80, render: num3 },
+          { title: 'F1', dataIndex: 'val_f1', width: 80, render: (value?: number) => (value === undefined ? '-' : value.toFixed(3)) },
+        ]
   return (
     <Table
       size="small"
@@ -539,6 +563,14 @@ const CNNTrain: React.FC = () => {
     }
   }, [focusModelName])
 
+  // path_class 目标依赖 OCO 三重障碍标签；选中时自动锁定 label_mode 为 'oco'。
+  // 解除 path_class 时不强制重置，让用户自行选择。
+  useEffect(() => {
+    if (objective === 'path_class') {
+      form.setFieldsValue({ label_mode: 'oco' })
+    }
+  }, [objective, form])
+
   // 当查看的模型变化时，拉取真实网络结构
   useEffect(() => {
     const name = viewDetail?.name
@@ -666,7 +698,7 @@ const CNNTrain: React.FC = () => {
             values.label_mode === 'oco' ? Math.max(0, (values.oco_stop_loss_pct || 0) / 100) : undefined,
           max_hold: values.label_mode === 'oco' ? values.oco_max_hold : undefined,
         },
-        loss_weighting: values.objective === 'regression' ? 'none' : values.loss_weighting,
+        loss_weighting: (values.objective === 'regression' || values.objective === 'path_class') ? 'none' : values.loss_weighting,
         epochs: values.epochs,
         batch_size: values.batch_size,
         learning_rate: values.learning_rate,
@@ -986,7 +1018,7 @@ const CNNTrain: React.FC = () => {
                   <Form.Item
                     label="预测目标"
                     name="objective"
-                    tooltip="方向分类：输出上涨概率；收益回归：直接预测涨跌幅，分数与幅度单调对应，可按预测收益排序/定仓。"
+                    tooltip="方向分类：输出上涨概率；收益回归：直接预测涨跌幅，分数与幅度单调对应，可按预测收益排序/定仓；路径形态分类：输出四类剧本概率（先触止盈/先触止损/到期小涨/到期小跌），需搭配 OCO 标签。"
                   >
                     <Select options={OBJECTIVE_OPTIONS} />
                   </Form.Item>
@@ -998,8 +1030,21 @@ const CNNTrain: React.FC = () => {
                       message="回归模式：标签为连续未来收益，损失用 Huber，评估看 IC/方向准确率；阈值仅用于剔除过小噪声，损失加权与噪声并类不适用。"
                     />
                   ) : null}
-                  <Form.Item label="标签模式" name="label_mode" rules={[{ required: true, message: '请选择标签模式' }]}>
-                    <Select options={LABEL_MODE_OPTIONS} />
+                  {objective === 'path_class' ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="路径形态分类：标签模式已锁定为 OCO 三重障碍，输出四类剧本概率（先触止盈/先触止损/到期小涨/到期小跌）；损失加权不适用；回测可启用 veto_threshold 过滤高止损概率信号。"
+                    />
+                  ) : null}
+                  <Form.Item
+                    label="标签模式"
+                    name="label_mode"
+                    rules={[{ required: true, message: '请选择标签模式' }]}
+                    extra={objective === 'path_class' ? '路径形态分类依赖 OCO 三重障碍标签，已自动锁定。' : undefined}
+                  >
+                    <Select options={LABEL_MODE_OPTIONS} disabled={objective === 'path_class'} />
                   </Form.Item>
                   {labelMode === 'horizon_bars' ? (
                     <Form.Item
@@ -1158,7 +1203,7 @@ const CNNTrain: React.FC = () => {
                         name="loss_weighting"
                         tooltip="magnitude 按 |未来收益| 加权，让大波动样本主导梯度，避免对 +0.01% 和 +5% 一视同仁。回归模式下不适用。"
                       >
-                        <Select options={LOSS_WEIGHTING_OPTIONS} disabled={objective === 'regression'} />
+                        <Select options={LOSS_WEIGHTING_OPTIONS} disabled={objective === 'regression' || objective === 'path_class'} />
                       </Form.Item>
                     </Col>
                   </Row>
@@ -1229,7 +1274,12 @@ const CNNTrain: React.FC = () => {
                     <Descriptions.Item label="目标证券">{String(viewDetail.train_config.target_symbol || '-')}</Descriptions.Item>
                     <Descriptions.Item label="输入">{String(viewDetail.train_config.input_data_kind || 'bar')} / {String(viewDetail.train_config.input_interval || 'd')}</Descriptions.Item>
                     <Descriptions.Item label="预测目标">
-                      {String(viewDetail.train_config.objective || 'classification') === 'regression' ? '收益回归' : '方向分类'}
+                      {(() => {
+                        const obj = String(viewDetail.train_config.objective || 'classification')
+                        if (obj === 'regression') return '收益回归'
+                        if (obj === 'path_class') return '路径形态分类（四类）'
+                        return '方向分类'
+                      })()}
                     </Descriptions.Item>
                     <Descriptions.Item label="标签">{String((viewDetail.train_config.label_spec as { mode?: string } | undefined)?.mode || '-')}</Descriptions.Item>
                     <Descriptions.Item label="最佳验证损失">{viewDetail.best_val_loss?.toFixed(4) || '-'}</Descriptions.Item>
@@ -1272,6 +1322,45 @@ const CNNTrain: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="多数类基线">{pct(best.val_baseline_acc)}</Descriptions.Item>
                           </Descriptions>
+                        </Card>
+                      )
+                    }
+                    if (detailObjective === 'path_class') {
+                      // class_distribution 来自训练 result，通过 dataset_info 携带
+                      const classDist = (viewDetail.dataset_info as Record<string, unknown> | undefined)?.class_distribution as
+                        | { tp_first?: number; sl_first?: number; time_up?: number; time_down?: number }
+                        | undefined
+                      return (
+                        <Card size="small" title="模型评估（最佳 Epoch · 路径形态分类）" style={{ marginBottom: 16 }}>
+                          <Descriptions size="small" bordered column={2}>
+                            <Descriptions.Item label="TP AUC（先触止盈）">{num3(best.val_tp_auc)}</Descriptions.Item>
+                            <Descriptions.Item label="SL AUC（先触止损）">{num3(best.val_sl_auc)}</Descriptions.Item>
+                            <Descriptions.Item label="Macro F1">{num3(best.val_macro_f1)}</Descriptions.Item>
+                            <Descriptions.Item label="验证损失">{best.val_loss?.toFixed(4) ?? '-'}</Descriptions.Item>
+                            <Descriptions.Item label="超额准确率">
+                              <Space size={6}>
+                                <span style={{ color: beats ? '#49aa19' : '#dc4446' }}>
+                                  {hasExcess ? `${excess > 0 ? '+' : ''}${(excess * 100).toFixed(1)}%` : '-'}
+                                </span>
+                                <Tag color={beats ? 'green' : 'red'}>{beats ? '跑赢基线' : '未跑赢基线'}</Tag>
+                              </Space>
+                            </Descriptions.Item>
+                            <Descriptions.Item label="正样本比例(验证)">{pct(valPosRatio)}</Descriptions.Item>
+                          </Descriptions>
+                          {classDist ? (
+                            <Descriptions
+                              size="small"
+                              bordered
+                              column={2}
+                              style={{ marginTop: 12 }}
+                              title="样本类别分布（训练集）"
+                            >
+                              <Descriptions.Item label="先触止盈">{classDist.tp_first ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="先触止损">{classDist.sl_first ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="到期小涨">{classDist.time_up ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="到期小跌">{classDist.time_down ?? '-'}</Descriptions.Item>
+                            </Descriptions>
+                          ) : null}
                         </Card>
                       )
                     }
