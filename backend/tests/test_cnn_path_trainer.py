@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -202,37 +203,37 @@ class TestSelectionScorePathClass:
     def test_both_aucs_present(self, _score) -> None:
         """tp_auc=0.6, sl_auc=0.7 → score=1.3。"""
         row = {"val_tp_auc": 0.6, "val_sl_auc": 0.7}
-        s = _score(row, is_regression=False, objective="path_class")
+        s = _score(row, objective="path_class")
         assert s == pytest.approx(1.3, abs=1e-6)
 
     def test_tp_auc_none_falls_back(self, _score) -> None:
         """tp_auc=None → 按 0.5 计，sl_auc=0.8 → score=1.3。"""
         row = {"val_tp_auc": None, "val_sl_auc": 0.8}
-        s = _score(row, is_regression=False, objective="path_class")
+        s = _score(row, objective="path_class")
         assert s == pytest.approx(1.3, abs=1e-6)
 
     def test_sl_auc_none_falls_back(self, _score) -> None:
         """sl_auc=None → 按 0.5 计，tp_auc=0.9 → score=1.4。"""
         row = {"val_tp_auc": 0.9, "val_sl_auc": None}
-        s = _score(row, is_regression=False, objective="path_class")
+        s = _score(row, objective="path_class")
         assert s == pytest.approx(1.4, abs=1e-6)
 
     def test_both_none_gives_one(self, _score) -> None:
         """两者都 None → score=1.0（0.5+0.5）。"""
         row = {"val_tp_auc": None, "val_sl_auc": None}
-        s = _score(row, is_regression=False, objective="path_class")
+        s = _score(row, objective="path_class")
         assert s == pytest.approx(1.0, abs=1e-6)
 
     def test_classification_still_works(self, _score) -> None:
         """classification 分支：使用 val_auc，不受 path_class 改动影响。"""
         row = {"val_auc": 0.72}
-        s = _score(row, is_regression=False, objective="classification")
+        s = _score(row, objective="classification")
         assert s == pytest.approx(0.72, abs=1e-6)
 
     def test_regression_still_works(self, _score) -> None:
         """regression 分支仍正常工作。"""
         row = {"val_rank_ic": 0.3, "val_excess_acc": 0.1}
-        s = _score(row, is_regression=True, objective="regression")
+        s = _score(row, objective="regression")
         assert s == pytest.approx(0.4, abs=1e-6)
 
 
@@ -272,13 +273,16 @@ def path_class_model_inputs(draw):
     return model, x, mask
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None,
+    reason="需要 torch",
+)
 @given(path_class_model_inputs())
 @settings(max_examples=100)
 def test_property2_softmax_simplex(args) -> None:
     """Property 2：path_class 输出 softmax 后满足概率单纯形约束。"""
     import torch
 
-    pytest.importorskip("torch")
     model, x, mask = args
     with torch.no_grad():
         logits = model(x, mask)  # [B, 4]
@@ -377,7 +381,6 @@ class TestSmokeTrainPathClass:
         """path_class 训练 2 epoch 跑通，result 与 history 含专属键。"""
         pytest.importorskip("torch")
         import aitrade.cnn.trainer as trainer_mod
-        from aitrade.cnn.storage import CNN_MODEL_DIR
 
         # 合成数据集（不走真实行情 IO）
         X, y, group_mask, info = _make_synthetic_dataset()
@@ -457,17 +460,25 @@ class TestSmokeTrainPathClass:
         assert result["beats_baseline"] == expected_beats
 
     def test_smoke_train_loss_weighting_forced_none(self, tmp_path, monkeypatch) -> None:
-        """path_class 模式下 loss_weighting='magnitude' 应被强制回退为 'none'，不崩溃。"""
+        """path_class 模式下 loss_weighting='magnitude' 应被强制回退为 'none'。
+
+        验证 save_cnn_model 收到的 train_config["loss_weighting"] 确实为 "none"，
+        而不仅仅是"不崩溃"。
+        """
         pytest.importorskip("torch")
         import aitrade.cnn.trainer as trainer_mod
 
         X, y, group_mask, info = _make_synthetic_dataset()
 
+        # 捕获 save_cnn_model 的入参，用于断言
+        captured: dict[str, Any] = {}
+
+        def _fake_save(name: str, data: dict, hist: list) -> tuple:
+            captured["save_data"] = data
+            return (tmp_path / f"{name}.pt", tmp_path / f"{name}.json")
+
         monkeypatch.setattr(trainer_mod, "build_dataset", lambda **_kw: (X, y, group_mask, info))
-        monkeypatch.setattr(trainer_mod, "save_cnn_model", lambda name, data, hist: (
-            tmp_path / f"{name}.pt",
-            tmp_path / f"{name}.json",
-        ))
+        monkeypatch.setattr(trainer_mod, "save_cnn_model", _fake_save)
 
         from aitrade.cnn.trainer import train_cnn_model
 
@@ -481,7 +492,7 @@ class TestSmokeTrainPathClass:
             lookback=10,
             dropout=0.0,
             objective="path_class",
-            loss_weighting="magnitude",  # 应被强制回退
+            loss_weighting="magnitude",  # 应被强制回退为 "none"
             label_spec={
                 "mode": "oco",
                 "take_profit": 0.05,
@@ -489,5 +500,10 @@ class TestSmokeTrainPathClass:
                 "max_hold": 10,
             },
         )
-        # 跑通即可，不崩溃
         assert "best_epoch" in result
+        # 核心断言：强制回退后 train_config 中 loss_weighting 应为 "none"
+        assert "save_data" in captured, "save_cnn_model 未被调用"
+        assert captured["save_data"]["train_config"]["loss_weighting"] == "none", (
+            f"loss_weighting 未被强制为 none，实得: "
+            f"{captured['save_data']['train_config'].get('loss_weighting')}"
+        )

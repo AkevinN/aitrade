@@ -40,6 +40,10 @@ PATH_SL_FIRST: float = 1.0
 PATH_TIME_UP: float = 2.0
 PATH_TIME_DOWN: float = 3.0
 
+# 类别名称元组——顺序与上方 PATH_TP_FIRST..PATH_TIME_DOWN 的 0~3 编码一一对应。
+# 供 trainer 侧构建指标字典时共享，消除硬编码。
+PATH_CLASS_NAMES: tuple[str, ...] = ("tp_first", "sl_first", "time_up", "time_down")
+
 
 def _normalize_label_spec(label_spec: dict[str, Any] | None) -> dict[str, Any]:
     """规整 label 配置字典，补全缺省值并统一 enum 为字符串值。
@@ -643,11 +647,11 @@ def build_dataset(
     # path_class 统计四类样本数，写入 info 供监控与展示
     class_distribution: dict[str, int] | None = None
     if objective == "path_class":
+        # PATH_CLASS_NAMES 顺序与 PATH_TP_FIRST..PATH_TIME_DOWN 的 0~3 编码一一对应
+        _labels = (PATH_TP_FIRST, PATH_SL_FIRST, PATH_TIME_UP, PATH_TIME_DOWN)
         class_distribution = {
-            "tp_first": int(np.sum(y == PATH_TP_FIRST)),
-            "sl_first": int(np.sum(y == PATH_SL_FIRST)),
-            "time_up": int(np.sum(y == PATH_TIME_UP)),
-            "time_down": int(np.sum(y == PATH_TIME_DOWN)),
+            name: int(np.sum(y == lbl))
+            for name, lbl in zip(PATH_CLASS_NAMES, _labels, strict=True)
         }
 
     if on_progress:

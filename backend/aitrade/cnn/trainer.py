@@ -11,7 +11,13 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from .dataset import PATH_TP_FIRST, PATH_SL_FIRST, PATH_TIME_UP, PATH_TIME_DOWN
+from .dataset import (
+    PATH_CLASS_NAMES,
+    PATH_SL_FIRST,
+    PATH_TIME_DOWN,
+    PATH_TIME_UP,
+    PATH_TP_FIRST,
+)
 from .model import build_dataset, create_market_cnn, normalize_observation_groups
 from .storage import save_cnn_model
 
@@ -207,13 +213,14 @@ def _regression_metrics(
 
 
 def _path_class_metrics(
-    y_true: "list[float] | np.ndarray",
-    y_logits: "list[list[float]] | np.ndarray",
+    y_true: list[float] | np.ndarray,
+    y_logits: list[list[float]] | np.ndarray,
 ) -> dict[str, Any]:
     """path_class 四分类评估指标：逐类 precision/recall、macro_f1、tp_auc/sl_auc。
 
     基于 raw logits 矩阵计算：先做 softmax（numpy 实现，减 max 防溢出）得到四类概率，
     然后用 argmax 得到预测类别，再分别计算各类指标。
+    argmax 并列时取最小下标，即偏向 tp_first（类 0）。
 
     类别对应关系（与 dataset.py 常量一致）：
     - 0 = tp_first（止盈先触发）
@@ -255,13 +262,13 @@ def _path_class_metrics(
 
     y_pred = np.argmax(probs, axis=1).astype(np.float64)  # [N]
 
-    class_names = ("tp_first", "sl_first", "time_up", "time_down")
-    class_labels = (0.0, 1.0, 2.0, 3.0)
+    # PATH_CLASS_NAMES 与常量编码一一对应，消除硬编码
+    class_labels = (PATH_TP_FIRST, PATH_SL_FIRST, PATH_TIME_UP, PATH_TIME_DOWN)
 
     class_report: dict[str, dict[str, Any]] = {}
     f1_list: list[float] = []
 
-    for name, label in zip(class_names, class_labels):
+    for name, label in zip(PATH_CLASS_NAMES, class_labels, strict=True):
         support = int(np.sum(yt == label))
         tp = float(np.sum((y_pred == label) & (yt == label)))
         fp = float(np.sum((y_pred == label) & (yt != label)))
@@ -299,25 +306,26 @@ _SEL_RANK_IC_WEIGHT = 1.0
 _SEL_EXCESS_ACC_WEIGHT = 1.0
 
 
-def _selection_score(epoch_row: dict[str, Any], is_regression: bool, objective: str = "classification") -> float:
+def _selection_score(epoch_row: dict[str, Any], objective: str) -> float:
     """计算用于选最佳 epoch / 早停的业务指标分数，越大越好。
 
-    - 回归：综合 RankIC（排序能力）与 excess_acc（方向超额准确率），
-      避免单看 val_loss（MSE）导致选中"loss 低但方向差"的模型。
-    - 分类（classification）：优先用 AUC，缺失时回退到 excess_acc。
-    - 路径多分类（path_class）：tp_auc + sl_auc（止盈/止损判别能力之和）；
+    按 objective 分三条路径：
+    - "regression"：综合 RankIC（排序能力）与 excess_acc（方向超额准确率），
+      避免单看 val_loss（MSE）导致选中"loss 低但方向差"的模型；
+      缺失值按 0.0 处理。
+    - "path_class"：tp_auc + sl_auc（止盈/止损判别能力之和）；
       任一 AUC 为 None 时按 0.5（随机基线）代入，保证可比较。
-    None 值均按 0 处理，保证可比较。
+    - "classification"（默认）：优先用 AUC，缺失时回退到 excess_acc；
+      缺失值按 0.0 处理。
 
     Args:
         epoch_row: 单个 epoch 的指标字典（history 中的一行）。
-        is_regression: 是否为回归目标。
         objective: 训练目标字符串，"classification"/"regression"/"path_class"。
 
     Returns:
         业务指标分数（float，越大越好）。
     """
-    if is_regression:
+    if objective == "regression":
         rank_ic = epoch_row.get("val_rank_ic")
         excess = epoch_row.get("val_excess_acc")
         rank_ic = float(rank_ic) if rank_ic is not None else 0.0
@@ -557,8 +565,8 @@ def train_cnn_model(
             if is_path_class:
                 # CrossEntropyLoss 要求 target 为 long [B]，pred 为 [B, 4]
                 target = yb.to(device).long()  # [B]
-                wb_squeezed = wb.to(device)     # [B]
-                loss = (criterion(pred, target) * wb_squeezed).mean()
+                wb_dev = wb.to(device)          # [B]，path 分支权重无需 squeeze
+                loss = (criterion(pred, target) * wb_dev).mean()
                 train_correct += (pred.argmax(dim=1) == target).sum().item()
             else:
                 yb = yb.to(device).unsqueeze(1)   # [B, 1]
@@ -660,7 +668,7 @@ def train_cnn_model(
 
         # 用业务指标（回归: RankIC+超额方向准确率 / 分类: AUC / path_class: tp_auc+sl_auc）
         # 选最佳 epoch，而非单看 val_loss，避免选中"loss 低但方向/排序差"的模型。
-        current_score = _selection_score(epoch_row, is_regression, objective=objective)
+        current_score = _selection_score(epoch_row, objective=objective)
         if current_score > best_score + 0.0001:
             best_score = current_score
             best_val_loss = val_loss
