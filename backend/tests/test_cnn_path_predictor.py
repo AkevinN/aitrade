@@ -169,8 +169,9 @@ class TestExampleTests:
         df = predict_cnn_signals(model_name=name, start=start_dt, end=end_dt)
 
         assert isinstance(df, pl.DataFrame)
+        # path_class 输出八列（原七列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
         expected_cols = ["datetime", "vt_symbol", "signal", "prob_tp", "prob_sl",
-                         "prob_time_up", "prob_time_down"]
+                         "prob_time_up", "prob_time_down", "objective"]
         assert df.columns == expected_cols, f"列序错误: {df.columns}"
         assert df.height > 0
 
@@ -192,10 +193,11 @@ class TestExampleTests:
         from aitrade.cnn.predictor import predict_cnn_signals
         df = predict_cnn_signals(model_name=name, start=start_dt, end=end_dt)
 
-        assert df.columns == ["datetime", "vt_symbol", "signal"]
+        # classification 输出四列（原三列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
+        assert df.columns == ["datetime", "vt_symbol", "signal", "objective"]
 
     def test_regression_three_columns(self, monkeypatch, tmp_path) -> None:
-        """regression 推理输出应恰好三列 [datetime, vt_symbol, signal]。"""
+        """regression 推理输出应恰好三列 [datetime, vt_symbol, signal]（+objective 末列）。"""
         pytest.importorskip("torch")
         frame = _make_trading_frame()
 
@@ -212,7 +214,8 @@ class TestExampleTests:
         from aitrade.cnn.predictor import predict_cnn_signals
         df = predict_cnn_signals(model_name=name, start=start_dt, end=end_dt)
 
-        assert df.columns == ["datetime", "vt_symbol", "signal"]
+        # regression 输出四列（原三列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
+        assert df.columns == ["datetime", "vt_symbol", "signal", "objective"]
 
     def test_path_class_on_meta_contains_objective(self, monkeypatch, tmp_path) -> None:
         """path_class 推理的 on_meta 回调应包含 objective='path_class'。"""
@@ -434,8 +437,8 @@ def test_property5_legacy_objectives_three_columns(
 
     df = predict_cnn_signals(model_name=name, start=start_dt, end=end_dt)
 
-    # 严格三列，无多余列
-    assert df.columns == ["datetime", "vt_symbol", "signal"], (
+    # 四列：原三列 + objective 末列（Task 4 cnn-eval-honesty-fixes）
+    assert df.columns == ["datetime", "vt_symbol", "signal", "objective"], (
         f"objective={objective}: 列序错误 {df.columns}"
     )
     assert df.height > 0, f"objective={objective}: 推理结果为空"
@@ -478,8 +481,10 @@ def test_property5_path_class_vs_legacy_column_count(monkeypatch, tmp_path) -> N
     name_cls = _make_checkpoint(tmp_path, objective="classification")
     df_cls = predict_cnn_signals(model_name=name_cls, start=start_dt, end=end_dt)
 
-    assert len(df_path.columns) == 7
-    assert len(df_cls.columns) == 3
+    # path_class 八列（原七列 + objective）；classification 四列（原三列 + objective）
+    # Task 4 cnn-eval-honesty-fixes：objective 末列恒追加
+    assert len(df_path.columns) == 8
+    assert len(df_cls.columns) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -637,9 +642,9 @@ def test_property7_train_save_load_predict_roundtrip(tmp_path, monkeypatch) -> N
         f"objective 未恢复: {metas[0]['objective']}"
     )
 
-    # 七列齐全
+    # 八列齐全（原七列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
     expected_cols = ["datetime", "vt_symbol", "signal", "prob_tp", "prob_sl",
-                     "prob_time_up", "prob_time_down"]
+                     "prob_time_up", "prob_time_down", "objective"]
     assert df.columns == expected_cols, f"列序错误: {df.columns}"
     assert df.height > 0, "推理结果为空"
 
