@@ -69,7 +69,15 @@ def _rating_ge(rating: str, min_rating: str) -> bool:
 
 
 class _CbDoubleLowSource:
-    """可转债双低轮动信号源的私有实现，实现 SignalProvider 协议。"""
+    """可转债双低轮动信号源的私有实现，实现 SignalProvider 协议。
+
+    对快照中的转债 universe 逐只过滤（评级/规模/上市天数/价格）并计算双低分，
+    经 predict() 产出 [datetime, vt_symbol, signal] 信号表，由回测/实盘的 TopK
+    规则消费。本类不做持仓截断，仅负责打分。
+
+    通过 _build_cb_double_low_source 工厂构造，依赖 AlphaLab（读行情）与
+    CBTermsStore（读条款快照/历史溢价率）注入。
+    """
 
     def __init__(
         self,
@@ -82,6 +90,18 @@ class _CbDoubleLowSource:
         lab: Any,
         terms_store: Any,
     ) -> None:
+        """初始化双低信号源，记录过滤阈值与数据依赖。
+
+        Args:
+            top_k: 组合目标持仓数，仅作信息记录；真实持仓截断在策略层（TopK 规则）执行，本类不截断。
+            max_price: 收盘价上限（元），高于此价的转债视为安全垫不足而剔除。
+            min_rating: 最低信用评级（如 "AA-"），低于此评级剔除；评级序见 _RATING_ORDER。
+            min_issue_scale: 最小发行规模（亿元），低于此规模因流动性差剔除。
+            min_list_days: 最小上市天数，上市不足此天数的新券因价格不稳定剔除。
+            interval: 行情周期，"d" 为日线。
+            lab: AlphaLab 实例，提供 load_bar_frame 读取转债日线。
+            terms_store: CBTermsStore 实例，提供条款快照与逐债历史溢价率。
+        """
         self._top_k = top_k  # 信息用：真实持仓数在策略层（TopK rule）配置，此处不作截断
         self._max_price = max_price
         self._min_rating = min_rating
@@ -142,6 +162,7 @@ class _CbDoubleLowSource:
 
         # 将 code → vt_symbol（仅转债代码段）
         def _to_vt(code: str) -> str:
+            """按转债代码前三位判断交易所，拼成 vt_symbol；无法识别则返回空串。"""
             prefix3 = code[:3] if len(code) >= 3 else ""
             if prefix3 in ("110", "111", "113", "118"):
                 return f"{code}.SSE"
@@ -301,10 +322,19 @@ class _CbDoubleLowSource:
         snapshot_premium: float | None,
         vt_symbol: str,
     ) -> float | None:
-        """在历史溢价率中按日期查找；失败时回退到快照值。
+        """在逐债历史溢价率中按日期精确匹配取值；缺失时回退到快照当前值。
+
+        历史与快照两条来源的原始溢价率均为百分比形式（如 12.34 表示 12.34%），
+        本方法统一除以 100 规范为小数后返回。回退到快照值时会 logger.warning 说明。
+
+        Args:
+            premium_hist: 该转债的历史溢价率表（含日期/转股溢价率等列）；None 或空表示无历史，直接走回退。
+            date_str: 待匹配的日期字符串，格式 "YYYY-MM-DD"（与历史表日期前 10 位比较）。
+            snapshot_premium: 快照中的当前溢价率（百分比形式）；为 None 时无回退来源。
+            vt_symbol: 合约代码，仅用于 warning 日志标识。
 
         Returns:
-            溢价率（小数形式，如 0.12 表示 12%）；无任何数据时返回 None。
+            溢价率（小数形式，如 0.12 表示 12%）；历史与快照均无数据时返回 None。
         """
         if premium_hist is not None and not premium_hist.is_empty():
             # value_analysis 返回的字段：日期/收盘价/纯债价值/转股价值/纯债溢价率/转股溢价率
@@ -341,12 +371,20 @@ class _CbDoubleLowSource:
 
 
 def _build_cb_double_low_source(params: dict) -> SignalProvider:
-    """工厂函数：从 params 构造 _CbDoubleLowSource。
+    """工厂函数：从 params 解析阈值并构造 _CbDoubleLowSource。
+
+    供 register_signal_source 注册时作为信号源构造器；缺省键回退到与 param_spec
+    一致的默认值（top_k=15、max_price=130.0、min_rating="AA-" 等）。
 
     Args:
-        params: 参数字典。可通过 ``params["_lab"]`` 注入 AlphaLab 实例，
-                ``params["_terms_store"]`` 注入 CBTermsStore（测试用途，
-                下划线前缀表示内部参数，param_spec 不展示）。
+        params: 参数字典。业务参数键见模块底部 param_spec（top_k / max_price /
+                min_rating / min_issue_scale / min_list_days / interval）。
+                另支持两个下划线前缀的内部注入键（param_spec 不展示，多用于测试）：
+                ``params["_lab"]`` 注入 AlphaLab 实例，``params["_terms_store"]``
+                注入 CBTermsStore；未提供时按 ALPHA_LAB_PATH / 默认路径自行实例化。
+
+    Returns:
+        实现 SignalProvider 协议的 _CbDoubleLowSource 实例。
     """
     top_k = int(params.get("top_k", 15))
     max_price = float(params.get("max_price", 130.0))

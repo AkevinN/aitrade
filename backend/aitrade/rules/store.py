@@ -43,6 +43,12 @@ class CBTermsStore:
     """转债条款快照 + 历史溢价率，parquet 落 RULES_DATA_PATH/，原子写（tmp+os.replace）。"""
 
     def __init__(self, base_path: Path | None = None) -> None:
+        """初始化存储，确保根目录与溢价率子目录存在（不存在则递归创建）。
+
+        Args:
+            base_path: 数据根目录；None 时回退到全局配置 RULES_DATA_PATH。
+                溢价率历史落在该目录下的 cb_premium/ 子目录，快照落在根目录。
+        """
         self._base = Path(base_path) if base_path else RULES_DATA_PATH
         self._base.mkdir(parents=True, exist_ok=True)
         # 溢价率历史子目录
@@ -94,7 +100,18 @@ class CBTermsStore:
         logger.debug("CBTermsStore: %s 溢价率历史已保存 -> %s", vt_symbol, target)
 
     def load_premium_history(self, vt_symbol: str) -> pl.DataFrame | None:
-        """读取单只转债的溢价率历史。文件不存在时返回 None。"""
+        """读取单只转债的溢价率历史。
+
+        按 vt_symbol 反查 cb_premium/ 子目录下的 parquet（vt_symbol 中的 "." 替换为
+        "_" 后定位文件，与 save_premium_history 的命名规则一致）。
+
+        Args:
+            vt_symbol: 转债 vt_symbol，如 "113050.SSE" 或 "128093.SZSE"。
+
+        Returns:
+            列含 date/close/premium_rate 等字段的 polars DataFrame；
+            文件不存在或读取失败时返回 None。
+        """
         safe_name = vt_symbol.replace(".", "_")
         path = self._premium_dir / f"{safe_name}.parquet"
         if not path.exists():
@@ -164,6 +181,12 @@ class FundamentalStore:
     """
 
     def __init__(self, base_path: Path | None = None) -> None:
+        """初始化存储，确保根目录与基本面子目录存在（不存在则递归创建）。
+
+        Args:
+            base_path: 数据根目录；None 时回退到全局配置 RULES_DATA_PATH。
+                每只标的的基本面历史落在该目录下的 fundamental/ 子目录。
+        """
         self._base = Path(base_path) if base_path else RULES_DATA_PATH
         self._base.mkdir(parents=True, exist_ok=True)
         self._fund_dir = self._base / _FUNDAMENTAL_DIR
