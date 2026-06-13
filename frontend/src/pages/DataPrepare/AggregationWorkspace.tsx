@@ -37,6 +37,7 @@ import type { DataResourceList } from '../../types/alpha'
 
 const { Text } = Typography
 
+/** {@link AggregationWorkspace} 的 props：均由页面级容器注入，组件自身不发起数据请求。 */
 export interface AggregationWorkspaceProps {
   /** 本地数据资源（来自页面级 useQuery，复用，不新增请求）。 */
   resources: DataResourceList | undefined
@@ -61,11 +62,13 @@ const INVALID_MESSAGES: Record<InvalidDimension, string> = {
   'no-range-overlap': '所选时间范围与公共可用区间无重叠',
 }
 
+/** 来源类型枚举值 -> 下拉展示用中文名。 */
 const SOURCE_KIND_LABELS: Record<SourceKind, string> = {
   bar: '原始K线',
   tick: '历史Tick',
 }
 
+/** 周期代码 -> 中文展示名；未登记的代码由 {@link formatIntervalLabel} 原样回退。 */
 const INTERVAL_LABELS: Record<string, string> = {
   '1m': '1分钟',
   '5m': '5分钟',
@@ -75,11 +78,19 @@ const INTERVAL_LABELS: Record<string, string> = {
   '60m': '60分钟',
 }
 
+/**
+ * 把周期代码格式化为中文展示名。
+ *
+ * @param value - 周期代码，如 "1m"/"30m"
+ * @returns 命中 {@link INTERVAL_LABELS} 时返回中文名，否则原样返回代码
+ */
 const formatIntervalLabel = (value: string) => INTERVAL_LABELS[value] || value
 
 /** FastAPI 校验错误条目（422 时 detail 为其数组）。 */
 interface ValidationErrorItem {
+  /** 错误定位路径，自外向内逐段定位到出错字段，如 ["body", "vt_symbols", 0]；缺失时表示无具体定位 */
   loc?: (string | number)[]
+  /** 人类可读的错误文案，如 "field required"；缺失时仅有定位无说明 */
   msg?: string
 }
 
@@ -89,6 +100,11 @@ interface ValidationErrorItem {
  * 注意：FastAPI 422 的 `detail` 是 `{type, loc, msg, input}` 对象数组，
  * 直接交给 `message.error` 会被当作 React 子节点渲染而抛错（白屏）。
  * 这里将数组归并为可读字符串，对象/字符串分别处理。
+ *
+ * @param error - 任意捕获到的错误，优先读取 AxiosError 的 `response.data.detail`
+ * @param fallback - 无法从 error 提取出有效文案时返回的兜底提示
+ * @returns 可安全渲染的纯字符串：字符串 detail 原样返回；数组 detail 归并为
+ *   「字段: 信息」并以「；」连接；否则取 error.message，再退回 fallback
  */
 const getErrorMessage = (error: unknown, fallback: string): string => {
   const detail = (error as AxiosError<{ detail?: unknown }>)?.response?.data?.detail
@@ -119,6 +135,14 @@ const INITIAL_CONFIG: AggregationConfig = {
   sessionProfile: 'cn_equity',
 }
 
+/**
+ * 本地聚合工作区：数据驱动的级联配置表单。
+ *
+ * 依据所选合约实际拥有的本地数据，联动计算来源类型/来源周期/目标周期/时间范围的
+ * 可选项与默认值，提交时校验组合并调用 `alphaService.aggregateData` 启动聚合任务，
+ * 成功后经 {@link AggregationWorkspaceProps.onTaskStarted} 把 taskId 回传给页面。
+ * 渲染分 loading/error/empty/ready 四态互斥，无效组合不提交、仅给定向提示。
+ */
 const AggregationWorkspace: React.FC<AggregationWorkspaceProps> = ({
   resources,
   isLoading,

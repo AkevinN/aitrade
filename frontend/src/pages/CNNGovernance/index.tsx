@@ -38,6 +38,7 @@ import type {
 const { RangePicker } = DatePicker
 const { Text } = Typography
 
+/** 候选模型训练参数的页面默认值，提交时按需被表单字段覆盖。 */
 const DEFAULT_TRAINING: CNNTrainingParams = {
   epochs: 20,
   batch_size: 32,
@@ -48,6 +49,7 @@ const DEFAULT_TRAINING: CNNTrainingParams = {
   loss_weighting: 'none',
 }
 
+/** 候选模型回测参数的页面默认值，买卖阈值会按目标函数（分类/回归）被覆盖。 */
 const DEFAULT_BACKTEST: CNNBacktestParams = {
   buy_threshold: 0.6,
   sell_threshold: 0.4,
@@ -62,6 +64,7 @@ const DEFAULT_BACKTEST: CNNBacktestParams = {
   t_plus1: false,
 }
 
+/** 候选晋级门禁的页面默认值，胜率/分数增量等阈值由表单字段覆盖。 */
 const DEFAULT_GATE: CNNPromotionGate = {
   min_win_rate: 0.5,
   min_core_score_delta: 0,
@@ -119,6 +122,7 @@ function baseRequest(values: Record<string, any>): CNNCandidateTrainRequest {
   }
 }
 
+/** 候选/治理状态到 antd Tag 颜色的映射；未命中的状态由 Tag 取默认色。 */
 const statusColor: Record<string, string> = {
   passed: 'green',
   failed: 'red',
@@ -127,6 +131,14 @@ const statusColor: Record<string, string> = {
   pending: 'gold',
 }
 
+/**
+ * CNN 模型治理页：以 WF/OOS 评估、候选模型、人工晋级/拒绝、回滚和治理回放回测
+ * 管理生产模型的更新，避免新数据无门禁地污染线上模型。
+ *
+ * 分三个 Tab：评估与候选（训练候选、查看 WF/OOS 报告、晋级/拒绝）、
+ * 治理回放回测（多对照组回放对比）、历史（治理事件流水）。
+ * 训练/评估/回放均为异步任务，通过 useTask 轮询任务状态并联动展示结果报告。
+ */
 const CNNGovernance: React.FC = () => {
   const [form] = Form.useForm()
   const [replayForm] = Form.useForm()
@@ -398,7 +410,22 @@ const CNNGovernance: React.FC = () => {
   )
 }
 
-function GovernanceForm({ form, onEvaluate, onCandidate }: { form: any; onEvaluate: () => void; onCandidate: () => void }) {
+/**
+ * 评估与候选表单：配置标的、区间、WF/OOS 窗口、目标函数、Label 与门禁阈值，
+ * 提供「启动 WF 评估」和「训练候选模型」两个提交入口。
+ */
+function GovernanceForm({
+  form,
+  onEvaluate,
+  onCandidate,
+}: {
+  /** 受控的 antd FormInstance；由父组件持有以便提交时读取字段值 */
+  form: any
+  /** 点击「启动 WF 评估」时触发，仅做评估不产出候选 */
+  onEvaluate: () => void
+  /** 点击「训练候选模型」时触发，训练并落库为待晋级候选 */
+  onCandidate: () => void
+}) {
   return (
     <section className="panel">
       <Form
@@ -490,7 +517,19 @@ function GovernanceForm({ form, onEvaluate, onCandidate }: { form: any; onEvalua
   )
 }
 
-function ReplayForm({ form, onReplay }: { form: any; onReplay: () => void }) {
+/**
+ * 治理回放回测表单：配置回放区间、初始训练窗、评估/交易周期、初始资金与对照组，
+ * 用于在历史区间上回放治理流程并与多个基线策略对比。
+ */
+function ReplayForm({
+  form,
+  onReplay,
+}: {
+  /** 受控的 antd FormInstance；由父组件持有以便提交时读取字段值 */
+  form: any
+  /** 点击「启动治理回放回测」时触发 */
+  onReplay: () => void
+}) {
   return (
     <section className="panel">
       <Form
@@ -554,15 +593,24 @@ function ReplayForm({ form, onReplay }: { form: any; onReplay: () => void }) {
   )
 }
 
+/**
+ * 候选模型列表：展示每个候选的状态、胜率，并提供查看报告、晋级、拒绝操作。
+ *
+ * 已晋级的候选禁用「晋级」按钮，已拒绝的候选禁用「拒绝」按钮。
+ */
 function CandidateTable({
   candidates,
   onReport,
   onPromote,
   onReject,
 }: {
+  /** 候选列表；为空数组时表格展示空态 */
   candidates: CNNCandidate[]
+  /** 点击「报告」时触发，入参为该候选的 report_id */
   onReport: (id: string) => void
+  /** 点击「晋级」时触发，入参为 candidate_id */
   onPromote: (id: string) => void
+  /** 点击「拒绝」时触发，入参为 candidate_id */
   onReject: (id: string) => void
 }) {
   return (
@@ -591,6 +639,13 @@ function CandidateTable({
   )
 }
 
+/**
+ * WF/OOS 报告面板：展示候选模型的逐折评分对比与汇总结论（折数、胜出折数、胜率、是否通过）。
+ *
+ * report 为空时渲染提示性 Alert，引导用户选择候选报告或等待任务完成。
+ *
+ * @param report - WF/OOS 报告；为 undefined 时展示占位提示
+ */
 function ReportPanel({ report }: { report?: CNNGovernanceReport }) {
   if (!report) return <Alert style={{ marginTop: 12 }} type="info" message="选择候选报告或等待任务完成后查看 WF/OOS 摘要。" />
   return (
@@ -620,7 +675,18 @@ function ReportPanel({ report }: { report?: CNNGovernanceReport }) {
   )
 }
 
-function ReplayTable({ replays, onOpen }: { replays: Array<Record<string, any>>; onOpen: (id: string) => void }) {
+/**
+ * 治理回放列表：展示历史回放任务的标的、结论判定，并提供「查看」入口打开详情。
+ */
+function ReplayTable({
+  replays,
+  onOpen,
+}: {
+  /** 回放记录列表；字段结构松散，故以 Record 表示。为空时表格展示空态 */
+  replays: Array<Record<string, any>>
+  /** 点击「查看」时触发，入参为该回放的 replay_id */
+  onOpen: (id: string) => void
+}) {
   return (
     <Table
       size="small"
@@ -637,6 +703,13 @@ function ReplayTable({ replays, onOpen }: { replays: Array<Record<string, any>>;
   )
 }
 
+/**
+ * 治理回放结果面板：展示各对照组（基线策略）的绩效对比表、晋级事件流水及总体结论。
+ *
+ * replay 为空时渲染提示性 Alert；结论建议启用晋级时结论 Alert 显示为 success，否则为 warning。
+ *
+ * @param replay - 回放结果对象，含 baselines/promotion_events/conclusion；为 undefined 时展示占位提示
+ */
 function ReplayPanel({ replay }: { replay?: any }) {
   if (!replay) return <Alert style={{ marginTop: 12 }} type="info" message="启动或选择治理回放后查看四组对比结果。" />
   const rows = Object.entries(replay.baselines || {}).map(([key, value]: [string, any]) => ({

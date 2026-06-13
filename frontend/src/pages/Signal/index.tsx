@@ -18,9 +18,13 @@ import { useTask } from '../../hooks/useTask'
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/** 信号预览表的单行数据，由后端信号预览记录归一化而来。 */
 interface SignalRow {
+  /** 信号时间戳，ISO 字符串；表格按前 10 位（YYYY-MM-DD）展示 */
   datetime: string
+  /** 标的合约代码，如 "000001.SZSE" */
   vt_symbol: string
+  /** 信号强度，正数看多、负数看空、0 中性；通常落在 [-1, 1] 区间 */
   signal: number
 }
 
@@ -50,6 +54,7 @@ const Signal: React.FC = () => {
     queryFn: () => alphaService.listSignals(),
   })
 
+  /** 把文本框里的证券代码按换行或逗号拆分、去空白、剔除空项，得到去噪后的代码数组。 */
   const symbols = useMemo(() => (
     symbolsText
       .split(/[\n,]+/)
@@ -57,6 +62,12 @@ const Signal: React.FC = () => {
       .filter((s) => s.length > 0)
   ), [symbolsText])
 
+  /**
+   * 校验输入后启动信号生成任务，成功则记录 task_id 以便轮询进度。
+   *
+   * 未选模型或证券列表为空时弹出警告并直接返回；信号名称留空时按
+   * `signal_<模型>_<时间戳>` 自动生成。请求失败仅提示错误、不抛出。
+   */
   const handleGenerate = async () => {
     if (!selectedModel || symbols.length === 0) {
       message.warning('请选择模型并输入证券代码')
@@ -80,6 +91,13 @@ const Signal: React.FC = () => {
     }
   }
 
+  /**
+   * 拉取已有信号的预览数据并填充到右侧表格与图表。
+   *
+   * 对每行做字段归一化（缺失则回退为空串或 0）。请求失败仅提示错误、不抛出。
+   *
+   * @param name - 已持久化信号的名称
+   */
   const handleLoadSignal = async (name: string) => {
     try {
       const info = await alphaService.getSignal(name)
@@ -96,6 +114,11 @@ const Signal: React.FC = () => {
     }
   }
 
+  /**
+   * 统计当前信号的多空中性分布；无信号时返回 null（用于隐藏统计卡片）。
+   *
+   * 按 signal 正负归类：>0 看多、<0 看空、=0 中性。
+   */
   const signalStats = useMemo(() => {
     if (signals.length === 0) return null
     const bullish = signals.filter((item) => item.signal > 0).length
@@ -104,6 +127,12 @@ const Signal: React.FC = () => {
     return { total: signals.length, bullish, bearish, neutral }
   }, [signals])
 
+  /**
+   * 把信号值分桶成 6 档直方图数据，供分布柱状图渲染。
+   *
+   * 区间为左闭右开：< -0.5、[-0.5, -0.2)、[-0.2, 0)、[0, 0.2)、[0.2, 0.5)、≥ 0.5；
+   * 无信号时返回空数组。
+   */
   const distributionData = useMemo(() => {
     if (signals.length === 0) return []
     const bins = [
@@ -127,6 +156,7 @@ const Signal: React.FC = () => {
     return bins
   }, [signals])
 
+  /** 把信号映射为时间线折线图的点序列；time 仅取日期部分（前 10 位）。 */
   const lineData = useMemo(() => (
     signals.map((item) => ({
       time: item.datetime.slice(0, 10),

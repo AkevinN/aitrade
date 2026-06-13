@@ -61,6 +61,12 @@ const PlanManager: React.FC = () => {
     void queryClient.invalidateQueries({ queryKey: ['scheduler-status'] })
   }
 
+  /**
+   * 保存交易计划的 mutation：依据 editingPlan 是否存在自动选择更新或新建。
+   *
+   * editingPlan 非空时调用 updatePlan 走更新分支，为空时调用 createPlan 走新建分支。
+   * 成功后弹提示、关闭表单弹窗、清空编辑态并使列表/调度状态失效重拉；失败时弹错误提示。
+   */
   const saveMutation = useMutation({
     mutationFn: (req: TradingPlanRequest) =>
       editingPlan ? liveService.updatePlan(editingPlan.plan_id, req) : liveService.createPlan(req),
@@ -73,6 +79,11 @@ const PlanManager: React.FC = () => {
     onError: (e: unknown) => message.error(e instanceof Error ? e.message : '保存失败'),
   })
 
+  /**
+   * 删除交易计划的 mutation。
+   *
+   * 入参为待删除计划的 plan_id；成功后弹提示并使列表/调度状态失效重拉，失败时弹错误提示。
+   */
   const deleteMutation = useMutation({
     mutationFn: (planId: string) => liveService.deletePlan(planId),
     onSuccess: () => {
