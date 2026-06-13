@@ -623,11 +623,14 @@ def test_property6_drop_rate_formula(
 
 
 @given(
-    n_symbols=st.integers(min_value=2, max_value=4),
-    max_rows=st.integers(min_value=20, max_value=80),
-    missing_first=st.integers(min_value=0, max_value=15),
+    n_symbols=st.integers(min_value=2, max_value=3),
+    max_rows=st.integers(min_value=30, max_value=80),
+    missing_first=st.integers(min_value=0, max_value=20),
 )
-@settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+@settings(
+    max_examples=30,  # 每例跑真实 build_dataset，降低数量避免超时
+    suppress_health_check=[HealthCheck.too_slow],
+)
 def test_property6_warning_iff_above_threshold(
     n_symbols: int,
     max_rows: int,
@@ -636,26 +639,63 @@ def test_property6_warning_iff_above_threshold(
     """Property 6.b：告警触发当且仅当 drop_rate > ALIGN_DROP_WARN_THRESHOLD。
 
     Feature: alignment_drop_rate
-    Property: 阈值边界严格正确——等于阈值不告警，大于才告警。
+    Property: 驱动真实 build_dataset 运行，断言 info["alignment_warning"] 存在
+    当且仅当 info["alignment_drop_rate"] > ALIGN_DROP_WARN_THRESHOLD。
+
+    实现方式：monkeypatch _load_market_frame（通过 unittest.mock.patch），
+    构造随机多标的合成帧（S0 缺 missing_first 行模拟停牌），跑完整的
+    build_dataset → 直接检查 info 中的告警键，真正守护"超阈值才写 warning"逻辑。
+
+    设 max_examples=30 是因为每例需跑完整 build_dataset（IO+特征计算），
+    30 例已能覆盖 drop_rate=0 / 0<drop_rate<=阈值 / 超阈值三个区间。
     """
+    from unittest.mock import patch
+
+    LOOKBACK = 10
     all_dts = _make_datetimes(max_rows)
+    miss = min(missing_first, max_rows - LOOKBACK - 5)  # S0 至少保留 LOOKBACK+5 行
+    if miss < 0:
+        miss = 0
+
     frames: dict[str, pl.DataFrame] = {}
-    miss = min(missing_first, max_rows - 5)
     frames["S0"] = _make_frame(all_dts[miss:], seed=0)
     for idx in range(1, n_symbols):
         frames[f"S{idx}"] = _make_frame(all_dts, seed=idx)
 
+    # 检查对齐后有足够样本；不足则跳过（不用 try/except 吞断言）
     try:
         _, merged = _align_frames_by_datetime(frames)
-        aligned_h = merged.height
     except ValueError:
         assume(False)
         return
+    # 需要至少 LOOKBACK+2 行才能生成 ≥1 个有效样本（next_bar 标签需 anchor+1）
+    assume(merged.height >= LOOKBACK + 2)
 
-    dr = alignment_drop_rate(frames, aligned_h)
-    should_warn = dr > ALIGN_DROP_WARN_THRESHOLD
-    actually_warns = dr > ALIGN_DROP_WARN_THRESHOLD  # 纯函数层面直接断言公式
-    assert should_warn == actually_warns  # 永真，但确认 ALIGN_DROP_WARN_THRESHOLD 可用
+    symbols = list(frames.keys())
+    groups = _make_groups(symbols)
+
+    def fake_loader(vt_symbol, start, end, *, input_data_kind, input_interval):
+        return frames[vt_symbol]
+
+    from aitrade.cnn.dataset import build_dataset
+
+    with patch("aitrade.cnn.dataset._load_market_frame", side_effect=fake_loader):
+        _X, _y, _mask, info = build_dataset(
+            vt_symbols=symbols,
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            lookback=LOOKBACK,
+            target_symbol=symbols[0],
+            observation_groups=groups,
+        )
+
+    drop_rate = info["alignment_drop_rate"]
+    has_warning = "alignment_warning" in info
+
+    assert has_warning == (drop_rate > ALIGN_DROP_WARN_THRESHOLD), (
+        f"告警键存在={has_warning} 与 drop_rate={drop_rate:.4f} > "
+        f"ALIGN_DROP_WARN_THRESHOLD={ALIGN_DROP_WARN_THRESHOLD} 不一致"
+    )
 
 
 @given(

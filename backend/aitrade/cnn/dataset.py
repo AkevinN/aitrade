@@ -503,7 +503,7 @@ def build_dataset(
     }
     drop_rate = alignment_drop_rate(symbol_frames, aligned_df.height)
 
-    if on_progress:
+    if on_progress and drop_rate > 0:
         drop_warn = "⚠️ " if drop_rate > ALIGN_DROP_WARN_THRESHOLD else ""
         on_progress(
             35,
