@@ -684,3 +684,99 @@ flowchart TB
 7. **保存**（storage.py）：`.pt` checkpoint + `_history.json`
 8. **进度更新**（全程）：`on_progress(percent, message)` → TaskManager → 前端轮询
 9. **结果展示**（前端）：自动刷新模型列表 + 加载训练详情面板
+
+---
+
+## 五、路径形态多分类（path_class）
+
+> 特性来源：`.kiro/specs/cnn-path-multiclass-head/`，分支 `feat/cnn-path-multiclass-head`，Task 1~8 全部闭环。
+
+### 5.1 是什么——四类出场剧本
+
+`objective="path_class"` 将预测目标从"方向（涨/跌）"升级为"持仓路径"，对未来 `max_hold` 根 bar 内的出场方式做四分类：
+
+| 标签 | 编码 | 含义 | 触发条件 |
+|------|------|------|----------|
+| `tp_first` | 0 | 止盈先触发 | 持仓期内任意 bar 的 **high** 首先触及止盈价（`entry_price × (1 + take_profit)`） |
+| `sl_first` | 1 | 止损先触发 | 持仓期内任意 bar 的 **low** 首先触及止损价（`entry_price × (1 - stop_loss)`）；同根 bar 两侧均触发时保守假设止损先到 |
+| `time_up` | 2 | 时间止损（上涨方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **> threshold**（默认 threshold=0）|
+| `time_down` | 3 | 时间止损（下跌方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **< -threshold**；dead-zone（\|ret\| ≤ threshold）按 `neutral_policy` 归入此类或丢弃 |
+
+标签由三重障碍法（OCO，One-Cancels-Other）生成，**必须配合 `label_spec.mode="oco"`**。建仓对齐 A 股 T+1：在 anchor+1 根**开盘价**建仓，障碍宽度以**建仓价**（开盘价）为基准，固定比例（`take_profit`/`stop_loss`）、最长持有 `max_hold` 根 bar；触发判定用每根 bar 的 **high/low**（收盘价不参与判定）。
+
+### 5.2 训练
+
+**损失函数**：`CrossEntropyLoss`（四分类），输出头为线性层（无 Sigmoid），logits 形状 `[B, 4]`。
+
+**选优指标**：验证集上同时监控 `tp_auc`（类 0 的 OvR AUC）和 `sl_auc`（类 1 的 OvR AUC），取 `tp_auc + sl_auc` 之和最大的 epoch 为最佳 epoch。AUC 缺失（某类无样本）时按 0.5 兜底。
+
+**`result` 字典额外键**：
+
+| 键 | 类型 | 说明 |
+|----|------|------|
+| `num_classes` | int=4 | 固定 4 类 |
+| `best_val_tp_auc` | float \| None | 最佳 epoch 的 tp_auc |
+| `best_val_sl_auc` | float \| None | 最佳 epoch 的 sl_auc |
+| `best_val_macro_f1` | float | 最佳 epoch 的 macro F1 |
+| `class_distribution` | dict | 四类训练样本数 `{tp_first, sl_first, time_up, time_down}` |
+
+**`loss_weighting`**：path_class 模式下强制回退为 `"none"`（均匀权重），幅度加权（`"magnitude"`）在此模式下无意义。
+
+### 5.3 推理
+
+`predict_cnn_signals(model_name, start, end)` 对 `path_class` 模型返回 **七列信号帧**：
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `datetime` | Datetime | 预测锚点日期 |
+| `vt_symbol` | String | 目标证券代码 |
+| `signal` | Float64 | **恒等于** `prob_tp`（止盈概率），保证与旧策略消费语义兼容 |
+| `prob_tp` | Float64 | 止盈先触发概率（类 0 softmax 输出） |
+| `prob_sl` | Float64 | 止损先触发概率（类 1 softmax 输出） |
+| `prob_time_up` | Float64 | 时间止损·向上概率（类 2） |
+| `prob_time_down` | Float64 | 时间止损·向下概率（类 3） |
+
+**关键约束**：`prob_tp + prob_sl + prob_time_up + prob_time_down ≡ 1.0`（softmax 保证）；`signal ≡ prob_tp`（Property 3）。
+
+`on_meta` 回调会透传 `objective="path_class"`，供调用方区分模型类型。
+
+### 5.4 回测——veto_threshold 否决
+
+`CNNSignalStrategy` 新增 `veto_threshold` 参数（默认 1.0，等效关闭）：
+
+```python
+# 入场时：prob_sl >= veto_threshold → 否决本次买入（否决计数 +1）
+if prob_sl >= veto_threshold:
+    self._veto_count += 1
+    return  # 不发出买单
+```
+
+**行为约束**：
+
+- 否决仅在 `prob_tp >= buy_threshold`（即将下买单）时才判断，不会在信号不足时误计数。
+- 信号帧不含 `prob_sl` 列（旧 classification/regression 模型）时，否决恒为 False，向后兼容。
+- 否决不影响出场：已持仓后 `prob_sl` 飙高，不触发提前平仓。
+- `engine.strategy._veto_count` 记录整个回测期间的累计否决次数。
+
+**`exit_mode="auto"` 推导**：`exit_mode` 请求默认值为 `"threshold"`，用户须显式传入 `"auto"` 才触发自动对齐。`auto` 读取 checkpoint 中存储的 **`label_spec.mode`** 进行推导：OCO label（`mode="oco"`）→ `exit_mode="oco"`（`take_profit`/`stop_loss`/`max_hold` 与 label 同口径）；固定持有期类 label（`horizon_bars` 等）→ `exit_mode="fixed_hold"`（`hold_days` 取自 label 持有期）。与信号帧列数无关；推导逻辑由 `aitrade.cnn.consistency.derive_strategy_exit_from_label` 实现。
+
+### 5.5 前端入口
+
+| 位置 | 控件 | 说明 |
+|------|------|------|
+| 训练页（CNNTrain） | 训练目标下拉 | 第三选项「**路径形态分类（四类剧本概率）**」，选中后标签模式自动锁定为 `oco`，显示止盈/止损/最大持有配置 |
+| 回测页（CNNBacktest） | veto 控件 | **无需勾选**；选中 `path_class` 模型后自动显示 `veto_threshold` 滑块（范围 **0.1~1.0**，1.0 标注"关闭"）；回测结果中 `veto_count` 仅在 **>0** 时展示 |
+
+### 5.6 与 classification / regression 的对比
+
+| 维度 | classification | regression | path_class |
+|------|---------------|------------|------------|
+| 预测目标 | 方向（涨/跌） | 未来收益率 | 出场路径（4 类） |
+| 损失函数 | BCELoss | HuberLoss | CrossEntropyLoss |
+| 输出形状 | [B, 1] + Sigmoid | [B, 1] | [B, 4]（logits） |
+| 信号帧列数 | 3 列 | 3 列 | 7 列 |
+| signal 含义 | 上涨概率 | 预测收益 | prob_tp（止盈概率） |
+| 选优指标 | val_auc | val_rank_ic | tp_auc + sl_auc |
+| 回测否决 | 不支持 | 不支持 | veto_threshold + prob_sl |
+| 实盘否决 | — | — | v1 未接线（见 O-002） |
+| label_spec.mode | 任意 | 任意 | 必须 oco |

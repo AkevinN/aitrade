@@ -9,8 +9,13 @@ export interface CNNModelInfo {
   target_symbol?: string
   input_data_kind?: string
   input_interval?: string
-  /** 预测目标：classification=方向概率；regression=预测涨跌幅 */
-  objective?: 'classification' | 'regression'
+  /**
+   * 预测目标：
+   * - `classification`：方向二分类，输出上涨概率；
+   * - `regression`：直接预测涨跌幅；
+   * - `path_class`：路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，输出四类概率）。
+   */
+  objective?: 'classification' | 'regression' | 'path_class'
   group_count?: number
   observation_groups?: Array<Record<string, unknown>>
 }
@@ -41,6 +46,24 @@ export interface CNNHistoryItem {
   val_rmse?: number
   /** 回归指标：方向准确率（sign(pred)==sign(actual)） */
   val_dir_acc?: number
+  /**
+   * path_class 指标：先触止盈类 AUC（one-vs-rest）；非 path_class 模型为 null。
+   *
+   * @see CNNModelInfo.objective
+   */
+  val_tp_auc?: number | null
+  /**
+   * path_class 指标：先触止损类 AUC（one-vs-rest）；非 path_class 模型为 null。
+   *
+   * @see CNNModelInfo.objective
+   */
+  val_sl_auc?: number | null
+  /**
+   * path_class 指标：四分类宏平均 F1；非 path_class 模型为 null。
+   *
+   * @see CNNModelInfo.objective
+   */
+  val_macro_f1?: number | null
   lr?: number
 }
 
@@ -126,6 +149,15 @@ export interface CNNBacktestRequest {
   stop_loss?: number
   /** 是否启用 T+1 卖出限制 */
   t_plus1?: boolean
+  /**
+   * 否决阈值（仅 path_class 模型有效）：当推理输出中先触止损概率（prob_sl）≥ 该值时，
+   * 放弃本次买入信号。范围 (0, 1]，默认 1.0 表示关闭（永不否决）。
+   *
+   * @example
+   * veto_threshold: 0.5  // prob_sl ≥ 0.5 时跳过买入
+   * veto_threshold: 1.0  // 关闭否决（默认）
+   */
+  veto_threshold?: number
 }
 
 /** CNN 推理（生成信号）请求（`POST /api/cnn/predict`）。 */

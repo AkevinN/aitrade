@@ -193,6 +193,11 @@ const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }
             <Descriptions.Item label="卖出印花税">{bps(statistics.stamp_duty)}</Descriptions.Item>
             <Descriptions.Item label="成交滑点">{bps(statistics.slippage)}</Descriptions.Item>
             <Descriptions.Item label="限价缓冲">{bps(statistics.price_add)}</Descriptions.Item>
+            {statistics.veto_count !== undefined && statistics.veto_count > 0 && (
+              <Descriptions.Item label="否决买入次数" span={2}>
+                {statistics.veto_count}（prob_sl ≥ veto_threshold 而放弃的买入信号数）
+              </Descriptions.Item>
+            )}
           </Descriptions>
         </Card>
       )}

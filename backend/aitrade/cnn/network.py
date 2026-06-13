@@ -24,7 +24,7 @@ def create_market_cnn(
       在时间轴上捕获短/中/长期模式，输出各 16 通道，拼接为 48 通道。
     - 分组掩码加权池化（symbol 维度），将多证券信息聚合为单向量。
     - 1D 时序卷积 + AdaptiveAvgPool1d(8) 提取时间特征。
-    - 全连接融合头：按 group 数线性展开后做分类/回归预测。
+    - 全连接融合头：按 group 数线性展开后做分类/回归/路径分类预测。
 
     输入张量规约（forward 的 x 参数）：``[B, C, T, S, G]``
     - B: batch size
@@ -41,8 +41,11 @@ def create_market_cnn(
         width: 每组最大证券数 S（即 max_group_width）。
         group_count: 观测分组数 G；默认 1（单分组）。
         dropout: 全连接头前的 Dropout 概率；默认 0.5。
-        objective: 训练目标，"classification"（输出经 Sigmoid 的上涨概率 0~1）
-            或 "regression"（输出无界的预测收益，无 Sigmoid）。
+        objective: 训练目标：
+            - "classification"：输出经 Sigmoid 的上涨概率 [B,1]，值域 0~1。
+            - "regression"：输出无界的预测收益 [B,1]，无激活。
+            - "path_class"：输出四分类 raw logits [B,4]，无激活（softmax 留给
+              CrossEntropyLoss / 推理端，切勿在此加 Sigmoid 或 Softmax）。
 
     Returns:
         初始化后的 GroupAwareMarketCNN 实例（torch.nn.Module 子类）。
@@ -60,7 +63,11 @@ def create_market_cnn(
                 S: 每组最大证券数（即 max_group_width）。
                 G: 分组数（group_count）。
                 drop: Dropout 概率。
-                task: "classification" 或 "regression"，决定融合头是否附 Sigmoid。
+                task: 训练目标，决定融合头结构：
+                    - "classification"：输出 [B,1] + Sigmoid，值域 0~1。
+                    - "regression"：输出 [B,1]，无激活，无界。
+                    - "path_class"：输出 [B,4] raw logits，无激活；
+                      softmax 由 CrossEntropyLoss / 推理端处理。
             """
             super().__init__()
             # Use odd kernel widths only so width stays stable after padding.
@@ -94,15 +101,17 @@ def create_market_cnn(
             )
 
             fusion_hidden = max(96, 32 * G)
+            # path_class：4 类 logits（softmax 留给 CrossEntropyLoss / 推理端）；其余：1 个输出
+            out_dim = 4 if task == "path_class" else 1
             head_layers = [
                 nn.Flatten(),
                 nn.Linear(32 * 8 * G, fusion_hidden),
                 nn.ReLU(),
                 nn.Dropout(drop),
-                nn.Linear(fusion_hidden, 1),
+                nn.Linear(fusion_hidden, out_dim),
             ]
-            # 回归头不加 Sigmoid，输出无界的预测收益；分类头保留 Sigmoid 输出概率
-            if task != "regression":
+            # classification 头附 Sigmoid 输出上涨概率；regression 和 path_class 均不加激活
+            if task == "classification":
                 head_layers.append(nn.Sigmoid())
             self.group_fusion = nn.Sequential(*head_layers)
 
@@ -115,8 +124,11 @@ def create_market_cnn(
                     有效证券位为 1.0，无效（占位）位为 0.0。
 
             Returns:
-                预测结果张量，形状 ``[B, 1]``；
-                分类任务为上涨概率（0~1），回归任务为预测收益（无界）。
+                预测结果张量，形状随 task 变化：
+                - "classification"：``[B, 1]``，经 Sigmoid，值域 0~1（上涨概率）。
+                - "regression"：``[B, 1]``，无激活，输出无界预测收益。
+                - "path_class"：``[B, 4]``，raw logits，无激活；
+                  调用方应用 softmax 或直接传入 CrossEntropyLoss。
             """
             batch_size, _, _, _, group_count = x.shape
             x = x.permute(0, 4, 1, 2, 3).reshape(batch_size * group_count, x.shape[1], x.shape[2], x.shape[3])

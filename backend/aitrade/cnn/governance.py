@@ -342,13 +342,20 @@ def _core_score(statistics: dict[str, Any], objective: str) -> float:
     """计算用于 WF 折对比的核心综合得分，越高越好。
 
     公式：``total_return + sharpe * 5 - max_dd * 0.2 - trade_penalty``，
-    回归模型额外加上 ``best_val_rank_ic * 10``。
+    附加训练质量项（由 ``_merge_training_metrics`` 注入）：
+    - regression：``+best_val_rank_ic * 10``（键缺失时中性按 0.0）
+    - path_class：``+(tp_auc + sl_auc - 1) * 10``（键缺失时各按 0.5 中性；
+      注意 0.5-0.5=0 恰好中性——此处用 ``None`` 判断而非 ``or``，
+      防止 0.0 被错误升为 0.5）
+
     statistics 含 error 字段时返回 -1e9（标记为失败/无效）。
 
     Args:
         statistics: 回测统计字典，含 total_return/sharpe_ratio/max_ddpercent/
-            total_trade_count 等键（缺失或 None 按 0 处理）。
-        objective: 训练目标，"classification" 或 "regression"。
+            total_trade_count 等键（缺失或 None 按 0 处理）；
+            regression 时可含 best_val_rank_ic；
+            path_class 时可含 best_val_tp_auc / best_val_sl_auc。
+        objective: 训练目标，"classification"、"regression" 或 "path_class"。
 
     Returns:
         综合得分浮点值，保留 6 位有效小数。
@@ -363,7 +370,64 @@ def _core_score(statistics: dict[str, Any], objective: str) -> float:
     score = total_return + sharpe * 5.0 - max_dd * 0.2 - trade_penalty
     if objective == "regression":
         score += float(statistics.get("best_val_rank_ic", 0.0) or 0.0) * 10.0
+    elif objective == "path_class":
+        # 用 None 判断而非 or：AUC=0.0 是有效值，不可被 or 吞掉升为 0.5
+        raw_tp = statistics.get("best_val_tp_auc")
+        raw_sl = statistics.get("best_val_sl_auc")
+        tp_auc = 0.5 if raw_tp is None else float(raw_tp)
+        sl_auc = 0.5 if raw_sl is None else float(raw_sl)
+        score += (tp_auc + sl_auc - 1.0) * 10.0
     return round(score, 6)
+
+
+def _merge_training_metrics(
+    statistics: dict[str, Any],
+    model_name: str,
+    checkpoint: dict[str, Any],
+) -> None:
+    """将 checkpoint 对应的训练期验证指标并入 statistics（原地修改）。
+
+    从 ``{model_name}_history.json`` 读取 ``best_epoch`` 处的 epoch 指标，
+    将目标键写入 statistics 供 ``_core_score`` 读取：
+    - regression：``best_val_rank_ic``（Spearman 相关，范围 -1~1）
+    - path_class：``best_val_tp_auc``、``best_val_sl_auc``（AUC，范围 0~1）
+
+    设计说明：这些指标存储于训练历史 JSON，而非 checkpoint 本体，因此回测统计
+    中默认不含这些键。本函数是唯一将训练质量信息接入治理评分的桥梁；若历史文件
+    缺失或 best_epoch 超出范围，静默跳过（由 _core_score 的缺失回退 0.5/0.0 兜底）。
+
+    Args:
+        statistics: 回测统计字典，原地写入目标键。
+        model_name: 模型名称（不含 .pt 后缀），用于定位 _history.json 文件。
+        checkpoint: 已加载的 checkpoint 字典，须含 best_epoch 键。
+    """
+    history_path = CNN_MODEL_DIR / f"{model_name}_history.json"
+    if not history_path.exists():
+        return
+    try:
+        with history_path.open(encoding="utf-8") as file:
+            history: list[dict[str, Any]] = json.load(file)
+    except (OSError, ValueError):
+        return
+
+    best_epoch: int = int(checkpoint.get("best_epoch") or 0)
+    if best_epoch <= 0 or best_epoch > len(history):
+        return
+    best_metrics = history[best_epoch - 1]
+
+    objective = checkpoint.get("train_config", {}).get("objective", "classification")
+    if objective == "regression":
+        val = best_metrics.get("val_rank_ic")
+        if val is not None:
+            statistics["best_val_rank_ic"] = float(val)
+    elif objective == "path_class":
+        for stat_key, hist_key in (
+            ("best_val_tp_auc", "val_tp_auc"),
+            ("best_val_sl_auc", "val_sl_auc"),
+        ):
+            val = best_metrics.get(hist_key)
+            if val is not None:
+                statistics[stat_key] = float(val)
 
 
 def _backtest_model(
@@ -444,6 +508,8 @@ def _backtest_model(
             "hold_days": hold_days,
             "take_profit": take_profit,
             "stop_loss": stop_loss,
+            # path_class 专用：否决阈值透传，非 path_class 下保持默认 1.0（等效关闭）
+            "veto_threshold": params.veto_threshold,
         },
         signal_df,
     )
@@ -474,6 +540,10 @@ def _backtest_model(
             "equity_curve": [],
         }
     statistics = engine.calculate_statistics()
+    # 将训练期验证指标（best_val_rank_ic / best_val_tp_auc / best_val_sl_auc）并入统计，
+    # 供 _core_score 读取。这些指标存储在 _history.json 的 best_epoch 行，而非 checkpoint 本体。
+    # 对称接线：regression 与 path_class 均从 history 读取，结构完全一致。
+    _merge_training_metrics(statistics, model_name, checkpoint)
     statistics.update({
         "objective": objective,
         "label_spec": label_spec,
@@ -678,7 +748,8 @@ def _gate_result(
     Args:
         folds: WF 各折结果列表，每项含 candidate_score/score_delta 等键。
         gate: 晋级门禁配置（CNNPromotionGate）。
-        objective: 训练目标，"classification" 或 "regression"。
+        objective: 训练目标，"classification" | "regression" | "path_class"；
+            门禁判定本身不区分目标（目标间的评分差异已在 _core_score 中体现）。
         has_production: 当前是否存在生产模型；False 时跳过对比类门禁。
 
     Returns:

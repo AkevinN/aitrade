@@ -276,6 +276,11 @@ export interface BacktestStatistics {
   t_plus1?: boolean
   label_spec?: Record<string, unknown>
   consistency_warnings?: string[]
+  /**
+   * 否决买入次数（path_class 模型回测回传）：本次回测中因 prob_sl ≥ veto_threshold
+   * 而被放弃的买入信号数量；非 path_class 模型或关闭否决时为 undefined。
+   */
+  veto_count?: number
 }
 
 export interface CNNTrainRequest {
@@ -296,8 +301,13 @@ export interface CNNTrainRequest {
   train_ratio?: number
   /** 损失加权：none=普通BCE；magnitude=按|未来收益|加权（仅分类） */
   loss_weighting?: 'none' | 'magnitude'
-  /** 预测目标：classification=方向二分类；regression=直接预测涨跌幅 */
-  objective?: 'classification' | 'regression'
+  /**
+   * 预测目标：
+   * - `classification`：方向二分类，输出上涨概率；
+   * - `regression`：直接预测涨跌幅；
+   * - `path_class`：路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌），需搭配 OCO 标签。
+   */
+  objective?: 'classification' | 'regression' | 'path_class'
 }
 
 // CSV Import types

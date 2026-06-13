@@ -3,7 +3,7 @@
 //
 // - mock alphaService.getDataResources 返回小型 DataResourceList（含
 //   raw_bars / raw_ticks / derived_bars 三类，互不相同的合约）。
-// - 断言可用证券数量文案渲染（“已有 N 个证券的本地数据可用”）。
+// - 断言可用证券数量文案渲染（"已有 N 个证券的本地数据可用"）。
 // - 打开目标证券 Select，断言来自三类来源的合约都作为可选项出现，
 //   证明经由共享 Hook 的归并端到端可用。
 //
@@ -66,6 +66,7 @@ vi.mock('../../api/cnn', () => ({
     train: (req: unknown) => train(req),
     getModel: vi.fn(),
     deleteModel: vi.fn(),
+    getModelArchitecture: vi.fn(),
   },
 }))
 
@@ -85,6 +86,65 @@ function renderPage(state?: Record<string, unknown>) {
     </QueryClientProvider>,
   )
 }
+
+// ── 7.4 path_class 选中后 label 锁定 OCO ─────────────────────────────────────
+//
+// 验证策略：
+// AntD Select 虚拟列表在 jsdom（容器高度为 0）中可能只渲染少数选项。
+// 通过给容器元素的 getBoundingClientRect 提供足够高度，让虚拟列表渲染所有选项。
+// 这是 rc-virtual-list 在测试环境中的标准 workaround。
+describe('CNNTrain path_class：选中后 label 模式锁定为 OCO', () => {
+  beforeEach(() => {
+    getDataResources.mockClear()
+    runProfiling.mockReset()
+    listProfilingArtifacts.mockReset()
+    listProfilingArtifacts.mockResolvedValue([])
+    train.mockReset()
+
+  })
+
+  it('选中 path_class 后「标签模式」Select 被禁用且值为 OCO', async () => {
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('已有 3 个证券的本地数据可用')
+
+    // 找到「预测目标」Select（当前显示值 title 为第一个选项 label）
+    const objectiveSelectEl = screen.getByTitle('方向分类（输出上涨概率）')
+    await user.click(objectiveSelectEl)
+    // 等待 dropdown 出现（AntD 把 portal 挂到 document.body）
+    await screen.findByRole('listbox')
+
+    // AntD Select 在 rc-select 中将 role=listbox 的 a11y 容器渲染为隐藏节点（height:0），
+    // 只保留 activeIndex±1 共 3 个选项；因 activeIndex=0（初始选中第一项），只渲染第 0/1 项。
+    // 第三个选项（path_class，index=2）在 a11y listbox 中不可见。
+    //
+    // 改为在视觉 dropdown（.ant-select-dropdown 下的 .ant-select-item）中查找，
+    // 视觉列表用 rc-virtual-list 渲染，listHeight=256 足以容纳 3 个选项（高度不为 0 时全部渲染）。
+    // 在 jsdom（listHeight prop=256, 实际高度也为 256）中应全部渲染。
+    const dropdown = document.querySelector('.ant-select-dropdown')
+    if (!dropdown) throw new Error('ant-select-dropdown not found')
+    const pathClassOpt = Array.from(dropdown.querySelectorAll('.ant-select-item')).find(
+      (el) => el.textContent === '路径形态分类（四类剧本概率）',
+    )
+    if (!pathClassOpt) throw new Error('path_class option not found in dropdown')
+    await user.click(pathClassOpt)
+
+    // 页面应出现 path_class 锁定提示
+    expect(
+      await screen.findByText('路径形态分类依赖 OCO 三重障碍标签，已自动锁定。'),
+    ).toBeInTheDocument()
+
+    // 标签模式的 Select 当前值应被设置为 OCO（通过 title 属性查找）
+    expect(screen.getByTitle('OCO 止盈止损（路径依赖）')).toBeInTheDocument()
+
+    // 断言「标签模式」Select 的容器已被 disabled：
+    // AntD Select 在禁用时会为 .ant-select 元素添加 .ant-select-disabled 类。
+    // getByTitle 找到的是内部 input，要向上找到 .ant-select 容器再检查类名。
+    const ocoSelectInput = screen.getByTitle('OCO 止盈止损（路径依赖）')
+    const antSelectContainer = ocoSelectInput.closest('.ant-select')
+    expect(antSelectContainer).toHaveClass('ant-select-disabled')
+  })
+})
 
 describe('CNNTrain 合约可用性渲染（共享 Hook 回归）', () => {
   beforeEach(() => {

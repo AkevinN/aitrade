@@ -146,7 +146,13 @@ class BacktestRunRequest(BaseModel):
 
 
 class CNNBacktestRequest(BaseModel):
-    """CNN model backtest request."""
+    """CNN 模型回测请求体，同时服务 classification / regression / path_class 三种 objective。
+
+    统一封装回测所需的模型名称、资金、日期区间、出场策略及交易成本参数。
+    ``veto_threshold`` 仅在 objective='path_class' 时生效：当「先触止损」类概率
+    prob_sl 达到该阈值时否决买入信号；其他 objective 下该字段无意义，保留默认值 1.0
+    即可保持与旧版行为完全兼容。
+    """
     name: str = Field(description="回测名称")
     model: str = Field(description="CNN 模型名称")
     capital: float = Field(default=1_000_000, description="初始资金")
@@ -166,6 +172,16 @@ class CNNBacktestRequest(BaseModel):
     take_profit: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止盈幅度（0.02=+2%），0=不启用")
     stop_loss: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止损幅度（0.03=-3%），0=不启用")
     t_plus1: bool = Field(default=False, description="是否启用 T+1 卖出限制（当日买入不可当日卖出）")
+    veto_threshold: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "path_class 专用：先触止损概率 prob_sl >= 该值时否决买入；"
+            "默认 1.0 等效关闭否决（仅 prob_sl 饱和为 1.0 的极端行会被否决，属可接受边界）。"
+            "对单标量模型无效。"
+        ),
+    )
 
 
 class CNNPredictRequest(BaseModel):
@@ -201,9 +217,13 @@ class CNNTrainRequest(BaseModel):
         default="none",
         description="损失加权：none=普通BCE；magnitude=按|未来收益|加权，让大波动样本主导梯度（仅分类）",
     )
-    objective: Literal["classification", "regression"] = Field(
+    objective: Literal["classification", "regression", "path_class"] = Field(
         default="classification",
-        description="预测目标：classification=方向二分类(输出概率)；regression=直接预测涨跌幅(输出预测收益)",
+        description=(
+            "预测目标：classification=方向二分类（输出概率）；"
+            "regression=直接预测涨跌幅（输出预测收益）；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
+        ),
     )
 
 

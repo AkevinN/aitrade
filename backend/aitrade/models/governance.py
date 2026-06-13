@@ -58,6 +58,9 @@ class CNNBacktestParams(BaseModel):
 
     控制信号阈值（buy_threshold / sell_threshold）、A 股交易成本（佣金/印花税/滑点）
     以及出场模式（threshold / fixed_hold / oco / auto）；T+1 默认开启贴近 A 股现实。
+
+    ``veto_threshold`` 仅在 objective='path_class' 时生效：当「先触止损」类概率
+    prob_sl >= 该值时否决买入；默认 1.0 等效关闭（向后兼容）。
     """
 
     buy_threshold: float = 0.6
@@ -71,6 +74,15 @@ class CNNBacktestParams(BaseModel):
     take_profit: float = Field(default=0.0, ge=0, lt=1)
     stop_loss: float = Field(default=0.0, ge=0, lt=1)
     t_plus1: bool = False
+    veto_threshold: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "path_class 专用：先触止损概率 prob_sl >= 该值时否决买入；"
+            "默认 1.0 等效关闭否决（向后兼容）。"
+        ),
+    )
 
 
 class CNNPromotionGate(BaseModel):
@@ -102,7 +114,13 @@ class CNNWalkForwardRequest(BaseModel):
     train_days: int = Field(default=720, ge=30)
     test_days: int = Field(default=90, ge=1)
     step_days: Optional[int] = Field(default=None, ge=1)
-    objective: Literal["classification", "regression"] = "classification"
+    objective: Literal["classification", "regression", "path_class"] = Field(
+        default="classification",
+        description=(
+            "预测目标：classification=方向二分类；regression=涨跌幅回归；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
+        ),
+    )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)
     observation_groups: list[ObservationGroup] = Field(default_factory=list)
     training_params: CNNTrainingParams = Field(default_factory=CNNTrainingParams)
@@ -154,7 +172,13 @@ class CNNGovernanceReplayRequest(BaseModel):
     evaluation_period_days: int = Field(default=30, ge=1)
     test_period_days: int = Field(default=30, ge=1)
     capital: float = Field(default=1_000_000, gt=0)
-    objective: Literal["classification", "regression"] = "classification"
+    objective: Literal["classification", "regression", "path_class"] = Field(
+        default="classification",
+        description=(
+            "预测目标：classification=方向二分类；regression=涨跌幅回归；"
+            "path_class=路径形态四分类（先触止盈/先触止损/到期小涨/到期小跌，需配合 label_spec.mode='oco'）"
+        ),
+    )
     label_spec: LabelSpec = Field(default_factory=LabelSpec)
     observation_groups: list[ObservationGroup] = Field(default_factory=list)
     training_params: CNNTrainingParams = Field(default_factory=CNNTrainingParams)

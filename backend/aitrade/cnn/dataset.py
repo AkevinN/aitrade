@@ -27,6 +27,23 @@ from .features import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# 路径多分类标签常量（path_class objective）
+# ---------------------------------------------------------------------------
+# 四类出场路径对应的浮点标签值（y 数组以 float32 存储，trainer 侧再转 long）：
+#   0 = 止盈先触发（TP First）
+#   1 = 止损先触发（SL First）
+#   2 = 时间止损 + 方向向上（Time Exit, Up）
+#   3 = 时间止损 + 方向向下（Time Exit, Down）
+PATH_TP_FIRST: float = 0.0
+PATH_SL_FIRST: float = 1.0
+PATH_TIME_UP: float = 2.0
+PATH_TIME_DOWN: float = 3.0
+
+# 类别名称元组——顺序与上方 PATH_TP_FIRST..PATH_TIME_DOWN 的 0~3 编码一一对应。
+# 供 trainer 侧构建指标字典时共享，消除硬编码。
+PATH_CLASS_NAMES: tuple[str, ...] = ("tp_first", "sl_first", "time_up", "time_down")
+
 
 def _normalize_label_spec(label_spec: dict[str, Any] | None) -> dict[str, Any]:
     """规整 label 配置字典，补全缺省值并统一 enum 为字符串值。
@@ -205,6 +222,33 @@ def _oco_label_value(
     标签口径：
     - regression：label = 真实出场收益 ret（先触止盈/止损即按触发价计，天然路径依赖）。
     - classification：止盈触发→1，止损触发→0，时间止损→按 ret 符号并套用去噪阈值。
+    - path_class：四分类路径标签（使用模块级常量 PATH_TP_FIRST / PATH_SL_FIRST /
+      PATH_TIME_UP / PATH_TIME_DOWN，值为 0.0~3.0，trainer 侧转 long 后用 CrossEntropyLoss）：
+        * reason=="tp"  → PATH_TP_FIRST（0.0）
+        * reason=="sl"  → PATH_SL_FIRST（1.0）
+        * reason=="time" 且 ret >  threshold → PATH_TIME_UP（2.0）
+        * reason=="time" 且 ret < -threshold → PATH_TIME_DOWN（3.0）
+        * dead-zone（time 且 |ret| <= threshold）：
+            neutral_policy=="negative" → PATH_TIME_DOWN；否则 → "neutral"（丢弃）
+      threshold=0 的边界：ret>0→TIME_UP，ret<0→TIME_DOWN，ret==0 落 dead-zone（按 neutral_policy）；
+      这与 classification 的 threshold<=0 "ret>0→1 否则→0" 有意不同——ret==0 无方向信息。
+
+    Args:
+        anchor: 锚点下标；建仓时刻为 anchor+1。
+        open_series: 目标证券开盘价序列，形状 [T]。
+        high_series: 目标证券最高价序列，形状 [T]。
+        low_series: 目标证券最低价序列，形状 [T]。
+        label_spec: 规整后的 OCO label 配置字典（take_profit/stop_loss/max_hold/stop_first）。
+        objective: "regression" | "classification" | "path_class"。
+        threshold: 去噪 dead-zone 阈值（收益率，>=0）。
+        neutral_policy: "drop"（dead-zone 样本丢弃）或 "negative"（并入下跌/TIME_DOWN）。
+
+    Returns:
+        (status, label_value, future_return) 三元组：
+        - status: "ok" | "neutral" | "skip"。
+        - label_value: 有效时为浮点标签（regression→收益率；classification→0/1；
+          path_class→0/1/2/3）；无效时为 None。
+        - future_return: 实际出场收益率；skip 时为 None。
     """
     entry_index = anchor + 1
     if entry_index >= len(open_series):
@@ -235,6 +279,22 @@ def _oco_label_value(
         if threshold > 0.0 and abs(ret) <= threshold:
             return ("neutral", None, ret)
         return ("ok", ret, ret)
+
+    if objective == "path_class":
+        # 四分类路径标签：按 OCO 出场原因细分方向
+        if reason == "tp":
+            return ("ok", PATH_TP_FIRST, ret)
+        if reason == "sl":
+            return ("ok", PATH_SL_FIRST, ret)
+        # reason == "time"：按出场收益方向分 TIME_UP / TIME_DOWN；dead-zone 按 neutral_policy
+        if ret > threshold:
+            return ("ok", PATH_TIME_UP, ret)
+        if ret < -threshold:
+            return ("ok", PATH_TIME_DOWN, ret)
+        # dead-zone：|ret| <= threshold（含 threshold=0 时 ret==0 的情形）
+        if neutral_policy == "negative":
+            return ("ok", PATH_TIME_DOWN, ret)
+        return ("neutral", None, ret)
 
     # 分类：优先按触发原因定方向（与实盘止盈止损对齐）
     if reason == "tp":
@@ -359,19 +419,23 @@ def build_dataset(
         input_data_kind: 数据种类，"bar"（K 线）或 "tick"（Tick 聚合）。
         input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
         label_spec: label 配置字典（mode/horizon/threshold/price_ref 等）；None → 默认 next_bar。
-        objective: 训练目标，"classification"（方向二分类）或 "regression"（收益回归）。
+        objective: 训练目标，"classification"（方向二分类）、"regression"（收益回归）
+            或 "path_class"（四分类路径标签，需配合 label_spec.mode="oco"）。
 
     Returns:
         四元组 ``(X, y, group_mask, info)``：
         - X: 形状 [N, C, T, S, G]，float32，归一化前的特征张量（归一化在 trainer 中进行）。
-        - y: 形状 [N]，float32；分类为 {0.0, 1.0}，回归为连续收益率。
+        - y: 形状 [N]，float32；分类为 {0.0, 1.0}，回归为连续收益率，
+          path_class 为 {0.0, 1.0, 2.0, 3.0}（trainer 侧转 long 后用 CrossEntropyLoss）。
         - group_mask: 形状 [1, 1, 1, S, G]，float32；有效证券位置为 1.0，占位为 0.0。
         - info: 元数据字典，含 symbols/groups/feature_names/dates/sample_anchor_dates 等，
           供 trainer 写入 checkpoint 和前端展示；sample_returns 键含每样本带符号收益，
           仅用于幅度加权训练，不写入 checkpoint。
+          path_class 时额外含 "class_distribution" 键（tp_first/sl_first/time_up/time_down 各类样本数）。
 
     Raises:
-        ValueError: 证券本地数据缺失、公共时间步不足、无法生成任何有效样本等情况时抛出。
+        ValueError: 证券本地数据缺失、公共时间步不足、无法生成任何有效样本等情况时抛出；
+            objective="path_class" 且 label_spec.mode≠"oco" 时抛出（在数据加载前触发）。
     """
     if on_progress:
         on_progress(5, "解析观测分组...")
@@ -382,6 +446,14 @@ def build_dataset(
         vt_symbols=vt_symbols,
     )
     label_spec = _normalize_label_spec(label_spec)
+
+    # path_class 路径标签依赖三重障碍判定，必须与 oco 标签模式配合使用；
+    # 此校验在数据加载之前触发，属性测试无需真实行情即可覆盖。
+    if objective == "path_class" and label_spec.get("mode") != "oco":
+        raise ValueError(
+            "objective=path_class 需要 label_spec.mode=oco"
+            "（路径标签依赖三重障碍判定）"
+        )
 
     ordered_symbols: list[str] = []
     for group in groups:
@@ -572,15 +644,31 @@ def build_dataset(
     X = np.array(X_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.float32)
 
+    # path_class 统计四类样本数，写入 info 供监控与展示
+    class_distribution: dict[str, int] | None = None
+    if objective == "path_class":
+        # PATH_CLASS_NAMES 顺序与 PATH_TP_FIRST..PATH_TIME_DOWN 的 0~3 编码一一对应
+        _labels = (PATH_TP_FIRST, PATH_SL_FIRST, PATH_TIME_UP, PATH_TIME_DOWN)
+        class_distribution = {
+            name: int(np.sum(y == lbl))
+            for name, lbl in zip(PATH_CLASS_NAMES, _labels, strict=True)
+        }
+
     if on_progress:
-        neutral_note = f", 去噪丢弃={skipped_neutral}" if threshold > 0 else ""
+        neutral_note = f", 去噪丢弃={skipped_neutral}" if skipped_neutral > 0 else ""
         if objective == "regression":
             label_stat = f"收益均值={y.mean():.3%}, 标准差={y.std():.3%}"
+        elif objective == "path_class" and class_distribution is not None:
+            dist = class_distribution
+            label_stat = (
+                f"tp={dist['tp_first']}, sl={dist['sl_first']}, "
+                f"time_up={dist['time_up']}, time_down={dist['time_down']}"
+            )
         else:
             label_stat = f"正样本比例={y.mean():.2%}"
         on_progress(55, f"样本构建完成: X={X.shape}, {label_stat}{neutral_note}")
 
-    return X, y, group_mask, {
+    info: dict[str, Any] = {
         "symbols": symbols,
         "groups": groups,
         "target_symbol": target_symbol,
@@ -603,3 +691,6 @@ def build_dataset(
         # 每样本带符号未来收益（与 X/y 同序），供训练侧做幅度加权；不写入 checkpoint
         "sample_returns": returns_list,
     }
+    if class_distribution is not None:
+        info["class_distribution"] = class_distribution
+    return X, y, group_mask, info
