@@ -761,6 +761,10 @@ def run_walk_forward_evaluate(
             "fold": idx,
             "train": {"start": train_start.isoformat(), "end": train_end.isoformat()},
             "test": {"start": test_start.isoformat(), "end": test_end.isoformat()},
+            # candidate_model / candidate_statistics 取第 0 个种子作"代表"展示用；
+            # 晋级判定真正消费的 candidate_score 是跨种子均值（cross_seed.mean），
+            # 二者在多种子分歧时不会逐项对账一致——完整的逐种子数据见
+            # candidate_seed_statistics / candidate_seed_scores / cross_seed。
             "candidate_model": seed_models[0],
             "candidate_models": seed_models,
             "candidate_statistics": seed_statistics[0],
