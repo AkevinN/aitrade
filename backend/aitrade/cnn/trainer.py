@@ -363,6 +363,7 @@ def train_cnn_model(
     label_spec: dict[str, Any] | None = None,
     loss_weighting: str = "none",
     objective: str = "classification",
+    seed: int = 42,
 ) -> dict[str, Any]:
     """训练分组感知的多尺度行情 CNN 并持久化 checkpoint 与训练历史。
 
@@ -399,6 +400,8 @@ def train_cnn_model(
             - "regression"：HuberLoss，输出无界预测收益 [B,1]。
             - "path_class"：CrossEntropyLoss，输出四分类路径 logits [B,4]；
               需配合 label_spec.mode="oco"。
+        seed: 随机种子，用于 torch.manual_seed 与 np.random.seed，保证同 seed 训练可复现；
+            不同 seed 产生不同初始化与 DataLoader shuffle，可用于多种子集成评估；默认 42。
 
     Returns:
         训练结果字典，含 name/model_path/history_path/best_epoch/best_val_loss/
@@ -432,8 +435,8 @@ def train_cnn_model(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(42)
-    np.random.seed(42)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     X, y, group_mask, info = build_dataset(
         vt_symbols=vt_symbols,
@@ -766,6 +769,7 @@ def train_cnn_model(
             "train_ratio": train_ratio,
             "loss_weighting": loss_weighting,
             "objective": objective,
+            "seed": seed,
         },
         "normalization": normalization,
         "dataset_info": dataset_info,
