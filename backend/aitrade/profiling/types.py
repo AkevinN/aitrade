@@ -38,7 +38,13 @@ class MetricValue(BaseModel):
 
 
 class MetricBlock(BaseModel):
-    """一组同类指标（四个 Metric_Block 之一）。"""
+    """一组同类指标（四个 Metric_Block 之一）。
+
+    Attributes:
+        block:   指标块类别，取数据质量 / 流动性 / 波动性 / 可预测性之一。
+        metrics: 该块下的逐项指标列表；可为空（无可计算指标时）。
+        level:   该块的等级判定（如流动性 高/中/低、波动等级）；无判定时为 None。
+    """
 
     block: Literal["data_quality", "liquidity", "volatility", "predictability"]
     metrics: list[MetricValue] = Field(default_factory=list)

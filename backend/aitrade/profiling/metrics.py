@@ -432,6 +432,7 @@ def atr_ratio(df: pl.DataFrame, window: int) -> MetricResult:
     closes = df.select(pl.col("close")).to_series().to_list()
 
     def _bad(x: float | None) -> bool:
+        """判断单个价格值是否缺失或为 NaN（True 表示该值不可用、应跳过）。"""
         return x is None or (isinstance(x, float) and math.isnan(x))
 
     true_ranges: list[float] = []
