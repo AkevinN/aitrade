@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
 import polars as pl
 
 from ..alpha import AlphaLab
@@ -33,6 +34,11 @@ from .predictor import predict_cnn_signals
 from .storage import CNN_MODEL_DIR
 from .strategy import CNNSignalStrategy
 from .trainer import train_cnn_model
+
+
+# 多种子治理的基准种子。第 seed_index 个重复试验使用 seed=BASE_SEED+seed_index，
+# 保证 seed_index=0 退化为单种子时与历史硬编码默认（train_cnn_model seed=42）一致。
+BASE_SEED = 42
 
 
 def _now_id(prefix: str) -> str:
@@ -575,21 +581,25 @@ def _train_governance_model(
     seed_index: int = 0,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """在指定时间区间训练一个治理专用 CNN 模型。
+    """在指定时间区间训练一个治理专用 CNN 模型（按 seed_index 选定随机种子）。
 
-    从 CNNWalkForwardRequest 中提取全量证券列表，调用 train_cnn_model 完成训练，
-    并在返回结果中附上 seed_index（用于重复试验的区分）。
+    从 CNNWalkForwardRequest 中提取全量证券列表，将 ``seed_index`` 映射为
+    ``seed = BASE_SEED + seed_index`` 下传 train_cnn_model：seed_index 不再只是
+    返回字典里的标记，而是真正驱动权重初始化与 DataLoader shuffle，使不同
+    seed_index 训出可分辨的不同模型（多种子治理的基础）。seed_index=0 退化为
+    单种子，等价于历史的硬编码默认种子。
 
     Args:
         req: WF/OOS 评估请求，含目标证券、观测分组、训练参数等。
         model_name: 本次训练保存的模型名称（含日期范围后缀由 train_cnn_model 自动追加）。
         start: 训练数据起始日期（含）。
         end: 训练数据结束日期（含）。
-        seed_index: 重复试验序号；写入返回字典，不影响训练本身。
+        seed_index: 重复试验序号（从 0 起）；映射为实际种子 BASE_SEED+seed_index
+            下传训练，并写入返回字典供溯源。
         on_progress: 进度回调 ``(percent, message)``，可为 None。
 
     Returns:
-        train_cnn_model 的返回字典附加 seed_index 键。
+        train_cnn_model 的返回字典附加 seed_index 键（实际所用种子为 BASE_SEED+seed_index）。
     """
     target = req.target_symbol
     symbols = [target]
@@ -615,26 +625,64 @@ def _train_governance_model(
         label_spec=_label_spec_dict(req.label_spec),
         loss_weighting=req.training_params.loss_weighting,
         objective=req.objective,
+        seed=BASE_SEED + seed_index,
         on_progress=on_progress,
     ) | {"seed_index": seed_index}
+
+
+def _cross_seed_dispersion(scores: list[float]) -> dict[str, Any]:
+    """汇总同一折内多个随机种子的得分，给出均值/标准差/样本数。
+
+    用于衡量候选模型对随机种子的敏感度：std 越大说明该折结果越不稳定、
+    越依赖具体种子，治理决策应更谨慎。门禁与生产对比统一消费这里的 mean，
+    避免单一幸运种子蒙混过关。
+
+    Args:
+        scores: 同一折内各种子的核心得分列表（_core_score 输出）。n=1 即单种子。
+
+    Returns:
+        字典 ``{"mean": float, "std": float, "n": int}``：
+        - n: 种子数（len(scores)）；
+        - mean: 各种子得分均值，空列表时为 0.0；
+        - std: 总体标准差（ddof=0），n<2 或空列表时恒为 0.0。
+
+    Example:
+        >>> _cross_seed_dispersion([0.2, 0.4, 0.6])
+        {'mean': 0.4, 'std': 0.163..., 'n': 3}
+        >>> _cross_seed_dispersion([0.5])
+        {'mean': 0.5, 'std': 0.0, 'n': 1}
+    """
+    n = len(scores)
+    if n == 0:
+        return {"mean": 0.0, "std": 0.0, "n": 0}
+    arr = np.asarray(scores, dtype=float)
+    mean = float(arr.mean())
+    std = float(arr.std(ddof=0)) if n > 1 else 0.0
+    return {"mean": mean, "std": std, "n": n}
 
 
 def run_walk_forward_evaluate(
     req: CNNWalkForwardRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """执行 Walk-Forward/OOS 多折评估并持久化评估报告。
+    """执行 Walk-Forward/OOS 多折评估并持久化评估报告（支持折内多种子）。
 
-    按 (train_days, test_days, step_days) 生成滚动窗口，每折训练候选模型并在
-    测试区间回测，与当前生产模型对比核心得分，最终汇总折胜率和平均得分提升，
-    并应用 promotion_gate 判断是否通过晋级门禁。
+    按 (train_days, test_days, step_days) 生成滚动窗口。每折对 ``req.n_seeds`` 个
+    随机种子（seed=BASE_SEED+seed_index）各训一个独立模型并在测试区间回测，候选
+    得分取这些种子核心得分的均值（``cross_seed.mean``），并记录跨种子标准差
+    （``cross_seed.std``）衡量结果对种子的敏感度。门禁与生产对比均消费跨种子均值，
+    避免单一幸运种子蒙混过关。生产模型已固定，每折只回测一次。最终汇总折胜率、
+    平均得分提升与平均跨种子波动，并应用 promotion_gate 判断是否通过晋级门禁。
 
     Args:
-        req: WF/OOS 评估请求，含时间区间、训练参数、回测参数和晋级门禁配置。
+        req: WF/OOS 评估请求，含时间区间、训练参数、回测参数、晋级门禁与
+            ``n_seeds``（每折种子数，<1 时按 1 兜底）。
         on_progress: 进度回调 ``(percent, message)``，可为 None。
 
     Returns:
-        评估报告字典，含 report_id/type/folds/summary 等字段；已持久化到 store。
+        评估报告字典，含 report_id/type/folds/summary 等字段；每折附
+        ``cross_seed`` ``{mean,std,n}`` 与 ``candidate_seed_scores``，summary 附
+        ``n_seeds`` 与 ``avg_cross_seed_std``；已持久化到 store。
 
     Raises:
         ValueError: 无法生成 walk-forward 窗口（日期范围或窗口参数不合理）时抛出。
@@ -646,6 +694,7 @@ def run_walk_forward_evaluate(
 
     production = store.get_production()
     production_model = req.production_model or production.get("model_name") or ""
+    n_seeds = max(1, req.n_seeds)
     folds: list[dict[str, Any]] = []
     candidate_wins = 0
     score_deltas: list[float] = []
@@ -655,29 +704,45 @@ def run_walk_forward_evaluate(
         train_start, train_end = window["train"]
         test_start, test_end = window["test"]
         if on_progress:
-            on_progress(5 + 85 * (idx - 1) / total_steps, f"WF {idx}/{total_steps}: 训练 {train_start}~{train_end}")
+            on_progress(
+                5 + 85 * (idx - 1) / total_steps,
+                f"WF {idx}/{total_steps}: 训练 {train_start}~{train_end}（{n_seeds} 个种子）",
+            )
 
-        model_name = f"{req.name}_wf{idx}_{uuid.uuid4().hex[:4]}"
-        train_result = _train_governance_model(
-            req,
-            model_name=model_name,
-            start=train_start,
-            end=train_end,
-        )
-        actual_model = str(train_result["name"])
-        candidate_bt = _backtest_model(
-            model_name=actual_model,
-            name=f"{req.name}_wf{idx}_candidate",
-            start=test_start,
-            end=test_end,
-            capital=1_000_000,
-            params=req.backtest_params,
-        )
-        candidate_score = _core_score(candidate_bt.get("statistics", {}), req.objective)
+        # 折内对 n_seeds 个种子各训一个模型并回测，收集核心得分；
+        # 候选得分取跨种子均值，避免单个幸运种子主导晋级判定。
+        seed_scores: list[float] = []
+        seed_models: list[str] = []
+        seed_statistics: list[dict[str, Any]] = []
+        for seed_index in range(n_seeds):
+            model_name = f"{req.name}_wf{idx}_s{seed_index}_{uuid.uuid4().hex[:4]}"
+            train_result = _train_governance_model(
+                req,
+                model_name=model_name,
+                start=train_start,
+                end=train_end,
+                seed_index=seed_index,
+            )
+            actual_model = str(train_result["name"])
+            candidate_bt = _backtest_model(
+                model_name=actual_model,
+                name=f"{req.name}_wf{idx}_s{seed_index}_candidate",
+                start=test_start,
+                end=test_end,
+                capital=1_000_000,
+                params=req.backtest_params,
+            )
+            seed_models.append(actual_model)
+            seed_statistics.append(candidate_bt.get("statistics", {}))
+            seed_scores.append(_core_score(candidate_bt.get("statistics", {}), req.objective))
+
+        cross_seed = _cross_seed_dispersion(seed_scores)
+        candidate_score = cross_seed["mean"]
 
         production_bt: dict[str, Any] | None = None
         production_score: float | None = None
         if production_model and (CNN_MODEL_DIR / f"{production_model}.pt").exists():
+            # 生产模型已固定，无需多种子重复，单次回测即可。
             production_bt = _backtest_model(
                 model_name=production_model,
                 name=f"{req.name}_wf{idx}_production",
@@ -696,9 +761,13 @@ def run_walk_forward_evaluate(
             "fold": idx,
             "train": {"start": train_start.isoformat(), "end": train_end.isoformat()},
             "test": {"start": test_start.isoformat(), "end": test_end.isoformat()},
-            "candidate_model": actual_model,
-            "candidate_statistics": candidate_bt.get("statistics", {}),
+            "candidate_model": seed_models[0],
+            "candidate_models": seed_models,
+            "candidate_statistics": seed_statistics[0],
+            "candidate_seed_statistics": seed_statistics,
+            "candidate_seed_scores": seed_scores,
             "candidate_score": candidate_score,
+            "cross_seed": cross_seed,
             "production_model": production_model,
             "production_statistics": production_bt.get("statistics", {}) if production_bt else None,
             "production_score": production_score,
@@ -719,6 +788,10 @@ def run_walk_forward_evaluate(
             "candidate_win_count": candidate_wins,
             "candidate_win_rate": round(candidate_wins / len(folds), 4) if folds else 0.0,
             "avg_score_delta": round(sum(score_deltas) / len(score_deltas), 6) if score_deltas else None,
+            "n_seeds": n_seeds,
+            "avg_cross_seed_std": (
+                round(sum(f["cross_seed"]["std"] for f in folds) / len(folds), 6) if folds else None
+            ),
             "passed": pass_result["passed"],
             "reasons": pass_result["reasons"],
         },
@@ -1028,6 +1101,19 @@ def run_governance_replay(
         raise ValueError("回放区间为空")
 
     def train_for_cycle(prefix: str, train_end: date) -> str:
+        """为回放某一周期训练单个治理模型并返回落盘后的模型名。
+
+        回放刻意使用单种子（seed_index=0，即 seed=BASE_SEED），保证回放结果
+        确定可复现，且不让"每周期×多种子"的开销在长区间回放中爆炸；多种子的
+        鲁棒性评估留给 run_walk_forward_evaluate 的折内循环。
+
+        Args:
+            prefix: 本周期模型名前缀（已含唯一后缀，避免覆盖）。
+            train_end: 该周期训练窗结束日期；起点回退 initial_train_days 天。
+
+        Returns:
+            train_cnn_model 落盘后的实际模型名（含日期范围后缀）。
+        """
         train_start = train_end - timedelta(days=req.initial_train_days)
         train_req = CNNWalkForwardRequest(
             name=prefix,
@@ -1045,7 +1131,11 @@ def run_governance_replay(
             backtest_params=req.backtest_params,
             promotion_gate=req.promotion_gate,
         )
-        return str(_train_governance_model(train_req, model_name=prefix, start=train_start, end=train_end)["name"])
+        return str(
+            _train_governance_model(
+                train_req, model_name=prefix, start=train_start, end=train_end, seed_index=0
+            )["name"]
+        )
 
     if on_progress:
         on_progress(5, "训练回放初始模型...")
