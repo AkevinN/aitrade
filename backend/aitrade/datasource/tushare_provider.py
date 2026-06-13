@@ -236,6 +236,14 @@ class TushareProvider(BaseProvider):
         )
 
     def get_status(self) -> ProviderStatus:
+        """返回数据源当前可用状态，供上层判断能否取数。
+
+        状态由初始化情况与 token 配置推导，不发起任何网络请求。
+
+        Returns:
+            未初始化且无 token 时返回 ``NOT_CONFIGURED``；未初始化但已配置
+            token 时返回 ``UNAVAILABLE``；已成功初始化返回 ``AVAILABLE``。
+        """
         if not self._inited:
             if not self._token:
                 return ProviderStatus.NOT_CONFIGURED
@@ -243,6 +251,12 @@ class TushareProvider(BaseProvider):
         return ProviderStatus.AVAILABLE
 
     def get_supported_categories(self) -> list[DataCategory]:
+        """声明本数据源支持的数据类别，供注册中心路由请求。
+
+        Returns:
+            固定包含合约、历史 K 线、交易日历、基本面、参考数据
+            （含复权因子）五类的 DataCategory 列表。
+        """
         return [
             DataCategory.CONTRACT,
             DataCategory.BAR_HISTORY,
@@ -258,6 +272,20 @@ class TushareProvider(BaseProvider):
         product_type: str = "",
         exchange: str = "",
     ) -> list[ContractInfo] | None:
+        """批量获取合约列表，按需覆盖股票/指数/期货/基金四类。
+
+        product_type 为空时拉取全部四类并合并；否则仅拉取匹配类别。
+        每类内部任一接口抛错都会导致整体返回 None（不做部分降级）。
+
+        Args:
+            product_type: 品种过滤，接受中英文别名（"股票"/"stock"、
+                "指数"/"index"、"期货"/"futures"、"基金"/"fund"）；
+                空字符串表示全部品种。
+            exchange: 交易所过滤；空字符串表示全部交易所。
+
+        Returns:
+            合并后的 ContractInfo 列表；未初始化、请求异常或结果为空时返回 None。
+        """
         if not self._inited:
             return None
 
@@ -278,6 +306,17 @@ class TushareProvider(BaseProvider):
         return result if result else None
 
     def get_contract(self, symbol: str, exchange: str) -> ContractInfo | None:
+        """查询单只股票的合约基础信息（仅走 stock_basic 接口）。
+
+        仅适用于股票；pricetick 固定填 0.01，product_type 固定填 "股票"。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 项目标准交易所代码，如 ``"SSE"``。
+
+        Returns:
+            ContractInfo；未初始化、交易所不支持、查无此合约或请求异常时返回 None。
+        """
         if not self._inited:
             return None
 
@@ -311,6 +350,24 @@ class TushareProvider(BaseProvider):
         start: datetime,
         end: datetime | None = None,
     ) -> list[BarRecord] | None:
+        """获取单只标的的历史 K 线，自动按周期选择日/周线或分钟线接口。
+
+        日线/周线走 pro_bar；其他周期走 stk_mins 分钟接口。资产类型由
+        _detect_asset 自动推断。返回均为不复权价（adjust_type="none"），
+        结果按时间升序排列，NaN 字段填 0。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 项目标准交易所代码，如 ``"SSE"``。
+            interval: K 线周期，需在 INTERVAL_MAP 内（"d"/"w"/"1m"/"5m"/
+                "15m"/"30m"/"1h" 等）。
+            start: 起始时间（含）。
+            end: 截止时间（含）；None 表示取到当前时刻。
+
+        Returns:
+            按 datetime 升序排列的 BarRecord 列表；未初始化、交易所/周期
+            不支持、请求异常或无数据时返回 None。
+        """
         if not self._inited:
             return None
 
@@ -388,6 +445,19 @@ class TushareProvider(BaseProvider):
         start: str,
         end: str,
     ) -> list[CalendarDay] | None:
+        """获取指定交易所的交易日历（含开/休市标记与上一交易日）。
+
+        会先把项目标准交易所代码反查为 Tushare 交易所代码再请求 trade_cal。
+
+        Args:
+            exchange: 项目标准交易所代码，如 ``"SSE"``。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+
+        Returns:
+            CalendarDay 列表（含 is_open 与 pre_trade_date）；未初始化、
+            请求异常或无数据时返回 None。
+        """
         if not self._inited:
             return None
 
@@ -428,6 +498,20 @@ class TushareProvider(BaseProvider):
         start: str,
         end: str,
     ) -> list[FundamentalRecord] | None:
+        """获取单只标的的每日基本面指标（PE/PB/PS/市值/换手率等）。
+
+        数据来自 Tushare daily_basic 接口，各估值字段可能为 None（接口缺值时透传）。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 项目标准交易所代码，如 ``"SSE"``。
+            start: 起始日期字符串，格式 YYYYMMDD。
+            end: 截止日期字符串，格式 YYYYMMDD。
+
+        Returns:
+            按交易日逐条的 FundamentalRecord 列表（估值字段缺失时为 None）；
+            未初始化、交易所不支持、请求异常或无数据时返回 None。
+        """
         if not self._inited:
             return None
 
@@ -473,6 +557,20 @@ class TushareProvider(BaseProvider):
         start: str = "",
         end: str = "",
     ) -> list[dict] | None:
+        """获取单只标的的复权因子序列，用于前/后复权价计算。
+
+        start/end 为空时不带日期参数，由 Tushare 返回该合约全部历史复权因子。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 项目标准交易所代码，如 ``"SSE"``。
+            start: 起始日期字符串（YYYYMMDD）；空字符串表示不限起始。
+            end: 截止日期字符串（YYYYMMDD）；空字符串表示不限截止。
+
+        Returns:
+            形如 ``[{"trade_date": "20240101", "adj_factor": 1.23}, ...]`` 的列表；
+            未初始化、交易所不支持、请求异常或无数据时返回 None。
+        """
         if not self._inited:
             return None
 
