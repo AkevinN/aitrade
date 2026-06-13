@@ -247,9 +247,10 @@ def test_path_class_e2e_full_pipeline(tmp_path, monkeypatch) -> None:
     )
 
     # --- 断言信号帧 ---
+    # path_class 输出八列（原七列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
     expected_cols = [
         "datetime", "vt_symbol", "signal",
-        "prob_tp", "prob_sl", "prob_time_up", "prob_time_down",
+        "prob_tp", "prob_sl", "prob_time_up", "prob_time_down", "objective",
     ]
     assert signal_df.columns == expected_cols, f"信号帧列序错误: {signal_df.columns}"
     assert signal_df.height > 0, "信号帧为空，推理无输出"

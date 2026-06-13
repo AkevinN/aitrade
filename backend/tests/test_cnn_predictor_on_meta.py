@@ -119,7 +119,8 @@ def test_without_on_meta_preserves_original_contract(stub_model) -> None:
     signal_df = predict_cnn_signals(model_name=stub_model, start=START, end=END)
 
     assert isinstance(signal_df, pl.DataFrame)
-    assert signal_df.columns == ["datetime", "vt_symbol", "signal"]
+    # classification 输出四列（原三列 + objective 末列；Task 4 cnn-eval-honesty-fixes）
+    assert signal_df.columns == ["datetime", "vt_symbol", "signal", "objective"]
     assert signal_df.height > 0
     assert signal_df["vt_symbol"].unique().to_list() == [TARGET]
     # 推理点数 = total_steps - lookback + 1（区间覆盖全部对齐时间步）
