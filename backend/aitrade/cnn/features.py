@@ -26,6 +26,13 @@ FEATURE_NAMES: list[str] = [
     "high_low_ratio",
 ]
 
+ALIGN_DROP_WARN_THRESHOLD: float = 0.05
+"""多标的对齐丢弃率告警阈值。
+
+对齐丢弃率超过此值时，dataset / trainer / predictor 均会向调用方发出告警，
+提示停牌或数据缺失导致样本流失比例偏高。默认 5%。
+"""
+
 
 def check_torch_available() -> bool:
     """检查 PyTorch 是否可用。"""
@@ -230,6 +237,37 @@ def _align_frames_by_datetime(symbol_frames: dict[str, pl.DataFrame]) -> tuple[l
         raise ValueError("观测证券无法按公共时间轴对齐，请检查本地数据是否齐全")
 
     return symbols, merged.sort("datetime")
+
+
+def alignment_drop_rate(symbol_frames: dict[str, pl.DataFrame], aligned_height: int) -> float:
+    """对齐丢弃率 = (max 各标的对齐前行数 - 对齐后行数) / max 各标的行数。
+
+    单标的或空字典时返回 0.0（无跨标的对齐），因此对单标的场景调用此函数永远安全。
+    常与 `_align_frames_by_datetime` 配合使用：先对齐取得 aligned_height，再调此函数
+    测量因停牌/数据缺失导致的样本流失比例。
+
+    本函数是纯函数（只读），绝不修改 symbol_frames 中任何 DataFrame，也不触碰
+    ``_align_frames_by_datetime`` 的返回值——调用前后 merged 输出完全一致。
+
+    Args:
+        symbol_frames: 证券代码 → 对齐前 K 线帧的映射；``_align_frames_by_datetime``
+            入参相同的字典即可。
+        aligned_height: ``_align_frames_by_datetime`` 返回的 merged DataFrame 的行数，
+            即各标的公共时间步数。
+
+    Returns:
+        0.0 ~ 1.0 之间的丢弃率；单标的或空字典时返回 0.0。
+
+    Example:
+        >>> # A=50 行，B=45 行（B 有 5 天停牌），inner join 后 45 行
+        >>> dr = alignment_drop_rate({"A": frame_a, "B": frame_b}, aligned_height=45)
+        >>> # dr == (50 - 45) / 50 == 0.1
+    """
+    heights = [f.height for f in symbol_frames.values()]
+    max_h = max(heights) if heights else 0
+    if max_h <= 0 or len(heights) <= 1:
+        return 0.0
+    return max(0.0, (max_h - aligned_height) / max_h)
 
 
 def _extract_aligned_bars(aligned_df: pl.DataFrame, vt_symbol: str) -> list[dict[str, Any]]:

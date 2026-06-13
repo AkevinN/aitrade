@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime
+from ..cnn.thresholds import threshold_scale_check
 from .decision import Decision, DecisionStore
 from .decision_instant import DecisionInstant, make_signal_id
 from .notifier import Notifier
@@ -99,6 +100,7 @@ class SignalService:
         should_exit: bool = False,
         halted: bool = False,
         trigger_source: str = "",
+        objective: str | None = None,
     ) -> Decision:
         """产出该 Decision_Instant 的决策（幂等）。已存在则直接返回，不重复提醒。
 
@@ -109,6 +111,13 @@ class SignalService:
         - trigger_source 写入 Decision 字段（落盘时一并持久化，无额外 save 调用）。
         - 实测 notifier.send 返回值存入 self.last_notify_ok（None=未发送/幂等命中）。
           调用方（orchestrator）可读取该属性以落盘通知实录（R5.1）。
+
+        Args:
+            objective: 信号帧自描述的模型输出口径（``"classification"`` /
+                ``"regression"`` / ``"path_class"`` / None）。非 None 时按其口径用
+                :func:`threshold_scale_check` 自检 buy_threshold；尺度不匹配（如回归
+                模型套了 0.6 概率阈值）则该次决策标记拒绝（不产生买入），与回测
+                端点共用同一规则（回测实盘一致红线）。None（legacy 信号帧）跳过校验。
         """
         self.last_notify_ok: bool | None = None  # Wave 2c：实测通知结果
 
@@ -120,7 +129,8 @@ class SignalService:
             return existing
 
         decision = self._decide(
-            signal_id, instant, decision_bar_dt, signal, price, portfolio, vt_symbol, should_exit, halted
+            signal_id, instant, decision_bar_dt, signal, price, portfolio,
+            vt_symbol, should_exit, halted, objective,
         )
         decision.trigger_source = trigger_source  # Wave 2c：落盘前写入触发来源（一次 save）
         self.store.save(decision)
@@ -145,10 +155,12 @@ class SignalService:
         vt_symbol: str,
         should_exit: bool,
         halted: bool,
+        objective: str | None = None,
     ) -> Decision:
         """内部决策逻辑（不含幂等/持久化/通知，由 run_for_instant 包装）。
 
-        优先级：出场（should_exit + 有持仓）> 入场（空仓 + 信号达标 + 风控放行）> 持有观望。
+        优先级：出场（should_exit + 有持仓）> 阈值尺度自检拒绝 > 入场（空仓 + 信号达标 +
+        风控放行）> 持有观望。
 
         Args:
             signal_id:        本次决策的幂等键。
@@ -160,9 +172,11 @@ class SignalService:
             vt_symbol:        目标标的。
             should_exit:      是否强制出场。
             halted:           标的是否停牌/封死。
+            objective:        信号帧自描述的模型输出口径（None 跳过阈值尺度校验）。
 
         Returns:
-            Decision 对象（action ∈ buy/sell/hold）。
+            Decision 对象（action ∈ buy/sell/hold）。阈值尺度与 objective 不匹配时
+            返回 hold（标记拒绝、不产生买入）。
         """
         base = dict(signal_id=signal_id, decision_bar_dt=decision_bar_dt.isoformat(),
                     as_of=instant.as_of.isoformat(), bar_freq=instant.bar_freq,
@@ -172,6 +186,14 @@ class SignalService:
         if should_exit and portfolio.current_position > 0:
             return Decision(action="sell", volume=portfolio.current_position,
                             reason="到出场条件（与回测出场口径一致）", **base)
+
+        # 阈值尺度自检：信号帧自带 objective 时，按其口径校验 buy_threshold（与回测端点同规则）。
+        # 不匹配（如回归模型套概率阈值）→ 该次决策标记拒绝，不产生买入决策（不下单）。
+        threshold_reasons = threshold_scale_check(objective, self.buy_threshold)
+        if threshold_reasons and portfolio.current_position == 0:
+            return Decision(action="hold", volume=0,
+                            reason="阈值与模型 objective 不匹配，拒绝买入：" + "；".join(threshold_reasons),
+                            **base)
 
         # 入场：空仓且概率达标
         if portfolio.current_position == 0 and signal > self.buy_threshold:

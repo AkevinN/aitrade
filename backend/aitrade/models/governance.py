@@ -114,6 +114,12 @@ class CNNWalkForwardRequest(BaseModel):
     train_days: int = Field(default=720, ge=30)
     test_days: int = Field(default=90, ge=1)
     step_days: Optional[int] = Field(default=None, ge=1)
+    n_seeds: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="每折重复训练的随机种子数；1=单种子，>1 时折内对多个种子取均值并衡量跨种子波动",
+    )
     objective: Literal["classification", "regression", "path_class"] = Field(
         default="classification",
         description=(

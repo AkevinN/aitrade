@@ -247,6 +247,12 @@ def run_live_decision(
         signal_value = bar["signal"]
         price = bar["price"]
 
+        # 信号帧自描述的 objective（predict_cnn_signals 写入的常量列；缺列=legacy→None）。
+        # 透传给 SignalService 做阈值尺度自检（回测实盘共用 threshold_scale_check）。
+        objective: str | None = None
+        if "objective" in signal_df.columns and signal_df.height > 0:
+            objective = str(signal_df["objective"][0])
+
         # 实际 Decision_Bar 确定后据其重算 signal_id（与 run_for_instant 一致），并校正 trace 键——
         # 覆盖开头据 as_of 提前推导的临时值（处理收盘前回退到上一已收盘 bar 的情形，使 trace 与决策同键）。
         signal_id = make_signal_id(decision_bar_dt, instant.bar_freq, scheme_name, model_version)
@@ -303,6 +309,7 @@ def run_live_decision(
             should_exit=should_exit,
             halted=halted,
             trigger_source=trigger_source,
+            objective=objective,
         )
         # Wave 2c: 捕获实测通知结果（SignalService.run_for_instant 存入 last_notify_ok）。
         # None = 未发送（幂等命中/hold 路径）；True/False = send 实测返回值。

@@ -657,6 +657,23 @@ async def start_cnn_backtest(req: CNNBacktestRequest) -> dict:
     if req.buy_threshold <= req.sell_threshold:
         raise HTTPException(400, "buy_threshold 必须大于 sell_threshold")
 
+    # 阈值尺度校验（请求即拒）：读 checkpoint 的 objective 后按其口径校验 buy/sell 阈值，
+    # 回归模型误用概率阈值（buy>=0.5）/ 概率模型阈值越界 → 当场 400，不静默空跑。
+    # 与回测策略、实盘 service 共用同一 threshold_scale_check（回测实盘一致红线）。
+    # 模型不存在时跳过此校验，交由 _run_cnn_backtest 在任务内抛出"模型不存在"（保持既有行为）。
+    from ..cnn.storage import CNN_MODEL_DIR
+    from ..cnn.thresholds import threshold_scale_check
+
+    model_path = CNN_MODEL_DIR / f"{req.model}.pt"
+    if model_path.exists():
+        import torch
+
+        checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
+        objective = checkpoint.get("train_config", {}).get("objective", "classification")
+        reasons = threshold_scale_check(objective, req.buy_threshold, req.sell_threshold)
+        if reasons:
+            raise HTTPException(400, "；".join(reasons))
+
     task_id = task_manager.create_task(
         TaskType.CNN_BACKTEST,
         params={"name": req.name, "model": req.model},

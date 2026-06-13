@@ -24,6 +24,7 @@ import polars as pl
 
 from ..backtest.strategy import BaseStrategy
 from ..backtest.types import Direction, TradeData, BarData
+from .thresholds import threshold_scale_check
 
 
 class CNNSignalStrategy(BaseStrategy):
@@ -47,13 +48,32 @@ class CNNSignalStrategy(BaseStrategy):
     veto_threshold: float = 1.0    # path_class：信号行 prob_sl >= 该值则否决买入；1.0=等效关闭（向后兼容）
 
     def on_init(self) -> None:
-        """策略初始化回调 —— 重置内部持仓状态并记录初始化日志。"""
+        """策略初始化回调 —— 重置内部持仓状态、按信号帧 objective 自检阈值、记录初始化日志。
+
+        从 ``self.strategy_engine.signal_df`` 读首行 ``objective`` 列（缺列→None），
+        调用 :func:`threshold_scale_check` 自检 buy/sell 阈值尺度。检出违规时设置
+        ``self._threshold_invalid=True`` 并 write_log 告警；后续三个入场分支在买入前
+        短路拒绝（出场逻辑零影响），构成 API 400 主拦截之外的防御纵深。
+        缺列（legacy/规则策略信号帧）或阈值合法时 ``_threshold_invalid`` 恒为 False，零影响。
+        """
         # 固定持有/OCO 出场的内部状态
         self._entry_fill_dt: Optional[date] = None   # 当前持仓的建仓成交日
         self._entry_price: Optional[float] = None    # 当前持仓的建仓成交价（OCO 止盈止损基准）
         self._hold_count: int = 0                    # 自建仓起已持有的交易日数
         self._last_count_dt: Optional[date] = None   # 上次计数的交易日（防同日重复计数）
         self._veto_count: int = 0                    # path_class 否决买入的累计次数（供外部任务读取）
+
+        # 阈值尺度自检（防御纵深）：信号帧含 objective 列时按其口径校验 buy/sell 阈值。
+        self._threshold_invalid: bool = False
+        sig = getattr(self.strategy_engine, "signal_df", None)
+        objective: Optional[str] = None
+        if sig is not None and not sig.is_empty() and "objective" in sig.columns:
+            objective = str(sig["objective"][0])
+        reasons = threshold_scale_check(objective, self.buy_threshold, self.sell_threshold)
+        if reasons:
+            self._threshold_invalid = True
+            self.write_log("阈值与模型 objective 不匹配，将拒绝开仓：" + "；".join(reasons))
+
         self.write_log(f"CNN 信号策略已初始化，出场模式={self.exit_mode}")
 
     def _entry_vetoed(self, signal: pl.DataFrame) -> bool:
@@ -155,7 +175,12 @@ class CNNSignalStrategy(BaseStrategy):
         current_pos = self.get_pos(vt_symbol)
         portfolio_value = self.get_portfolio_value()
 
-        if prob > self.buy_threshold and current_pos == 0 and not self._entry_vetoed(signal):
+        if (
+            prob > self.buy_threshold
+            and current_pos == 0
+            and not self._threshold_invalid
+            and not self._entry_vetoed(signal)
+        ):
             volume = self._target_volume(portfolio_value, bar.close_price)
             if volume >= self.min_volume:
                 self.set_target(vt_symbol, volume)
@@ -198,8 +223,8 @@ class CNNSignalStrategy(BaseStrategy):
                 self.execute_trading(bars, price_add=self.price_add)
                 return
 
-        # 2) 入场：空仓且无在途建仓，概率达标且未被否决才买入
-        if current_pos == 0 and self._entry_fill_dt is None:
+        # 2) 入场：空仓且无在途建仓，概率达标、阈值合法且未被否决才买入
+        if current_pos == 0 and self._entry_fill_dt is None and not self._threshold_invalid:
             signal = self.get_signal()
             if not signal.is_empty():
                 prob = float(signal["signal"][0])
@@ -266,8 +291,8 @@ class CNNSignalStrategy(BaseStrategy):
                     self.execute_trading(bars, price_add=self.price_add)
             return
 
-        # 2) 空仓：概率达标且未被否决才建仓
-        if current_pos == 0 and self._entry_fill_dt is None:
+        # 2) 空仓：概率达标、阈值合法且未被否决才建仓
+        if current_pos == 0 and self._entry_fill_dt is None and not self._threshold_invalid:
             signal = self.get_signal()
             if not signal.is_empty():
                 prob = float(signal["signal"][0])

@@ -60,18 +60,23 @@ def predict_cnn_signals(
             meta_dict 含 target_symbol/lookback/input_interval/objective 等观测信息，不含凭证。
 
     Returns:
-        polars DataFrame，输出列因 objective 而异：
+        polars DataFrame，输出列因 objective 而异；**末列恒为 ``objective``（字符串常量，
+        值 ∈ {``"classification"``, ``"regression"``, ``"path_class"``}），全行同值等于
+        checkpoint 中记录的训练目标，供消费方自描述消费**。
 
-        - **classification / regression**（三列）：
-          ``[datetime, vt_symbol, signal]``；
+        - **classification / regression**（四列）：
+          ``[datetime, vt_symbol, signal, objective]``；
           classification 的 signal 为上涨概率（0~1），regression 为预测收益（无界）。
 
-        - **path_class**（七列）：
-          ``[datetime, vt_symbol, signal, prob_tp, prob_sl, prob_time_up, prob_time_down]``；
+        - **path_class**（八列）：
+          ``[datetime, vt_symbol, signal, prob_tp, prob_sl, prob_time_up, prob_time_down,
+          objective]``；
           signal 恒等于 prob_tp（止盈先触发的概率）；
           四列概率由 softmax 计算，行内和在数值误差内为 1。
 
         所有 objective 下 datetime 均去除时区信息，与回测引擎的 bar datetime 对齐。
+        不含 objective 列的 legacy 信号帧（规则策略等其他 SignalProvider）经消费方
+        处理行为不变——本函数不修改消费方逻辑，向后兼容由消费方对多余列透传保证。
 
     Raises:
         FileNotFoundError: 模型文件不存在时抛出。
@@ -89,6 +94,7 @@ def predict_cnn_signals(
         _extract_aligned_bars,
         _build_grouped_tensor,
     )
+    from .features import ALIGN_DROP_WARN_THRESHOLD, alignment_drop_rate
 
     # 1. Load checkpoint
     model_path = CNN_MODEL_DIR / f"{model_name}.pt"
@@ -162,6 +168,12 @@ def predict_cnn_signals(
         on_progress(38, "按公共时间轴对齐...")
 
     symbols, aligned_df = _align_frames_by_datetime(symbol_frames)
+
+    # 对齐丢弃率测量：旁路纯函数，不改变 aligned_df
+    drop_rate = alignment_drop_rate(symbol_frames, aligned_df.height)
+    if on_progress and drop_rate > 0:
+        drop_warn = "⚠️ " if drop_rate > ALIGN_DROP_WARN_THRESHOLD else ""
+        on_progress(40, f"{drop_warn}对齐丢弃率={drop_rate:.1%}，公共时间步={aligned_df.height}")
 
     all_features: dict[str, np.ndarray] = {}
     for vt_symbol in symbols:
@@ -289,6 +301,9 @@ def predict_cnn_signals(
         raise ValueError("推理未产生任何预测结果，请检查日期范围")
 
     signal_df = pl.DataFrame(predictions)
+    # 末列追加 objective 标签：消费方无需再从 on_meta 获取目标类型，信号帧自描述。
+    # 字符串常量列；不含该列的 legacy 帧（规则策略等）由消费方对多余列透传兼容。
+    signal_df = signal_df.with_columns(pl.lit(objective).alias("objective"))
 
     if on_progress:
         on_progress(98, f"推理完成: {len(predictions)} 个信号, 均值={signal_df['signal'].mean():.4f}")
@@ -309,6 +324,7 @@ def predict_cnn_signals(
             "per_symbol_bars": {
                 sym: frame.height for sym, frame in symbol_frames.items()
             },
+            "alignment_drop_rate": drop_rate,
         })
 
     return signal_df
