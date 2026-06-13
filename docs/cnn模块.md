@@ -809,11 +809,11 @@ if prob_sl >= veto_threshold:
 
 **修复**：
 - `predict_cnn_signals`：信号帧末列追加常量 `objective`（值为模型 checkpoint 中存储的 `objective` 字符串，如 `"regression"` / `"classification"` / `"path_class"`）。
-- `cnn/thresholds.py:threshold_scale_check(objective, buy, sell)`：纯函数，概率型 objective 要求阈值 ∈[0,1]；regression 且 `buy≥0.5` 视为误用概率默认值，抛出 `ValueError`；`objective=None` 或信号帧无 `objective` 列时静默跳过（向后兼容）。
+- `cnn/thresholds.py:threshold_scale_check(objective, buy, sell)`：纯函数，**返回违规原因列表 `list[str]`（空列表=通过），自身不抛异常**；概率型 objective 要求阈值 ∈[0,1]；regression 且 `buy≥0.5` 视为误用概率默认值；`objective=None` 或信号帧无 `objective` 列时返回空列表（向后兼容跳过）。如何处置非空原因由三处调用方各自决定（见下）。
 - 三处接入：回测 API 端点（400 Bad Request）、策略 `CNNSignalStrategy.on_init`（`_threshold_invalid=True` 防御纵深，仅拦开仓不阻出场）、实盘 `SignalService`（违规返回 hold）。
 
 **怎么用**：
-- 用户侧无需改动，校验自动生效。出现 `ValueError: threshold_scale_check` 即说明 `objective` 与阈值量纲不匹配，按报错信息调整 `buy_threshold`/`sell_threshold` 即可。
+- 用户侧无需改动，校验自动生效。回测 API 在 `objective` 与阈值量纲不匹配时返回 `400 Bad Request`（detail 含违规原因），按提示调整 `buy_threshold`/`sell_threshold` 即可；策略/实盘侧则记录原因并拒绝开仓。
 - regression 模型的合理阈值量级是预期收益率（如 `buy_threshold=0.01` 表示预期涨 1% 才开仓），不是概率。
 - **已知限制**：regression 阈值校验是启发式（`buy≥0.5` 判概率误用），不拦"刻意设 0.4 超大收益阈值"这类罕见误配（见 O-005）。
 
