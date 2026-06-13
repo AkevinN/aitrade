@@ -29,6 +29,7 @@ import { useTaskList } from './hooks/useTask'
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
+/** 侧边导航菜单项；key 同时作为路由路径，点击后 navigate 到对应页面。 */
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '工作台' },
   { key: '/data-prepare', icon: <DatabaseOutlined />, label: '数据准备' },
@@ -42,6 +43,11 @@ const menuItems = [
   { key: '/resource', icon: <FolderOutlined />, label: '资源管理' },
 ]
 
+/**
+ * 路由路径到页面标题与描述的映射，供顶部标题栏渲染。
+ *
+ * 键为路由路径；未命中时回退到 `pageMeta['/']`（工作台）。
+ */
 const pageMeta: Record<string, { title: string; description: string }> = {
   '/': {
     title: '工作台',

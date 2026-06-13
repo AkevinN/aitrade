@@ -33,12 +33,23 @@ export interface DateRangeSelectorProps {
   showPresets?: boolean
 }
 
+/** 一个快捷区间预设（如「近1月」），描述按钮文案与区间构造方式。 */
 type DateRangePreset = {
+  /** 预设唯一标识，用作 React key 与内部区分，如 `"1m"`、`"3y"`。 */
   key: string
+  /** 按钮上展示的文案，如 `"近1月"`。 */
   label: string
+  /**
+   * 根据锚点结束日构造区间。
+   *
+   * @param anchorEnd - 区间右端锚点（通常为本地数据结束日或今天）。
+   * @param localRange - 本地可用范围，预留给需感知边界的预设；当前内置预设未使用。
+   * @returns `[start, end]` 区间，尚未经 {@link clampRange} 夹紧。
+   */
   build: (anchorEnd: Dayjs, localRange?: LocalDateRange | null) => [Dayjs, Dayjs]
 }
 
+/** 内置快捷区间预设：近1月/3月/6月/1年/3年，均以锚点结束日向前回溯。 */
 const DATE_RANGE_PRESETS: DateRangePreset[] = [
   {
     key: '1m',

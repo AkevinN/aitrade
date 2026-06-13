@@ -67,15 +67,25 @@ export type NotifyChannel = 'dingtalk' | 'wecom' | 'serverchan' | 'webhook'
 export interface TradingPlanRequest {
   /** 计划名称（必填） */
   name: string
+  /** CNN 模型名（cnn 模式必填） */
   model: string
+  /** 目标标的（必填） */
   vt_symbol: string
+  /** 方案名（必填） */
   scheme: string
+  /** 买入阈值；信号需达到此值才买入 */
   buy_threshold?: number
+  /** 目标仓位比例 */
   position_ratio?: number
+  /** 最小成交手数 */
   min_volume?: number
+  /** 模型版本，参与 signal_id */
   model_version?: string
+  /** 数据源 */
   data_source?: 'upload' | 'pull'
+  /** 是否触发出场 */
   should_exit?: boolean
+  /** 目标标的当日是否停牌/封死 */
   halted?: boolean
   portfolio: PortfolioSnapshotRequest
   risk?: RiskConfigRequest
@@ -102,10 +112,13 @@ export interface TradingPlanRequest {
 
 /** 计划完整内容（映射后端 TradingPlan dataclass）。 */
 export interface TradingPlan extends Required<Omit<TradingPlanRequest, 'risk' | 'notify_channels' | 'strategy_type' | 'signal_source' | 'signal_params' | 'trigger_schedule' | 'portfolio_id'>> {
+  /** 计划唯一 ID */
   plan_id: string
   risk: RiskConfigRequest
   notify_channels: NotifyChannel[]
+  /** 创建时刻 ISO */
   created_at: string
+  /** 最近更新时刻 ISO */
   updated_at: string
   // ---- v2 规则调仓字段（可选，旧计划无此字段）----
   strategy_type?: 'cnn' | 'rule'
@@ -117,14 +130,19 @@ export interface TradingPlan extends Required<Omit<TradingPlanRequest, 'risk' | 
 
 /** 计划列表项摘要（映射后端 TradingPlanSummary）。 */
 export interface TradingPlanSummary {
+  /** 计划唯一 ID */
   plan_id: string
+  /** 计划名称 */
   name: string
+  /** 目标标的 */
   vt_symbol: string
+  /** 方案名 */
   scheme: string
   /** 决策 bar 频率 */
   bar_freq: string
   /** 生效唤醒时刻集合（去重升序；多时刻展示用） */
   trigger_times?: string[]
+  /** 是否启用自动调度 */
   enabled: boolean
   /** 最近触发日 YYYY-MM-DD（来自 Last_Triggered_Map，取 date） */
   last_triggered?: string | null
@@ -138,10 +156,13 @@ export interface TradingPlanSummary {
 
 /** 调度器运行状态（映射后端 SchedulerStatus）。 */
 export interface SchedulerStatus {
+  /** 调度循环是否在运行 */
   running: boolean
+  /** 调度轮询间隔，单位秒 */
   tick_seconds: number
+  /** 当前启用的计划数 */
   enabled_plan_count: number
-  /** {plan_id: "YYYY-MM-DD"} */
+  /** 各计划最近触发日，形如 {plan_id: "YYYY-MM-DD"} */
   last_triggered: Record<string, string>
 }
 
@@ -242,15 +263,21 @@ export interface Decision {
   as_of: string
   /** 决策 bar 频率（1d 即日频） */
   bar_freq: string
+  /** 方案名 */
   scheme: string
   /** buy / sell / hold */
   action: string
+  /** 目标标的；hold 时可能为 null */
   vt_symbol?: string | null
+  /** 成交手数 */
   volume: number
+  /** 参考价；无价时为 null */
   price?: number | null
+  /** 信号值；无信号时为 null */
   signal?: number | null
+  /** 决策理由 */
   reason: string
-  /** ISO 时间戳 */
+  /** 创建时刻 ISO 时间戳 */
   created_at: string
 }
 
@@ -301,9 +328,13 @@ export interface TraceRunHeaderSection {
   buy_threshold: number
   /** 组合快照摘要 */
   portfolio: {
+    /** 组合总市值（现金+持仓） */
     portfolio_value: number
+    /** 当前总持仓市值 */
     total_position_value?: number | null
+    /** 目标标的当前持仓股数 */
     current_position?: number | null
+    /** 目标标的当前持仓市值 */
     current_symbol_value?: number | null
   }
   /** 风控配置摘要（仅比率与黑名单长度，不展开敏感细节） */
@@ -318,9 +349,13 @@ export interface TraceRunHeaderSection {
 
 /** 信号序列统计（编排器对 signal_df 的聚合）。 */
 export interface TraceSignalSeqStats {
+  /** 有效信号点数量 */
   count: number
+  /** 信号序列均值 */
   mean: number
+  /** 信号序列最小值 */
   min: number
+  /** 信号序列最大值 */
   max: number
 }
 
@@ -416,11 +451,17 @@ export interface TraceResultSection {
 
 /** 六段 Trace_Section 的分组容器（按段名索引，缺段可能不存在）。 */
 export interface TraceSection {
+  /** ① 运行头段 */
   run_header?: TraceRunHeaderSection
+  /** ② 推理段 */
   inference?: TraceInferenceSection
+  /** ③ 取价段 */
   pricing?: TracePricingSection
+  /** ④ 决策逻辑段 */
   decision_logic?: TraceDecisionLogicSection
+  /** ⑤ 风控段 */
   risk?: TraceRiskSection
+  /** ⑥ 结果段 */
   result?: TraceResultSection
 }
 

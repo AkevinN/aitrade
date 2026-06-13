@@ -45,6 +45,10 @@ function inRange(time: ChartTime, range?: { min: ChartTime; max: ChartTime }): b
  * - 无法解析 → 返回 null（由调用方跳过该行，Req 5.4）
  *
  * 说明：无时区标识的朴素时间按 UTC 处理，保证行情与成交两条数据走同一转换、跨时区对齐一致（Req 5.6）。
+ *
+ * @param value - 后端时间值，可为数字（秒级时间戳）、`'YYYY-MM-DD'` 或 ISO 日期时间字符串；
+ *   `null`/`undefined`/空串/非有限数/非时间字符串均视为不可解析
+ * @returns 归一化后的 {@link ChartTime}（日线为字符串、分钟线为秒级时间戳）；无法解析时返回 `null`
  */
 export function parseChartTime(value: unknown): ChartTime | null {
   if (value === null || value === undefined) return null
@@ -78,6 +82,9 @@ export function parseChartTime(value: unknown): ChartTime | null {
  * - 列名映射：datetime/open/high/low/close/volume（time 作为 datetime 的别名兜底）
  * - 缺必要列（时间或开高低收任一）的行被跳过，不抛异常（Req 5.4）
  * - 输出按 time 升序排列，满足 lightweight-charts 输入约束（Req 7.3、5.6）
+ *
+ * @param rows - 行情行数组，每行为按列名取值的字典；非数组时按空输入处理
+ * @returns 按时间升序的 K 线数组；无可用行时返回空数组（volume 缺失则该根不带成交量字段）
  */
 export function toOHLCBars(rows: Record<string, unknown>[]): OHLCBar[] {
   if (!Array.isArray(rows)) return []
@@ -113,10 +120,15 @@ export function toOHLCBars(rows: Record<string, unknown>[]): OHLCBar[] {
 
 /** toTradeMarkers 接收的成交结构（后端 serialize_trades 输出）。 */
 interface TradeInput {
+  /** 成交时间，ISO 日期时间或 `'YYYY-MM-DD'`；无法解析的成交会被跳过 */
   datetime: string
+  /** 开平标志，含 "OPEN" 判为买入、否则判为卖出（大小写不敏感） */
   offset: string
+  /** 买卖方向原始字段，当前判向以 offset 为准，此列暂未参与计算 */
   direction: string
+  /** 成交价（元） */
   price: number
+  /** 成交数量（股） */
   volume: number
 }
 
@@ -125,6 +137,11 @@ interface TradeInput {
  * - 买卖语义以 offset 为主判据：OPEN→buy（买入）、CLOSE→sell（卖出），大小写不敏感
  * - 时间无法解析的成交被跳过；时间落在可选 barTimeRange 之外的成交被过滤（Req 7.4）
  * - text 形如 "买 1000@12.34" / "卖 1000@12.34"
+ *
+ * @param trades - 成交数组；非数组时按空输入处理
+ * @param barTimeRange - 可选的 K 线时间窗 `{ min, max }`，用于剔除落在行情区间外的成交；
+ *   缺省或与时间类型不一致时不做区间过滤
+ * @returns 与成交对应的买卖点标注数组；无可用成交时返回空数组
  */
 export function toTradeMarkers(
   trades: TradeInput[],
@@ -161,13 +178,21 @@ export function toTradeMarkers(
 
 /** toEquityPoints 接收的净值行结构（后端 serialize_equity_curve 输出）。 */
 interface EquityRowInput {
+  /** 交易日，`'YYYY-MM-DD'` */
   date: string
+  /** 当日账户净值（元） */
   balance: number
+  /** 当日回撤金额（元） */
   drawdown: number
+  /** 当日回撤百分比（%） */
   ddpercent: number
+  /** 当日净盈亏（元），映射为 EquityPoint.netPnl */
   net_pnl: number
+  /** 策略累计收益（%），缺值保留 null */
   strategy_return?: number | null
+  /** 基准（买入持有）累计收益（%），缺值保留 null */
   benchmark_return?: number | null
+  /** 超额收益（%）= 策略累计 - 基准累计，缺值保留 null */
   excess_return?: number | null
 }
 
@@ -176,6 +201,10 @@ interface EquityRowInput {
  * - 字段映射：net_pnl→netPnl；date/balance/drawdown/ddpercent 透传
  * - 收益列（strategy_return/benchmark_return/excess_return）按 % 透传，缺值保留 null
  * - 空输入返回 []（Req 5.4）
+ *
+ * @param rows - 逐日净值行数组；非数组时按空输入处理
+ * @returns 净值曲线点数组；balance/drawdown/ddpercent/netPnl 不可解析时归零，
+ *   三个收益列不可解析时保留 `null`
  */
 export function toEquityPoints(rows: EquityRowInput[]): EquityPoint[] {
   if (!Array.isArray(rows)) return []

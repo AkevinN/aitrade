@@ -21,9 +21,11 @@ export type { DataAggregateRequest, DataResourceList }
 /** 聚合来源类型：`bar`（原始/派生 K 线）或 `tick`（历史 Tick）。 */
 export type SourceKind = 'bar' | 'tick'
 
-/** 时间区间 [start, end]，`start`/`end` 为 ISO 字符串。 */
+/** 闭区间 [start, end]；两端均为可被 dayjs 解析的时间字符串（ISO 或 "YYYY-MM-DD HH:mm:ss"）。 */
 export interface TimeRange {
+  /** 区间起点（含），语义上不晚于 end。 */
   start: string
+  /** 区间终点（含），语义上不早于 start。 */
   end: string
 }
 
@@ -102,6 +104,7 @@ export type InvalidDimension =
 
 /** 聚合配置的校验结果。 */
 export interface AggregationValidation {
+  /** 配置是否为可提交的有效聚合组合；所有维度均通过时为 true。 */
   valid: boolean
   /** 第一个命中的无效维度，用于定向提示；valid 时为 null。 */
   reason: InvalidDimension | null
