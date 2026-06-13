@@ -134,6 +134,10 @@ def _apply_default_preprocessing(dataset: Any) -> None:
         dataset: 已调用 ``prepare_data`` 的 ``AlphaDataset`` 实例；
                  ``raw_df`` 须含特征列（列索引 2:-1）与 label 列。
 
+    Returns:
+        None。结果通过原地写回入参 ``dataset`` 的 ``infer_df`` /
+        ``learn_df`` / ``preprocess_stats`` 三个属性返回。
+
     Raises:
         ValueError: 数据集无特征列，或过滤空标签后训练数据为空时抛出。
     """
@@ -351,6 +355,7 @@ def _download_bar_data(
     # AKShare 的 1 分钟线仅提供近 5 个交易日，跨度过长会静默截断；服务端直接拦截并指引。
     if provider_name == "akshare" and requested_interval == "1m":
         def _as_date(value):
+            """把 datetime 归一化为 date；非 datetime 值原样返回。"""
             return value.date() if isinstance(value, datetime) else value
 
         try:

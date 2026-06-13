@@ -58,7 +58,14 @@ router = APIRouter(prefix="/api/alpha", tags=["Alpha AI"])
 # =============================================================================
 
 def _check_alpha_installed() -> bool:
-    """检查 Alpha 模块是否已安装。"""
+    """探测 Alpha 投研模块是否可用。
+
+    通过尝试导入 AlphaLab 判断依赖是否就位，各路由在动手前用它决定是返回
+    503/空结果还是继续执行。导入失败不抛错，仅返回 False。
+
+    Returns:
+        AlphaLab 可导入返回 True；缺少依赖（ImportError）返回 False。
+    """
     try:
         from ..alpha import AlphaLab
         return True
@@ -67,7 +74,14 @@ def _check_alpha_installed() -> bool:
 
 
 def _get_alpha_lab():
-    """获取 AlphaLab 实例。"""
+    """构造一个绑定到默认数据目录的 AlphaLab 实例。
+
+    每次调用都新建实例，数据根目录固定为配置项 ALPHA_LAB_PATH。调用前应先用
+    _check_alpha_installed() 确认模块可用，否则此处导入会抛 ImportError。
+
+    Returns:
+        指向 ALPHA_LAB_PATH 的 AlphaLab 实例，封装数据集/模型/信号/K线等全部本地资源访问。
+    """
     from ..alpha import AlphaLab
     return AlphaLab(ALPHA_LAB_PATH)
 
@@ -77,7 +91,18 @@ def _get_alpha_lab():
 
 
 def _normalize_market_interval(interval: str | None) -> str:
-    """Normalize request intervals used by market data endpoints."""
+    """把请求里的周期写法归一化为引擎内部统一的周期代码。
+
+    兼容前端/旧接口的多种别名（如 "daily"→"d"、"minute"/"m"/"1m"→"1m"、
+    "1h"→"60m"、"weekly"→"w"），大小写与首尾空白都会被忽略。无法识别的取值
+    原样返回（小写去空白后），交由各路由自行做白名单校验。
+
+    Args:
+        interval: 原始周期写法；None 或空串按空字符串处理。
+
+    Returns:
+        归一化后的周期代码（如 "d"/"1m"/"5m"/"60m"/"w"）；未命中映射表时返回清洗后的原值。
+    """
     raw = (interval or "").strip().lower()
     mapping = {
         "daily": "d",
@@ -98,10 +123,32 @@ def _normalize_market_interval(interval: str | None) -> str:
 
 
 def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
+    """逐个归一化合约代码并去重，保留首次出现的顺序。
+
+    跳过空字符串项，对每个非空项调用 normalize_vt_symbol 标准化后用 dict.fromkeys
+    去重（去重在归一化之后，所以等价别名会被合并）。
+
+    Args:
+        vt_symbols: 原始合约代码列表，可能含空串或重复项。
+
+    Returns:
+        归一化、去重且保序的合约代码列表；输入为空或全为空串时返回空列表。
+    """
     return list(dict.fromkeys(normalize_vt_symbol(item) for item in vt_symbols if item))
 
 
 def _normalize_optional_symbol(vt_symbol: str | None) -> str | None:
+    """归一化可选的单个合约代码，保留"未提供"语义。
+
+    用于 benchmark 等可空字段：有值时标准化，None 或空串则原样透传，不会把"未指定"
+    误转成具体合约。
+
+    Args:
+        vt_symbol: 合约代码；None 或空串表示未指定。
+
+    Returns:
+        归一化后的合约代码；输入为 None/空串时按原值返回（保持假值语义）。
+    """
     return normalize_vt_symbol(vt_symbol) if vt_symbol else vt_symbol
 
 
@@ -136,16 +183,16 @@ def _normalize_optional_symbol(vt_symbol: str | None) -> str | None:
 
 @router.get("/status")
 async def get_alpha_status() -> dict:
-    """
-    获取 Alpha 模块状态。
+    """获取 Alpha 模块状态，供前端判断功能是否可用。
 
-    返回模块安装状态和数据目录信息，用于前端判断功能可用性。
+    探测依赖是否就位，并附带版本号与数据目录信息。
 
     Returns:
-        dict: 状态信息
-            - installed: 模块是否已安装
-            - lab_path: 数据目录路径
-            - lab_exists: 数据目录是否存在
+        状态字典，含字段：
+            - installed: 模块是否已安装（依赖可导入）。
+            - version: 后端版本号。
+            - lab_path: 数据目录路径（字符串）。
+            - lab_exists: 数据目录是否存在；未安装时恒为 False。
     """
     installed = _check_alpha_installed()
     return {
@@ -172,13 +219,19 @@ async def list_tasks(
     """获取任务状态列表（R2.3）。
 
     默认行为（无参数）与现状完全一致：返回内存中所有任务，按 updated_at 倒序，上限 200。
+    include_history=True 时再叠加磁盘归档历史，同 task_id 以内存版本为准。
 
     Args:
-        status:          按状态过滤（completed/failed/running/pending）。
-        task_type:       按任务类型过滤（data_download/model_train 等）。
+        request:         FastAPI 请求对象，用于从 app.state.history_store 取历史存储；缺失时回退到 task_manager 内置 store。
+        status:          按状态过滤（completed/failed/running/pending）；None 表示不过滤。
+        task_type:       按任务类型过滤（data_download/model_train 等）；None 表示不过滤。
         include_history: True 时合并归档历史（同 task_id 以内存为准），默认 False。
         limit:           最多返回条数，默认 200。
-        history_days:    include_history=True 时回看天数，默认 90，上限 365。
+        history_days:    include_history=True 时回看天数，默认 90，传入值会被夹到 [1, 365]。
+
+    Returns:
+        任务字典列表，每项为 Task.model_dump(mode="json") 的结果（datetime 已序列化为 ISO 字符串），
+        按 updated_at 倒序、长度不超过 limit；无任务时返回空列表。
     """
     # 内存任务
     mem_tasks = task_manager.get_all_tasks()
@@ -235,7 +288,17 @@ async def list_tasks(
 
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str) -> dict:
-    """获取单个任务状态。"""
+    """按 task_id 查询单个任务的当前状态。
+
+    Args:
+        task_id: 任务唯一标识，由 create_task 返回。
+
+    Returns:
+        该任务的 model_dump() 字典（含状态、进度、结果等字段）。
+
+    Raises:
+        HTTPException: task_id 在内存任务表中不存在时抛 404。
+    """
     task = task_manager.get_task(task_id)
     if not task:
         raise HTTPException(404, f"任务 {task_id} 不存在")
@@ -248,7 +311,20 @@ async def get_task(task_id: str) -> dict:
 
 @router.post("/data/download")
 async def start_data_download(req: DataDownloadRequest) -> dict:
-    """启动原始市场数据下载任务。"""
+    """提交原始市场数据下载任务并立即返回（异步执行）。
+
+    入队前会归一化合约代码、校验数据类型与下载周期，校验通过才创建后台任务。
+
+    Args:
+        req: 下载请求；vt_symbols 为合约列表，data_kind 当前仅支持 "bar"，
+            source_interval/interval 指定下载周期（归一化后须属于 d/1m/5m/15m/30m/60m/w）。
+
+    Returns:
+        含 task_id（用于后续轮询任务状态）与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；data_kind 非 "bar" 或周期不在白名单时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
@@ -268,6 +344,7 @@ async def start_data_download(req: DataDownloadRequest) -> dict:
     )
 
     def execute(on_progress=None):
+        """后台任务体：执行原始K线下载，并通过 on_progress 回调上报进度。"""
         return alpha_service._download_bar_data(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -277,7 +354,20 @@ async def start_data_download(req: DataDownloadRequest) -> dict:
 
 @router.post("/data/aggregate")
 async def start_data_aggregate(req: DataAggregateRequest) -> dict:
-    """启动本地数据聚合任务。"""
+    """提交本地数据聚合任务并立即返回（异步执行）。
+
+    把已有的细粒度 K 线聚合为更粗的派生周期。入队前归一化合约代码并校验日期区间。
+
+    Args:
+        req: 聚合请求；vt_symbols 为合约列表，target_interval 为目标派生周期，
+            start/end 为聚合日期区间（含端点）。
+
+    Returns:
+        含 task_id 与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；start 晚于 end 时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
@@ -293,6 +383,7 @@ async def start_data_aggregate(req: DataAggregateRequest) -> dict:
     )
 
     def execute(on_progress=None):
+        """后台任务体：执行本地数据聚合，并通过 on_progress 回调上报进度。"""
         return alpha_service._aggregate_data(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -305,7 +396,23 @@ async def start_data_aggregate(req: DataAggregateRequest) -> dict:
 
 @router.post("/profiling")
 async def create_symbol_profile(payload: dict[str, Any]) -> Any:
-    """生成标的画像。该端点只读，不进入任务队列。"""
+    """同步生成标的画像（只读诊断），不进入任务队列。
+
+    手动校验请求体而非用 FastAPI 自动绑定，以便把校验失败转成 400 友好提示；
+    通过后归一化周期与合约代码并调用 Profiler 即时计算返回。
+
+    Args:
+        payload: 原始请求体，按 SymbolProfileRequest 校验。关键字段：vt_symbol（主标的）、
+            interval（周期，归一化后须属于 d/1m/5m/10m/15m/30m/60m/w）、as_of（诊断截止日）、
+            lookback_days（回看天数）、observation_symbols（参照标的列表）、
+            with_suggestion（是否附建议）、persist（是否持久化产物）。
+
+    Returns:
+        Profiler.profile 的画像结果（结构由画像引擎决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；请求体校验失败或周期非法时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     try:
@@ -332,7 +439,14 @@ async def create_symbol_profile(payload: dict[str, Any]) -> Any:
 
 @router.get("/profiling/artifacts")
 async def list_symbol_profile_artifacts() -> list[str]:
-    """列出已持久化的画像产物 id。"""
+    """列出全部已持久化的画像产物 id。
+
+    Returns:
+        画像产物 id 列表；无产物时返回空列表。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     return ProfileStore().list_ids()
@@ -340,7 +454,17 @@ async def list_symbol_profile_artifacts() -> list[str]:
 
 @router.get("/profiling/{artifact_id}")
 async def get_symbol_profile_artifact(artifact_id: str) -> Any:
-    """读取已持久化的画像产物。"""
+    """按 id 读取一份已持久化的画像产物。
+
+    Args:
+        artifact_id: 画像产物 id，来自 list_symbol_profile_artifacts。
+
+    Returns:
+        ProfileStore.load 返回的画像产物内容。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；产物文件不存在时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     store = ProfileStore()
@@ -356,7 +480,11 @@ async def get_symbol_profile_artifact(artifact_id: str) -> Any:
 
 @router.get("/datasets")
 async def list_datasets() -> list[str]:
-    """列出所有数据集名称。Alpha 未安装时返回空列表。"""
+    """列出全部数据集名称（升序）。
+
+    Returns:
+        数据集名称列表，按字母升序；Alpha 未安装时返回空列表（不报错）。
+    """
     if not _check_alpha_installed():
         return []
     lab = _get_alpha_lab()
@@ -365,7 +493,20 @@ async def list_datasets() -> list[str]:
 
 @router.get("/datasets/{name}")
 async def get_dataset(name: str) -> dict:
-    """获取数据集详情。"""
+    """获取单个数据集的概要信息。
+
+    样本数优先取 learn_df 行数，其次回退到 df 行数，二者皆无则为 0。
+
+    Args:
+        name: 数据集名称。
+
+    Returns:
+        含字段 name、feature_count（特征表达式数量）、sample_count（样本行数）、
+        label_expression（标签表达式，无则为空串）的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；数据集不存在时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -389,7 +530,20 @@ async def get_dataset(name: str) -> dict:
 
 @router.post("/datasets/create")
 async def start_create_dataset(req: DatasetCreateRequest) -> dict:
-    """启动数据集创建任务。"""
+    """提交数据集创建任务并立即返回（异步执行）。
+
+    入队前归一化合约代码，并要求至少选择一个特征库。
+
+    Args:
+        req: 数据集创建请求；vt_symbols 为合约列表，features 为特征库选择（不可为空），
+            其余字段（标签、区间等）按请求模型定义。
+
+    Returns:
+        含 task_id 与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；features 为空时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
@@ -399,6 +553,7 @@ async def start_create_dataset(req: DatasetCreateRequest) -> dict:
     task_id = task_manager.create_task(TaskType.DATASET_CREATE, req.model_dump())
 
     def execute(on_progress=None):
+        """后台任务体：执行数据集创建，并通过 on_progress 回调上报进度。"""
         return alpha_service._create_dataset(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -408,7 +563,17 @@ async def start_create_dataset(req: DatasetCreateRequest) -> dict:
 
 @router.delete("/datasets/{name}")
 async def remove_dataset(name: str) -> dict:
-    """删除数据集。"""
+    """删除指定数据集。
+
+    Args:
+        name: 待删除的数据集名称。
+
+    Returns:
+        删除成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；数据集不存在（删除返回假值）时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -424,7 +589,11 @@ async def remove_dataset(name: str) -> dict:
 
 @router.get("/models")
 async def list_models() -> list[str]:
-    """列出所有模型名称。Alpha 未安装时返回空列表。"""
+    """列出全部模型名称（升序）。
+
+    Returns:
+        模型名称列表，按字母升序；Alpha 未安装时返回空列表（不报错）。
+    """
     if not _check_alpha_installed():
         return []
     lab = _get_alpha_lab()
@@ -433,7 +602,17 @@ async def list_models() -> list[str]:
 
 @router.get("/models/{name}")
 async def get_model(name: str) -> dict:
-    """获取模型详情。"""
+    """获取单个模型的概要信息。
+
+    Args:
+        name: 模型名称。
+
+    Returns:
+        含字段 name 与 model_type（模型类名）的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；模型不存在时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -449,13 +628,24 @@ async def get_model(name: str) -> dict:
 
 @router.post("/models/train")
 async def start_train_model(req: ModelTrainRequest) -> dict:
-    """启动模型训练任务。"""
+    """提交模型训练任务并立即返回（异步执行）。
+
+    Args:
+        req: 模型训练请求，按 ModelTrainRequest 定义（数据集、模型类型、超参等）。
+
+    Returns:
+        含 task_id 与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
     task_id = task_manager.create_task(TaskType.MODEL_TRAIN, req.model_dump())
 
     def execute(on_progress=None):
+        """后台任务体：执行模型训练，并通过 on_progress 回调上报进度。"""
         return alpha_service._train_model(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -465,7 +655,17 @@ async def start_train_model(req: ModelTrainRequest) -> dict:
 
 @router.delete("/models/{name}")
 async def remove_model(name: str) -> dict:
-    """删除模型。"""
+    """删除指定模型。
+
+    Args:
+        name: 待删除的模型名称。
+
+    Returns:
+        删除成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；模型不存在（删除返回假值）时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -481,7 +681,11 @@ async def remove_model(name: str) -> dict:
 
 @router.get("/signals")
 async def list_signals() -> list[str]:
-    """列出所有信号名称。Alpha 未安装时返回空列表。"""
+    """列出全部信号名称（升序）。
+
+    Returns:
+        信号名称列表，按字母升序；Alpha 未安装时返回空列表（不报错）。
+    """
     if not _check_alpha_installed():
         return []
     lab = _get_alpha_lab()
@@ -490,7 +694,21 @@ async def list_signals() -> list[str]:
 
 @router.get("/signals/{name}")
 async def get_signal(name: str) -> dict:
-    """获取信号详情。"""
+    """获取单个信号的概要信息与末尾预览。
+
+    预览取信号表最后 100 行，每个单元格转成字符串（None 保留为 None）；预览过程若出错
+    则静默跳过、preview 留空，不影响主体信息返回。
+
+    Args:
+        name: 信号名称。
+
+    Returns:
+        含字段 name、row_count（总行数）、columns（列名列表）、
+        preview（末尾最多 100 行的字符串化记录列表）的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；信号不存在时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -516,7 +734,19 @@ async def get_signal(name: str) -> dict:
 
 @router.post("/signals/generate")
 async def start_generate_signal(req: SignalGenerateRequest) -> dict:
-    """启动信号生成任务。"""
+    """提交信号生成任务并立即返回（异步执行）。
+
+    入队前归一化合约代码。
+
+    Args:
+        req: 信号生成请求；vt_symbols 为合约列表，其余字段（模型、区间等）按请求模型定义。
+
+    Returns:
+        含 task_id 与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     req = req.model_copy(update={"vt_symbols": _normalize_symbol_list(req.vt_symbols)})
@@ -524,6 +754,7 @@ async def start_generate_signal(req: SignalGenerateRequest) -> dict:
     task_id = task_manager.create_task(TaskType.SIGNAL_GENERATE, req.model_dump())
 
     def execute(on_progress=None):
+        """后台任务体：执行信号生成，并通过 on_progress 回调上报进度。"""
         return alpha_service._generate_signal(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -533,7 +764,17 @@ async def start_generate_signal(req: SignalGenerateRequest) -> dict:
 
 @router.delete("/signals/{name}")
 async def remove_signal(name: str) -> dict:
-    """删除信号。"""
+    """删除指定信号。
+
+    Args:
+        name: 待删除的信号名称。
+
+    Returns:
+        删除成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；信号不存在（删除返回假值）时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     lab = _get_alpha_lab()
@@ -549,7 +790,19 @@ async def remove_signal(name: str) -> dict:
 
 @router.post("/backtest/run")
 async def start_backtest(req: BacktestRunRequest) -> dict:
-    """启动回测任务。"""
+    """提交策略回测任务并立即返回（异步执行）。
+
+    入队前归一化可选的 benchmark 合约（未指定则保持为空，不会被误转成具体合约）。
+
+    Args:
+        req: 回测请求；benchmark 为可选基准合约，其余字段（信号、区间、费率等）按请求模型定义。
+
+    Returns:
+        含 task_id 与提示文案 message 的字典。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     req = req.model_copy(update={"benchmark": _normalize_optional_symbol(req.benchmark)})
@@ -557,6 +810,7 @@ async def start_backtest(req: BacktestRunRequest) -> dict:
     task_id = task_manager.create_task(TaskType.BACKTEST_RUN, req.model_dump())
 
     def execute(on_progress=None):
+        """后台任务体：执行策略回测，并通过 on_progress 回调上报进度。"""
         return alpha_service._run_backtest(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -570,7 +824,12 @@ async def start_backtest(req: BacktestRunRequest) -> dict:
 
 @router.get("/contracts")
 async def get_contract_settings() -> dict:
-    """获取合约配置。Alpha 未安装时返回空字典。"""
+    """获取全部合约的回测/交易参数配置。
+
+    Returns:
+        合约配置字典（key 为 vt_symbol，value 为费率/合约乘数等参数）；
+        Alpha 未安装时返回空字典（不报错）。
+    """
     if not _check_alpha_installed():
         return {}
     lab = _get_alpha_lab()
@@ -589,11 +848,28 @@ async def add_contract_setting(
     limit_ratio: float | None = None,
     t_plus1: bool | None = None,
 ) -> dict:
-    """添加或更新合约配置。
+    """添加或更新单个合约的回测/交易参数配置。
 
     可选字段 stamp_duty / slippage / limit_ratio / t_plus1 传值时写入 JSON；
     不传（None）则忽略，保持已有配置不被意外清空。
     t_plus1 字段本任务只打通写入与存储，引擎消费在下一任务实现。
+
+    Args:
+        vt_symbol: 合约代码，写入前会归一化。
+        long_rate: 多头手续费率（成交额占比），默认 0.0001。
+        short_rate: 空头手续费率（成交额占比），默认 0.0001。
+        size: 合约乘数（每点价值），默认 1。
+        pricetick: 最小价格变动单位，默认 0.01。
+        stamp_duty: 印花税率；None 表示不更新该字段。
+        slippage: 滑点（按价格单位计）；None 表示不更新该字段。
+        limit_ratio: 涨跌停限制比例；None 表示不更新该字段。
+        t_plus1: 是否启用 T+1 交易规则；None 表示不更新该字段。
+
+    Returns:
+        保存成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503。
     """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
@@ -615,7 +891,12 @@ async def add_contract_setting(
 
 @router.get("/data/resources")
 async def get_data_resources() -> dict[str, Any]:
-    """获取原始K线、历史Tick与派生周期资源列表。"""
+    """获取统一的数据资源清单：原始 K 线、历史 Tick 与派生周期。
+
+    Returns:
+        含 raw_bars / raw_ticks / derived_bars 三个列表的字典；
+        Alpha 未安装时返回三者皆空的字典（不报错）。
+    """
     if not _check_alpha_installed():
         return {"raw_bars": [], "raw_ticks": [], "derived_bars": []}
 
@@ -630,7 +911,20 @@ async def get_data_resource_detail(
     limit: int = 100,
     before: str | None = None,
 ) -> dict[str, Any]:
-    """查看单个数据资源详情与预览。"""
+    """查看单个数据资源的详情与分页预览。
+
+    Args:
+        kind: 资源类别（如 raw_bar/raw_tick/derived_bar），由底层 lab 校验。
+        key: 资源主键，定位具体文件。
+        limit: 预览返回条数，默认 100。
+        before: 游标时间（ISO 字符串），只取早于该时间的数据；None 表示从最新开始。
+
+    Returns:
+        资源详情字典，含预览数据与分页游标（具体结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；资源不存在时 404；参数非法时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -645,7 +939,18 @@ async def get_data_resource_detail(
 
 @router.delete("/data/resources/{kind}/{key}")
 async def delete_data_resource(kind: str, key: str) -> dict[str, Any]:
-    """删除单个原始或派生数据资源。"""
+    """删除单个原始或派生数据资源。
+
+    Args:
+        kind: 资源类别（如 raw_bar/derived_bar 等）。
+        key: 资源主键，定位待删除文件。
+
+    Returns:
+        删除成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；资源不存在（删除返回假值）时 404。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -657,7 +962,21 @@ async def delete_data_resource(kind: str, key: str) -> dict[str, Any]:
 
 @router.patch("/data/resources/raw_bar/{key}/interval")
 async def relocate_raw_bar_interval(key: str, req: RelocateBarIntervalRequest) -> dict[str, Any]:
-    """更正原始 K 线资源的存储周期（移动文件到对应目录）。"""
+    """更正原始 K 线资源的存储周期，把文件移动到对应周期目录。
+
+    用于修正误归类的原始 K 线（如把当成日线存的分钟线挪到正确目录）。
+
+    Args:
+        key: 原始 K 线资源主键。
+        req: 含目标 interval 的请求；interval 归一化后须属于 d/1m/5m/15m/30m/60m。
+
+    Returns:
+        迁移结果字典（含新位置等信息，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；interval 不在白名单时 400；
+            资源不存在时 404；底层校验失败时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -676,7 +995,17 @@ async def relocate_raw_bar_interval(key: str, req: RelocateBarIntervalRequest) -
 
 @router.post("/data/resources/merge/preview")
 async def preview_data_resource_merge(req: DataResourceMergeRequest) -> dict[str, Any]:
-    """预检上传批次是否可以手动合并为正式原始资源。"""
+    """预检若干上传批次能否手动合并为正式原始资源（不落盘）。
+
+    Args:
+        req: 合并请求；kind 为资源类别，keys 为待合并的批次主键列表。
+
+    Returns:
+        预检结果字典（是否可合并、冲突/重叠提示等，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；批次不可预检（如类别不一致）时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -689,7 +1018,18 @@ async def preview_data_resource_merge(req: DataResourceMergeRequest) -> dict[str
 
 @router.post("/data/resources/merge")
 async def merge_data_resource_batches(req: DataResourceMergeRequest) -> dict[str, Any]:
-    """合并上传批次，写入正式原始资源。"""
+    """把若干上传批次合并并写入正式原始资源（落盘）。
+
+    Args:
+        req: 合并请求；kind 为资源类别，keys 为待合并的批次主键列表。
+
+    Returns:
+        合并结果字典（success=True 及产物信息）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；底层校验失败（ValueError）时 400；
+            合并结果 success 为假值时按其 reason 返回 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -712,6 +1052,13 @@ async def get_bar_data_list() -> dict:
     """[已废弃] 获取已有日线和 1 分钟原始K线列表（兼容旧前端）。
 
     请改用 `GET /api/alpha/data/resources` 获取完整的原始/派生/批次资源列表。
+
+    Returns:
+        形如 {"daily": [...], "minute": [...]} 的字典：daily 收录周期为 "d" 的
+        原始K线、minute 收录周期为 "1m" 的原始K线，其余周期不纳入。每个列表项
+        为一只合约的概要 {"vt_symbol", "row_count", "start", "end",
+        "file_size_kb"}。Alpha 模块未安装时返回 {"daily": [], "minute": []}；
+        无对应周期数据时相应列表为空。
     """
     if not _check_alpha_installed():
         return {"daily": [], "minute": []}
@@ -744,7 +1091,22 @@ async def _preview_csv_upload(
     file: UploadFile = File(...),
     field_mapping: str | None = None,
 ) -> tuple[bytes, dict[str, str] | None]:
-    """Validate CSV upload and decode custom mapping."""
+    """校验上传的 CSV 文件并解码自定义字段映射，供预览/导入路由共用。
+
+    校验文件名后缀为 .csv、内容非空；field_mapping 若提供须为合法 JSON 对象。
+
+    Args:
+        file: 上传的文件对象（FastAPI UploadFile）。
+        field_mapping: 自定义字段映射的 JSON 字符串；None 表示使用默认映射。
+
+    Returns:
+        二元组 (contents, custom_mapping)：contents 为读取到的文件字节，
+        custom_mapping 为解析后的映射字典（未提供时为 None）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；非 .csv 后缀、文件为空、
+            或 field_mapping 不是合法 JSON 对象时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
 
@@ -771,7 +1133,19 @@ async def preview_csv_import(
     file: UploadFile = File(...),
     field_mapping: str | None = None,
 ) -> dict[str, Any]:
-    """预览 bar CSV 文件（兼容旧前端）。"""
+    """预览 bar（K 线）CSV 文件的解析结果（兼容旧前端），不落盘。
+
+    Args:
+        file: 上传的 CSV 文件。
+        field_mapping: 自定义字段映射的 JSON 字符串；None 表示使用默认映射。
+
+    Returns:
+        预览结果字典（识别到的列、样例行、推断周期等，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: 上传校验失败时 400/503（见 _preview_csv_upload）；
+            CSV 解析失败时 400（友好提示）。
+    """
     contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
     lab = _get_alpha_lab()
     try:
@@ -789,7 +1163,19 @@ async def preview_tick_csv_import(
     file: UploadFile = File(...),
     field_mapping: str | None = None,
 ) -> dict[str, Any]:
-    """预览历史 Tick CSV 文件。"""
+    """预览历史 Tick CSV 文件的解析结果，不落盘。
+
+    Args:
+        file: 上传的 CSV 文件。
+        field_mapping: 自定义字段映射的 JSON 字符串；None 表示使用默认映射。
+
+    Returns:
+        预览结果字典（识别到的列、样例行等，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: 上传校验失败时 400/503（见 _preview_csv_upload）；
+            CSV 解析失败时 400（友好提示）。
+    """
     contents, custom_mapping = await _preview_csv_upload(file, field_mapping)
     lab = _get_alpha_lab()
     try:
@@ -809,7 +1195,22 @@ async def import_csv_data(
     field_mapping: str | None = Form(default=None, description="自定义字段映射 JSON"),
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
-    """执行 bar CSV 数据导入。"""
+    """把上传的 bar（K 线）CSV 落盘为批次或正式原始资源（同步执行）。
+
+    Args:
+        interval: 周期，归一化后须属于 d/1m/5m/15m/30m/60m，默认 "d"。
+        import_mode: "merge" 追加 / "replace" 替换，默认 "merge"。
+        save_mode: "batch" 存为待合并批次 / "official" 直接写入正式资源，默认 "batch"。
+        field_mapping: 自定义字段映射的 JSON 字符串；None 表示使用默认映射。
+        file: 上传的 CSV 文件。
+
+    Returns:
+        导入结果字典（含 success、imported_count 等，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；import_mode/save_mode/interval 非法或
+            上传校验失败时 400；底层导入异常时 500；导入条数为 0 且失败时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     if import_mode not in {"merge", "replace"}:
@@ -851,7 +1252,23 @@ async def import_tick_csv_data(
     field_mapping: str | None = Form(default=None, description="自定义字段映射 JSON"),
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
-    """执行历史 Tick CSV 数据导入。"""
+    """把上传的历史 Tick CSV 落盘为批次或正式原始资源（同步执行）。
+
+    周期固定为 "tick"，不接受 interval 入参。
+
+    Args:
+        import_mode: "merge" 追加 / "replace" 替换，默认 "merge"。
+        save_mode: "batch" 存为待合并批次 / "official" 直接写入正式资源，默认 "batch"。
+        field_mapping: 自定义字段映射的 JSON 字符串；None 表示使用默认映射。
+        file: 上传的 CSV 文件。
+
+    Returns:
+        导入结果字典（含 success、imported_count 等，结构由底层 lab 决定）。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；import_mode/save_mode 非法或上传校验失败时 400；
+            底层导入异常时 500；导入条数为 0 且失败时 400。
+    """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
     if import_mode not in {"merge", "replace"}:
@@ -888,9 +1305,20 @@ async def import_tick_csv_data(
 
 @router.delete("/bar-data/{interval}/{vt_symbol}", deprecated=True)
 async def delete_bar_data(interval: str, vt_symbol: str) -> dict:
-    """[已废弃] 删除单个合约的K线数据文件。
+    """[已废弃] 删除单个合约的 K 线数据文件。
 
     请改用 `DELETE /api/alpha/data/resources/{kind}/{key}`。
+    仅识别 daily 与 minute 两类目录：interval=="daily" 落在日线目录，其余一律按分钟目录处理。
+
+    Args:
+        interval: 周期目录选择，"daily" 取日线目录，其它值取分钟目录。
+        vt_symbol: 合约代码，删除前会归一化。
+
+    Returns:
+        删除成功时返回 {"success": True, "message": ...}。
+
+    Raises:
+        HTTPException: Alpha 未安装时 503；目标 parquet 文件不存在时 404。
     """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")
@@ -923,6 +1351,12 @@ async def get_bar_data_detail(
 
     Returns:
         dict: 数据详情，含 preview、loaded_count、has_more、next_before
+
+    Raises:
+        HTTPException: Alpha 模块未安装时 503；interval 不在支持白名单
+            {d/1m/5m/10m/15m/30m/60m/w} 内时 400；limit 小于 0 时 400；
+            before 不是合法 ISO 时间字符串时 400；该合约对应周期的数据文件
+            不存在（加载结果为空）时 404。
     """
     if not _check_alpha_installed():
         raise HTTPException(503, "Alpha 模块未安装")

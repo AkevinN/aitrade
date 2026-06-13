@@ -129,16 +129,36 @@ def _decision_to_dict(decision: Decision) -> dict[str, Any]:
 
 
 def _validate_bar_freq_against_model(model: str, bar_freq: str) -> None:
-    """间隔锁定（Req 2）：bar_freq 必须 == 模型训练间隔对应的 bar_freq。
+    """间隔锁定（Req 2）：校验 bar_freq 是否 == 模型训练间隔对应的 bar_freq，不一致则抛错。
 
     模型在固定间隔的 bar 分布上训练，喂别的周期是分布外输入——与回测端
-    「回测周期必须 = 训练周期」是同一条红线在实时端的延伸。
+    「回测周期必须 = 训练周期」是同一条红线在实时端的延伸。在 start_live_decision /
+    创建计划 / 更新计划等入口处调用，作为下游编排前的前置校验。
 
-    - checkpoint 可读 → 不一致返回 400；
+    校验策略按 checkpoint 可读性分流：
+
+    - checkpoint 可读 → 训练间隔与 bar_freq 不一致时返回 400；一致则静默放过；
     - 模型缺失/不可读 → 日内 bar_freq 返回 404（日内必须能锁定间隔）；
       "1d" 放过（保持既有宽松行为：允许先建计划，触发时再报错）。
 
-    路径源与本路由其它模型存在性检查一致（模块级 `CNN_MODEL_PATH`，测试可整体替换）。
+    模型路径源与本路由其它模型存在性检查一致（模块级 ``CNN_MODEL_PATH``，测试可整体替换）。
+
+    Args:
+        model: CNN 模型名（不含 ``.pt`` 扩展名），用于在 ``CNN_MODEL_PATH`` 下定位
+            checkpoint 文件 ``{model}.pt`` 并读取其训练输入间隔。
+        bar_freq: 本次请求/计划拟用的 K 线周期，如 "1d"（日线）或属于
+            ``INTRADAY_BAR_FREQS`` 的日内周期（如 "30m"）；须与模型训练间隔对应的
+            bar_freq 一致。
+
+    Returns:
+        None。校验通过（一致，或模型不可读但 bar_freq 为 "1d"）时静默返回，
+        不一致或日内无法锁定间隔时改为抛出 HTTPException。
+
+    Raises:
+        HTTPException: 状态码 400——checkpoint 可读但 bar_freq 与模型训练间隔对应的
+            bar_freq 不一致。
+        HTTPException: 状态码 404——模型缺失或不可读，且 bar_freq 为日内周期
+            （属于 ``INTRADAY_BAR_FREQS``），无法锁定训练间隔。
     """
     from ..cnn.storage import checkpoint_input_interval
 
@@ -167,7 +187,24 @@ def _validate_bar_freq_against_model(model: str, bar_freq: str) -> None:
     ),
 )
 async def start_live_decision(req: LiveDecisionRequest) -> dict:
-    """触发今日决策：校验必填字段(400)/模型存在(404) → 创建异步任务 → 返回 task_id。"""
+    """触发今日决策：校验必填字段/模型存在/间隔锁定后，创建后台异步任务并立即返回 task_id。
+
+    校验通过即把 ``run_live_decision`` 编排封进后台任务（不阻塞请求），仅产出 Decision
+    落盘 + Notifier 提醒，绝不下任何真实订单。前端用返回的 task_id 轮询任务结果。
+
+    Args:
+        req: 今日决策请求体。其中 model（CNN 模型名）、vt_symbol（标的代码）、scheme
+            （方案名）为业务必填非空；as_of 为决策时刻（缺省取当前本地时间）；bar_freq
+            须与模型训练间隔一致；其余字段（buy_threshold/portfolio/risk/position_ratio
+            等）透传给编排器。
+
+    Returns:
+        形如 ``{"task_id": "...", "message": "今日决策任务已启动"}``。
+
+    Raises:
+        HTTPException(400): 缺 model/vt_symbol/scheme，或 bar_freq 与模型训练间隔不一致。
+        HTTPException(404): 指定 CNN 模型文件不存在；或日内计划下模型不可读无法锁定间隔。
+    """
     # 400：缺必填字段（Pydantic 已校验类型，这里兜底业务必填非空）。
     if not req.model or not req.vt_symbol or not req.scheme:
         raise HTTPException(400, "缺少必填字段：model / vt_symbol / scheme")
@@ -195,6 +232,17 @@ async def start_live_decision(req: LiveDecisionRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """后台任务体：调用 run_live_decision 执行一次今日决策（手动触发）。
+
+        作为闭包捕获本路由内已解析的模型、标的、组合与风控等参数，由 task_manager
+        在后台线程调用；仅产出决策与提醒，不下真实订单。
+
+        Args:
+            on_progress: 可选进度回调，签名 ``(进度比例, 阶段描述)``，由任务框架注入用于上报进度。
+
+        Returns:
+            run_live_decision 的执行结果 dict。
+        """
         return run_live_decision(
             model_name=req.model,
             vt_symbol=vt_symbol,
@@ -224,7 +272,11 @@ async def start_live_decision(req: LiveDecisionRequest) -> dict:
     description="列出 DecisionStore 中已持久化决策的 signal_id 集合。",
 )
 async def list_decisions() -> dict:
-    """返回所有已持久化决策的标识符集合（Req 4.1）。"""
+    """列出 DecisionStore 中所有已持久化决策的标识符集合（Req 4.1）。
+
+    Returns:
+        形如 ``{"signal_ids": ["...", ...]}``；无决策时 signal_ids 为空列表。
+    """
     return {"signal_ids": _store.list_ids()}
 
 
@@ -233,7 +285,17 @@ async def list_decisions() -> dict:
     description="按 signal_id 返回单条决策详情，不存在则 404。",
 )
 async def get_decision(signal_id: str) -> dict:
-    """返回指定 signal_id 的完整决策；不存在则 404（Req 4.2 / 4.3）。"""
+    """返回指定 signal_id 的完整决策详情（Req 4.2 / 4.3）。
+
+    Args:
+        signal_id: 决策幂等键。
+
+    Returns:
+        Decision 的完整 dict 序列化（datetime 字段为 isoformat 字符串）。
+
+    Raises:
+        HTTPException(404): signal_id 对应决策不存在。
+    """
     decision = _store.get(signal_id)
     if decision is None:
         raise HTTPException(404, f"决策不存在: {signal_id}")
@@ -245,7 +307,17 @@ async def get_decision(signal_id: str) -> dict:
     description="按 signal_id 返回该决策的完整 Decision_Trace（六段决策过程档案），不存在则 404。",
 )
 async def get_decision_trace(signal_id: str) -> dict:
-    """返回指定 signal_id 的完整决策过程档案；不存在则 404（Req 8.4 / 8.5）。"""
+    """返回指定 signal_id 的完整 Decision_Trace（六段决策过程档案）（Req 8.4 / 8.5）。
+
+    Args:
+        signal_id: 决策幂等键（与对应 Decision 共用同一键）。
+
+    Returns:
+        决策过程档案的完整 dict（六段决策过程）。
+
+    Raises:
+        HTTPException(404): signal_id 对应过程档案不存在。
+    """
     trace = _trace_store.get(signal_id)
     if trace is None:
         raise HTTPException(404, f"决策过程档案不存在: {signal_id}")  # 满足 8.5
@@ -261,7 +333,21 @@ async def get_decision_trace(signal_id: str) -> dict:
     ),
 )
 async def delete_decision(signal_id: str) -> dict:
-    """归档决策与 trace（整体处理，避免「新决策配旧档案」错位）；决策不存在则 404。"""
+    """归档式删除单条决策及其过程档案，并解除该 signal_id 的幂等占位。
+
+    决策与 trace 整体处理（避免「新决策配旧档案」错位）：文件移入 archive/ 子目录保留
+    审计痕迹，同时解除幂等占位——若当日交易计划仍有未到期触发时点，删除后会重新决策并再次提醒。
+
+    Args:
+        signal_id: 待归档决策的幂等键。
+
+    Returns:
+        形如 ``{"signal_id": "...", "deleted": True, "trace_archived": bool}``；
+        trace_archived 表示是否存在并归档了对应过程档案。
+
+    Raises:
+        HTTPException(404): signal_id 对应决策不存在（trace 缺失不报错）。
+    """
     archived = _store.archive(signal_id)
     if archived is None:
         raise HTTPException(404, f"决策不存在: {signal_id}")
@@ -282,7 +368,21 @@ async def delete_decision(signal_id: str) -> dict:
     ),
 )
 async def batch_delete_decisions(signal_ids: list[str] = Body(..., embed=True)) -> dict:
-    """批量归档决策 + trace；返回 {deleted, missing}（均保持入参顺序，重复 id 去重）。"""
+    """批量归档式删除决策及其过程档案（部分成功语义，不因个别缺失整体失败）。
+
+    语义与单条 DELETE 一致：存在的逐条移入 archive/ 并解除幂等占位，不存在的归入 missing。
+    入参先去重后保序处理，结果列表同样保持入参顺序。
+
+    Args:
+        signal_ids: 待归档的决策幂等键列表（embed 在请求体中）；不能为空。
+
+    Returns:
+        形如 ``{"deleted": [...], "missing": [...]}``：deleted 为成功归档的 id，
+        missing 为不存在的 id，两者均去重保序。
+
+    Raises:
+        HTTPException(400): signal_ids 为空。
+    """
     if not signal_ids:
         raise HTTPException(400, "signal_ids 不能为空")
     deleted: list[str] = []
@@ -315,7 +415,14 @@ def _trigger_plan(
     通知通道由 ``build_notifier(plan.notify_channels)`` 在运行时按环境变量装配（凭证不入计划）。
     不调用任何券商网关 / 下单接口（Property 12）。
 
-    Wave 2c：trigger_source 传入编排器落盘（"scheduler" | "manual"）。
+    Args:
+        plan: 已持久化的交易计划；其 strategy_type 决定分派路径，其余字段透传给对应编排器。
+        on_progress: 可选进度回调 ``(fraction, message)``；由任务管理器注入，用于上报执行进度。
+        trigger_source: 触发来源标记，"manual"（手动）或 "scheduler"（自动调度），随决策落盘。
+
+    Returns:
+        对应编排器（rule 走 run_rebalance_decision，cnn 走 run_live_decision）的结果 dict，
+        含决策内容、幂等命中标记、风控与（可能的）跳过原因。
     """
     if plan.strategy_type == "rule":
         # rule 计划路径：组合调仓编排。
@@ -444,7 +551,19 @@ def _plan_summary(plan: TradingPlan) -> TradingPlanSummary:
 
 @router.post("/plans", description="创建交易计划，返回完整内容（notify_channels 仅通道名，无凭证）。")
 async def create_plan(req: TradingPlanRequest) -> dict:
-    """创建交易计划（Req 2.1）。"""
+    """创建一个交易计划并持久化（Req 2.1）。
+
+    先做间隔锁定校验（bar_freq 必须与模型训练间隔一致），再生成新 plan_id 落盘。
+
+    Args:
+        req: 交易计划请求体；notify_channels 仅存通道名，凭证不入计划。
+
+    Returns:
+        新建计划的完整内容 dict（含自动生成的 plan_id / created_at）。
+
+    Raises:
+        HTTPException(400/404): 间隔锁定校验失败（详见 ``_validate_bar_freq_against_model``）。
+    """
     _validate_bar_freq_against_model(req.model, req.bar_freq)  # 间隔锁定
     plan = _request_to_plan(req, plan_id=TradingPlan.new_id())
     _plan_store.save(plan)
@@ -453,13 +572,27 @@ async def create_plan(req: TradingPlanRequest) -> dict:
 
 @router.get("/plans", description="列出所有交易计划摘要（含启用状态与最近触发日）。")
 async def list_plans() -> list[dict]:
-    """计划列表摘要（Req 2.2）。"""
+    """列出所有交易计划的摘要（含启用状态与最近触发日）（Req 2.2）。
+
+    Returns:
+        TradingPlanSummary dict 列表；无计划时返回空列表。
+    """
     return [_plan_summary(p).model_dump() for p in _plan_store.list_all()]
 
 
 @router.get("/plans/{plan_id}", description="按 plan_id 返回计划完整内容，不存在则 404。")
 async def get_plan(plan_id: str) -> dict:
-    """计划详情（Req 2.3 / 2.7）。"""
+    """按 plan_id 返回交易计划的完整内容（Req 2.3 / 2.7）。
+
+    Args:
+        plan_id: 计划 ID。
+
+    Returns:
+        计划完整内容 dict。
+
+    Raises:
+        HTTPException(404): plan_id 对应计划不存在。
+    """
     plan = _plan_store.get(plan_id)
     if plan is None:
         raise HTTPException(404, f"交易计划不存在: {plan_id}")
@@ -468,7 +601,21 @@ async def get_plan(plan_id: str) -> dict:
 
 @router.put("/plans/{plan_id}", description="按 plan_id 更新计划（保持 plan_id 与 created_at 不变）。")
 async def update_plan(plan_id: str, req: TradingPlanRequest) -> dict:
-    """更新计划（Req 2.4 / 2.7）。"""
+    """按 plan_id 整体更新交易计划，保持 plan_id 与 created_at 不变（Req 2.4 / 2.7）。
+
+    先确认计划存在并通过间隔锁定校验，再用请求体重建计划落盘（updated_at 自动刷新）。
+
+    Args:
+        plan_id: 待更新计划的 ID。
+        req:     新的计划内容请求体。
+
+    Returns:
+        更新后计划的完整内容 dict。
+
+    Raises:
+        HTTPException(404): plan_id 对应计划不存在。
+        HTTPException(400/404): 间隔锁定校验失败（详见 ``_validate_bar_freq_against_model``）。
+    """
     existing = _plan_store.get(plan_id)
     if existing is None:
         raise HTTPException(404, f"交易计划不存在: {plan_id}")
@@ -480,7 +627,17 @@ async def update_plan(plan_id: str, req: TradingPlanRequest) -> dict:
 
 @router.delete("/plans/{plan_id}", description="按 plan_id 删除计划，不存在则 404。")
 async def delete_plan(plan_id: str) -> dict:
-    """删除计划（Req 2.5 / 2.7）。"""
+    """按 plan_id 删除交易计划（Req 2.5 / 2.7）。
+
+    Args:
+        plan_id: 待删除计划的 ID。
+
+    Returns:
+        形如 ``{"plan_id": "...", "deleted": True}``。
+
+    Raises:
+        HTTPException(404): plan_id 对应计划不存在。
+    """
     if not _plan_store.delete(plan_id):
         raise HTTPException(404, f"交易计划不存在: {plan_id}")
     return {"plan_id": plan_id, "deleted": True}
@@ -488,7 +645,18 @@ async def delete_plan(plan_id: str) -> dict:
 
 @router.patch("/plans/{plan_id}/enabled", description="启用/停用计划。")
 async def toggle_plan(plan_id: str, enabled: bool = Body(..., embed=True)) -> dict:
-    """切换启用状态（Req 2.6 / 2.7）。"""
+    """启用或停用指定交易计划（Req 2.6 / 2.7）。
+
+    Args:
+        plan_id: 目标计划 ID。
+        enabled: 目标启用状态（True 启用 / False 停用），embed 在请求体中。
+
+    Returns:
+        形如 ``{"plan_id": "...", "enabled": bool}``，回显设置后的状态。
+
+    Raises:
+        HTTPException(404): plan_id 对应计划不存在。
+    """
     plan = _plan_store.get(plan_id)
     if plan is None:
         raise HTTPException(404, f"交易计划不存在: {plan_id}")
@@ -505,7 +673,19 @@ async def toggle_plan(plan_id: str, enabled: bool = Body(..., embed=True)) -> di
     ),
 )
 async def run_plan(plan_id: str) -> dict:
-    """按计划手动触发（Req 3.1 / 3.4）。"""
+    """按已有计划立即手动触发一次今日决策（异步任务，返回 task_id）（Req 3.1 / 3.4）。
+
+    取出计划后封进后台任务执行 ``_trigger_plan``，仅产出决策与提醒，不下任何真实订单。
+
+    Args:
+        plan_id: 待触发计划的 ID。
+
+    Returns:
+        形如 ``{"task_id": "...", "message": "按计划触发任务已启动"}``，前端据此轮询结果。
+
+    Raises:
+        HTTPException(404): plan_id 对应计划不存在。
+    """
     plan = _plan_store.get(plan_id)
     if plan is None:
         raise HTTPException(404, f"交易计划不存在: {plan_id}")
@@ -518,6 +698,16 @@ async def run_plan(plan_id: str) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """后台任务体：按已取出的计划调用 _trigger_plan 触发一次今日决策。
+
+        闭包捕获本路由查出的 plan，由 task_manager 在后台线程调用；仅产出决策与提醒，不下真实订单。
+
+        Args:
+            on_progress: 可选进度回调，签名 ``(进度比例, 阶段描述)``，由任务框架注入用于上报进度。
+
+        Returns:
+            _trigger_plan 的执行结果 dict。
+        """
         return _trigger_plan(plan, on_progress=on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -526,7 +716,14 @@ async def run_plan(plan_id: str) -> dict:
 
 @router.get("/scheduler/status", description="返回进程内调度器运行状态与各计划最近触发日。")
 async def scheduler_status() -> dict:
-    """调度器状态（Req 8.5）。"""
+    """返回进程内调度器的运行状态与各计划最近触发日（Req 8.5）。
+
+    调度器单例缺失（未装配）时退化为 running=False、按计划存储统计启用数。
+
+    Returns:
+        SchedulerStatus dict，含 running（是否在跑）、tick_seconds（轮询间隔秒）、
+        enabled_plan_count（启用计划数）、last_triggered（``{plan_id: "YYYY-MM-DD"}``，兼容新旧状态形态）。
+    """
     # 归一化为 {plan_id: "YYYY-MM-DD"}，满足 SchedulerStatus.last_triggered: dict[str,str]（兼容新旧值）。
     mapping = _normalize_last_triggered(_runtime_state.get(_LAST_TRIGGERED_KEY, {}) or {})
     running = _scheduler.is_running() if _scheduler is not None else False
@@ -561,7 +758,7 @@ async def get_scheduler_runs(
 
     Args:
         plan_id: 可选过滤计划 ID；不传则返回所有计划的日志。
-        date:    查询日期，格式 ``YYYY-MM-DD``；不传默认当日（本地时间）；非法格式返回 422。
+        date:    查询日期，格式 ``YYYY-MM-DD``；不传默认当日（本地时间）。
         limit:   最多返回条数，默认 200；结果倒序（最新在前）。
 
     Returns:
@@ -569,6 +766,12 @@ async def get_scheduler_runs(
 
             {"ts": "...", "event": "skip"|"trigger"|"error",
              "plan_id": "...", "reason"|"slot"|"error": "...", ...}
+
+        无匹配记录时返回空列表。
+
+    Raises:
+        HTTPException: 状态码 422——date 非空且不能按 ``YYYY-MM-DD`` 解析
+            （``date.fromisoformat`` 抛 ValueError）时抛出。
 
     Example::
 
@@ -591,7 +794,14 @@ async def get_scheduler_runs(
 def build_plan_scheduler(*, tick_seconds: float) -> PlanScheduler:
     """装配 PlanScheduler（注入计划存储、运行时状态、_trigger_plan 与调度运行日志）。
 
-    Wave 2c: 调度器触发路径传 trigger_source="scheduler"。
+    调度器触发路径固定传 trigger_source="scheduler"（Wave 2c），以便与手动触发区分落盘。
+    通常由 main.py lifespan 在应用启动时调用。
+
+    Args:
+        tick_seconds: 调度轮询间隔（秒），决定多久检查一次各计划是否到达触发时点。
+
+    Returns:
+        已接线好依赖、可直接 start 的 PlanScheduler 实例。
     """
     return PlanScheduler(
         store=_plan_store,
@@ -603,7 +813,16 @@ def build_plan_scheduler(*, tick_seconds: float) -> PlanScheduler:
 
 
 def register_scheduler(scheduler: PlanScheduler | None) -> None:
-    """由 main.py lifespan 注册调度器单例，供状态端点读取。"""
+    """注册（或清除）进程内调度器单例，供 ``scheduler_status`` 端点读取运行状态。
+
+    由 main.py lifespan 在启动时注册实例、在关闭时传 None 清除。写入模块级全局 ``_scheduler``。
+
+    Args:
+        scheduler: 要注册的 PlanScheduler 实例；传 None 表示解除注册（端点将退化为按存储统计）。
+
+    Returns:
+        None。
+    """
     global _scheduler
     _scheduler = scheduler
 
@@ -905,6 +1124,17 @@ async def start_rebalance(req: RebalanceRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """后台任务体：调用 run_rebalance_decision 执行一次组合调仓决策。
+
+        先幂等 import rules 以确保 etf_momentum 等信号源完成注册，再以本路由解析好的
+        计划/内联参数发起调仓；由 task_manager 在后台线程调用。
+
+        Args:
+            on_progress: 可选进度回调，签名 ``(进度比例, 阶段描述)``，由任务框架注入用于上报进度。
+
+        Returns:
+            run_rebalance_decision 的执行结果 dict。
+        """
         # 确保 rules 信号源已注册（import 幂等）。
         from .. import rules  # noqa: F401  确保 etf_momentum 等信号源已注册
         return run_rebalance_decision(
