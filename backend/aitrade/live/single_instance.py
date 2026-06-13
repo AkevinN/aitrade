@@ -36,7 +36,14 @@ class SingleInstanceLock:
         self._fd: int | None = None
 
     def acquire(self) -> bool:
-        """尝试获取锁（非阻塞）。成功 True，已被占用 False。"""
+        """非阻塞地尝试获取文件 flock；成功则记住文件描述符供后续释放。
+
+        立即返回，不等待；用于「拿不到就放弃，由别的实例继续」的主备场景。
+
+        Returns:
+            True 表示成功获取锁、本进程成为唯一下单实例；False 表示锁已被其他
+            进程占用（此时不持有任何描述符，可安全放弃启动）。
+        """
         fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

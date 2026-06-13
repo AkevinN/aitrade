@@ -51,7 +51,23 @@ _DECISION_WINDOW_DAYS = 16
 def format_rebalance_message(decision: RebalanceDecision) -> tuple[str, str]:
     """格式化调仓决策为人读清单消息（纯函数，无副作用）。
 
-    返回 (title, message) 元组，由调用方传入 notifier.send。
+    把一条 RebalanceDecision 渲染成可直接推送给用户的标题与正文，供调用方
+    传入 notifier.send。
+
+    Args:
+        decision: 待格式化的调仓决策。本函数读取其以下字段：
+            - scheme：方案名，渲染标题时去除 "rule:" 前缀。
+            - decision_bar_dt：决策 bar 时刻字符串（如 "2026-06-09T15:00:00" 或
+              "2026-06-09"），仅取前 10 位日期部分进标题。
+            - items：调仓明细列表，按 action 分为卖出/买入两段，逐条渲染
+              "{动作} {vt_symbol} {volume}股 @≈{price}"；price 为 None 时省略价格。
+            - risk_summary：风控记录列表，据其中 check/passed/detail 渲染熔断、
+              趋势弱、取价失败等风控提示；当处于熔断（circuit/drawdown 未通过）
+              且 items 为空时，输出"持仓维持现状"的人工处置指引。
+
+    Returns:
+        (title, message) 二元组：title 为单行标题，message 为多行正文
+        （以 "\\n" 连接）。两者均为非空字符串，message 末行固定提示人工执行。
 
     消息格式：
     - 标题：含 scheme（去 "rule:" 前缀）与 decision_bar_dt 日期部分。
@@ -167,6 +183,9 @@ def run_rebalance_decision(
         notifier        — 通知通道。
         lab             — AlphaLab 实例（可选，用于趋势闸门基准数据；None 时 fail-open）。
         on_progress     — 进度回调 (float 0~100, str 消息)。
+        trigger_source  — 触发来源标记，默认 "manual"（人工在操作台手动触发）；
+                          定时任务/调度器触发时传 "scheduled"。仅作为审计标签
+                          原样写入 RebalanceDecision.trigger_source，不影响决策逻辑。
 
     返回：
         {
@@ -455,7 +474,22 @@ def _get_price(
 ) -> float | None:
     """从信号 DataFrame 或 AlphaLab 读取标的参考价（close）。
 
-    优先级：
+    用于调仓时估算下单参考价；取价失败不抛错，由调用方据返回的 None 决定跳过该标的。
+
+    Args:
+        vt_symbol: 目标标的合约代码，如 "510300.SSE"；用于在 signal_df / 行情表中筛选行。
+        signal_df: 信号源产出的 polars DataFrame，至少含 [datetime, vt_symbol] 列；
+            若额外含 "close" 列则作为首选价源（路径 1）。
+        decision_bar_dt: 已选定的决策 bar 时刻，用于在 signal_df 中定位该标的当日行。
+        lab: AlphaLab 实例；为 None 时跳过行情回退（路径 2 不可用），仅依赖 signal_df。
+        instant: 决策时刻（DecisionInstant），提供 as_of 截断点与 bar_freq，
+            供路径 2 按 as-of 选取无前视的 bar（截断窗口为 as_of 前 _DECISION_WINDOW_DAYS 日）。
+
+    Returns:
+        参考价 close（float）；当 signal_df 无 "close" 列或无匹配行、且 lab 为 None
+        或行情取价失败时返回 None，表示无法取价（调用方应跳过该标的）。
+
+    取价优先级：
     1. signal_df 若含 "close" 列，取 decision_bar_dt 当日该标的 close。
     2. lab 不为 None 时，从 AlphaLab 加载 bar 行情取 close（as-of 截断，无前视）。
     3. 均无则返回 None（调用方跳过该标的）。

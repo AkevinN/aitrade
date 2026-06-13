@@ -17,7 +17,15 @@ from .risk import RiskManager
 
 
 class RiskInspector:
-    """包住 RiskManager，逐项记录风控检查明细。判定结果仍以 RiskManager 为准。"""
+    """包住 RiskManager，逐项记录风控检查明细。判定结果仍以 RiskManager 为准。
+
+    通过鸭子类型暴露与 RiskManager 一致的 can_trade / buy_capacity / check_buy 签名，
+    可直接注入 SignalService。每次 check_buy 都会把各检查项明细累积进 records。
+
+    Attributes:
+        records: 检查明细列表，每项为 {"check": 检查项名, "passed": bool, "detail": 说明}。
+            随 check_buy 调用持续追加，调用方需要时自行清空。
+    """
 
     def __init__(self, risk: RiskManager) -> None:
         """初始化 RiskInspector。
@@ -30,7 +38,14 @@ class RiskInspector:
         self.records: list[dict] = []  # [{check, passed, detail}]
 
     def can_trade(self) -> tuple[bool, str]:
-        """透传，保持 SignalService 调用面一致。"""
+        """透传 RiskManager 的全局交易闸门判定，保持 SignalService 调用面一致。
+
+        用于查询 kill-switch / 熔断等全局门是否放行，不针对单个标的。
+
+        Returns:
+            (ok, reason) 二元组：ok 为 True 表示当前允许交易，reason 为空串；
+            ok 为 False 时 reason 为禁止原因（如熔断触发）。
+        """
         return self._risk.can_trade()
 
     def buy_capacity(
@@ -42,7 +57,21 @@ class RiskInspector:
         current_symbol_value: float = 0.0,
         halted: bool = False,
     ) -> tuple[float, str]:
-        """透传可买额度计算；明细仍由最终 `check_buy` 记录。"""
+        """透传 RiskManager 的可买额度计算；本方法不记录明细（明细仅由 check_buy 产生）。
+
+        在风控约束下，估算该标的当前还能买入多少市值。
+
+        Args:
+            vt_symbol: 合约代码，如 "510300.SSE"。
+            portfolio_value: 组合总市值（现金 + 持仓），用作各比例上限的基数。
+            current_total_position_value: 当前全部持仓市值，用于校验总仓位上限。
+            current_symbol_value: 该标的当前持仓市值，用于校验单票上限，默认 0.0（空仓）。
+            halted: 该标的是否停牌 / 涨跌停封死，默认 False。
+
+        Returns:
+            (capacity, reason) 二元组：capacity 为还可买入的市值（>= 0，受总仓位、
+            单票上限等约束取最小值）；reason 为额度受何约束限制的说明文本。
+        """
         return self._risk.buy_capacity(
             vt_symbol=vt_symbol,
             portfolio_value=portfolio_value,
@@ -61,7 +90,24 @@ class RiskInspector:
         current_symbol_value: float = 0.0,
         halted: bool = False,
     ) -> tuple[bool, str]:
-        """按 RiskManager 同序重放各检查项并记录明细，最终判定委托 RiskManager。"""
+        """按 RiskManager 同序重放各风控检查项、逐项追加到 records，最终判定委托 RiskManager。
+
+        本方法有副作用：每次调用都会向 self.records 追加 5 条 {check, passed, detail}
+        明细（闸门、黑名单、停牌、总仓位上限、单票上限），供前端展示 / 审计。明细仅作展示，
+        权威放行与否始终以末尾的 RiskManager.check_buy 返回值为准，避免双实现漂移。
+
+        Args:
+            vt_symbol: 拟买入的合约代码，如 "510300.SSE"。
+            intended_value: 本次拟买入的市值（元，正数）。
+            portfolio_value: 组合总市值（现金 + 持仓），用作各比例上限的基数。
+            current_total_position_value: 当前全部持仓市值，用于校验总仓位上限。
+            current_symbol_value: 该标的当前持仓市值，用于校验单票上限，默认 0.0（空仓）。
+            halted: 该标的是否停牌 / 涨跌停封死，默认 False。
+
+        Returns:
+            (ok, reason) 二元组（来自 RiskManager.check_buy）：ok 为 True 表示放行、
+            reason 为空串；ok 为 False 时 reason 为首个未通过项的拒绝原因。
+        """
         cfg = self._risk.config
         rec = self.records.append  # 局部别名
 

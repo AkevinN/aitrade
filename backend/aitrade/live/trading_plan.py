@@ -78,12 +78,27 @@ class TradingPlan:
 
     @staticmethod
     def new_id() -> str:
-        """生成新的 plan_id（12 位 hex UUID 片段）。"""
+        """生成新的 plan_id，用于初始化一个新计划。
+
+        Returns:
+            截取 UUID4 十六进制串前 12 位的字符串，如 "a1b2c3d4e5f6"；
+            在本系统规模下碰撞概率可忽略。
+        """
         return uuid.uuid4().hex[:12]
 
 
 def effective_trigger_times(plan: "TradingPlan") -> list[str]:
-    """计划生效的唤醒时刻集合（去重升序；"HH:MM" 字典序即时间序）。"""
+    """计算计划实际生效的调度唤醒时刻集合，供调度器排程时使用。
+
+    在原始 trigger_times 基础上剔除空串、去重并升序排列；由于时刻为
+    定宽 "HH:MM" 格式，字典序即时间先后序。
+
+    Args:
+        plan: 目标交易计划；读取其 trigger_times 字段。
+
+    Returns:
+        去重升序的 "HH:MM" 时刻列表；无有效时刻时返回空列表。
+    """
     return sorted({t for t in plan.trigger_times if t})
 
 
@@ -95,10 +110,25 @@ class TradingPlanStore:
     """
 
     def __init__(self, base_path: Path | str) -> None:
+        """初始化计划存储，并确保落盘目录存在。
+
+        Args:
+            base_path: 计划 JSON 文件的存放目录；不存在时会连同父目录一并创建。
+        """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, plan_id: str) -> Path:
+        """把 plan_id 映射为对应的 JSON 文件路径，并做文件名脱敏。
+
+        将 plan_id 中的 "/" 与 ":" 替换为 "_"，避免越权写到目录外或生成非法文件名。
+
+        Args:
+            plan_id: 计划唯一标识；正常由 new_id() 生成，仅含 hex 字符。
+
+        Returns:
+            base_path 下的 ``<安全化 plan_id>.json`` 路径（文件不一定已存在）。
+        """
         safe = plan_id.replace("/", "_").replace(":", "_")
         return self.base_path / f"{safe}.json"
 

@@ -23,7 +23,15 @@ from .rebalance_decision import RebalanceDecision
 
 @dataclass
 class PortfolioState:
-    """组合持仓快照（v1 不追踪现金）。"""
+    """组合持仓快照（v1 不追踪现金），PositionBook 的持久化单元。
+
+    Attributes:
+        portfolio_id: 组合标识，对应一个账本 JSON 文件。
+        positions: 当前持仓，vt_symbol → 股数；零持仓标的不在内（应用后会被移除）。
+        cash: 可用现金（元）；v1 可不追踪，None 表示未启用现金跟踪。
+        last_signal_id: 最近一次已确认调仓的幂等键，用于防重复确认；初始为空串。
+        updated_at: 最近一次写盘时间（ISO8601，秒精度）；从未应用过调仓时为空串。
+    """
 
     portfolio_id: str
     positions: dict[str, int] = field(default_factory=dict)  # vt_symbol → 股数
@@ -39,7 +47,8 @@ class PositionBook:
     """
 
     def __init__(self, base_path: Path | str) -> None:
-        """
+        """初始化持仓账本：以 base_path 为账本文件根目录（不存在则创建）。
+
         Args:
             base_path: 账本文件根目录，不存在时自动创建。
                        每个 portfolio_id 对应一个 ``<safe_portfolio_id>.json`` 文件。
@@ -48,11 +57,27 @@ class PositionBook:
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, portfolio_id: str) -> Path:
+        """将 portfolio_id 映射为账本文件路径（/ 与 : 替换为 _ 以保证文件名合法）。
+
+        Args:
+            portfolio_id: 组合标识，可含 / 或 :（会被规整为 _）。
+
+        Returns:
+            ``{base_path}/{safe_portfolio_id}.json`` 路径对象。
+        """
         safe = portfolio_id.replace("/", "_").replace(":", "_")
         return self.base_path / f"{safe}.json"
 
     def load(self, portfolio_id: str) -> PortfolioState:
-        """加载持仓状态；文件缺失则返回空账本（positions={}）。"""
+        """加载组合的持仓状态。
+
+        Args:
+            portfolio_id: 组合标识，对应一个账本 JSON 文件。
+
+        Returns:
+            反序列化得到的 PortfolioState；文件缺失时返回该 portfolio_id 的空账本
+            （positions={}、last_signal_id=""、updated_at=""）。
+        """
         path = self._path(portfolio_id)
         if not path.exists():
             return PortfolioState(portfolio_id=portfolio_id)
@@ -60,7 +85,17 @@ class PositionBook:
         return PortfolioState(**raw)
 
     def save(self, state: PortfolioState) -> None:
-        """原子写：tmp+os.replace，崩溃安全。"""
+        """将持仓状态原子写入账本文件（先写同目录 tmp 再 os.replace，崩溃安全）。
+
+        写入路径由 state.portfolio_id 决定；同名文件存在时被整体替换。
+        无论成功与否都会清理临时文件。
+
+        Args:
+            state: 待持久化的组合持仓状态。
+
+        Returns:
+            None。
+        """
         path = self._path(state.portfolio_id)
         tmp_path = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp.json")
         try:
@@ -85,6 +120,18 @@ class PositionBook:
         2. 先全量校验：任一 sell 超过当前持仓 → 整笔拒绝，账本不变。
         3. 全量通过后才逐 item 应用：buy+=、sell-=；归零的 symbol 移除。
         4. 成功后更新 last_signal_id、updated_at，原子写文件。
+
+        Args:
+            portfolio_id: 目标组合标识，先据此 load 当前账本。
+            decision: 已确认的调仓决策（含幂等键 signal_id 与逐标的 buy/sell items）。
+
+        Returns:
+            应用调仓后的 PortfolioState（已写盘）；positions 已剔除归零标的，
+            last_signal_id 更新为 decision.signal_id，updated_at 为当前时刻。
+
+        Raises:
+            ValueError: 该 signal_id 已确认过（重复确认），或任一 sell 超过当前持仓
+                （此时账本保持不变，不做任何部分应用）。
         """
         state = self.load(portfolio_id)
 
