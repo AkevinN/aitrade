@@ -83,6 +83,16 @@ class TaskManager:
     _lock: threading.Lock = threading.Lock()
 
     def __new__(cls) -> "TaskManager":
+        """返回进程内唯一的 TaskManager 实例（double-checked locking）。
+
+        首次实例化时初始化任务表 ``_tasks``、任务锁 ``_task_lock``、
+        线程池 ``_executor``（worker 数为 ``max(1, MAX_WORKERS)``）以及历史归档
+        ``_history_store``（延迟导入 TaskHistoryStore 以避免循环依赖）；
+        后续调用直接返回已缓存实例，不重复初始化。
+
+        Returns:
+            全局共享的 TaskManager 单例。
+        """
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -215,6 +225,11 @@ class TaskManager:
         """
 
         def wrapper() -> None:
+            """守护线程内执行的任务主体：跑 func 并驱动任务状态机。
+
+            置 RUNNING 后调用 func（按需注入进度回调），成功转 COMPLETED 并记录
+            结果与耗时，异常则转 FAILED 并存截断堆栈；终态后 best-effort 归档。
+            """
             started = datetime.now()
             try:
                 self.update_task(
@@ -228,6 +243,7 @@ class TaskManager:
                 effective_callback = on_progress
                 if effective_callback is None and enable_progress:
                     def effective_callback(progress: float, message: str = "") -> None:
+                        """enable_progress 下自动注入的进度回调：把进度/消息写回任务。"""
                         self.update_task(task_id, progress=progress, message=message)
 
                 if effective_callback:
@@ -269,7 +285,14 @@ class TaskManager:
     def _archive(self, task_id: str) -> None:
         """终态钩子：best-effort 归档到 TaskHistoryStore（R2.1/R2.4）。
 
-        失败时记 WARNING 日志，不影响任务本身的状态流转。
+        任务不存在则静默返回；归档抛错时记 WARNING 日志并吞掉异常，
+        保证不影响任务本身的状态流转。
+
+        Args:
+            task_id: 待归档任务 ID；任务已不在内存表中时不做任何事。
+
+        Returns:
+            None。归档成功与否均不抛出，仅通过日志反映失败。
         """
         task = self.get_task(task_id)
         if task is None:

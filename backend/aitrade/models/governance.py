@@ -50,6 +50,8 @@ class CNNTrainingParams(BaseModel):
     lookback: int = Field(default=30, ge=2, le=4096)
     dropout: float = Field(default=0.4, ge=0, lt=1)
     train_ratio: float = Field(default=0.8, gt=0, lt=1)
+    # 损失加权策略：none=普通 BCE，各样本权重相同；
+    # magnitude=按 |未来收益| 对样本加权，让大波动样本主导梯度（仅分类目标生效）。
     loss_weighting: Literal["none", "magnitude"] = "none"
 
 
