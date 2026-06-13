@@ -16,12 +16,14 @@ import polars as pl
 
 from ..backtest.oco import simulate_oco_exit
 from .features import (
+    ALIGN_DROP_WARN_THRESHOLD,
     FEATURE_NAMES,
     _align_frames_by_datetime,
     _build_grouped_tensor,
     _compute_features,
     _extract_aligned_bars,
     _load_market_frame,
+    alignment_drop_rate,
     normalize_observation_groups,
 )
 
@@ -494,6 +496,20 @@ def build_dataset(
         on_progress(32, "按公共时间轴对齐观测组...")
 
     symbols, aligned_df = _align_frames_by_datetime(symbol_frames)
+
+    # 对齐丢弃率测量：旁路纯函数，不改变 aligned_df；记录各标的对齐前行数
+    per_symbol_bars_before_align: dict[str, int] = {
+        sym: frame.height for sym, frame in symbol_frames.items()
+    }
+    drop_rate = alignment_drop_rate(symbol_frames, aligned_df.height)
+
+    if on_progress:
+        drop_warn = "⚠️ " if drop_rate > ALIGN_DROP_WARN_THRESHOLD else ""
+        on_progress(
+            35,
+            f"{drop_warn}对齐丢弃率={drop_rate:.1%}，公共时间步={aligned_df.height}",
+        )
+
     if target_symbol not in symbols:
         raise ValueError(f"目标证券 {target_symbol} 不在观测证券列表中")
 
@@ -688,9 +704,18 @@ def build_dataset(
         "objective": objective,
         "skipped_for_label": skipped,
         "skipped_for_neutral": skipped_neutral,
+        # 对齐丢弃率：因停牌/数据缺失导致跨标的 inner join 后丢弃的样本比例
+        "alignment_drop_rate": drop_rate,
+        # 各标的对齐前原始行数，便于调用方定位哪只证券数据缺口最大
+        "per_symbol_bars_before_align": per_symbol_bars_before_align,
         # 每样本带符号未来收益（与 X/y 同序），供训练侧做幅度加权；不写入 checkpoint
         "sample_returns": returns_list,
     }
     if class_distribution is not None:
         info["class_distribution"] = class_distribution
+    if drop_rate > ALIGN_DROP_WARN_THRESHOLD:
+        info["alignment_warning"] = (
+            f"对齐丢弃率 {drop_rate:.1%} 超过阈值 {ALIGN_DROP_WARN_THRESHOLD:.0%}，"
+            f"请检查各标的数据完整性（per_symbol_bars_before_align: {per_symbol_bars_before_align}）"
+        )
     return X, y, group_mask, info

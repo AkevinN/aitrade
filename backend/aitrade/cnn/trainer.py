@@ -18,6 +18,7 @@ from .dataset import (
     PATH_TIME_UP,
     PATH_TP_FIRST,
 )
+from .features import ALIGN_DROP_WARN_THRESHOLD
 from .model import build_dataset, create_market_cnn, normalize_observation_groups
 from .storage import save_cnn_model
 
@@ -739,6 +740,8 @@ def train_cnn_model(
         "label_threshold": info.get("label_threshold", 0.0),
         "train_pos_ratio": round(train_pos_ratio, 4),
         "val_pos_ratio": round(val_pos_ratio, 4),
+        # 对齐丢弃率：训练时因停牌/数据缺失导致 inner join 后流失的 bar 比例
+        "alignment_drop_rate": info.get("alignment_drop_rate", 0.0),
     }
     if is_path_class and info.get("class_distribution"):
         dataset_info["class_distribution"] = info["class_distribution"]
@@ -820,6 +823,19 @@ def train_cnn_model(
                 f"(基线 {best_metrics.get('val_baseline_acc', 0):.1%}) | {verdict} | 耗时={elapsed:.0f}s",
             )
 
+    # 组装训练告警：超阈值丢弃率加入 warnings 列表（仿 beats_baseline 等既有结果键）
+    _train_warnings: list[str] = []
+    _align_drop = info.get("alignment_drop_rate", 0.0)
+    if _align_drop > ALIGN_DROP_WARN_THRESHOLD:
+        _train_warnings.append(
+            f"对齐丢弃率 {_align_drop:.1%} 超过阈值 {ALIGN_DROP_WARN_THRESHOLD:.0%}，"
+            f"请检查各标的数据完整性"
+        )
+    if info.get("alignment_warning"):
+        # dataset 侧已有更详细告警，去重只加入若 _train_warnings 尚未覆盖
+        if not _train_warnings:
+            _train_warnings.append(info["alignment_warning"])
+
     result = {
         "name": name,
         "model_path": str(model_path),
@@ -839,7 +855,11 @@ def train_cnn_model(
         "elapsed_seconds": round(elapsed, 1),
         "history": history,
         "tensor_shape": [int(C), int(T), int(S), int(G)],
+        # 对齐丢弃率直接暴露在 result 顶层，便于调用方快速判断
+        "alignment_drop_rate": _align_drop,
     }
+    if _train_warnings:
+        result["warnings"] = _train_warnings
     if is_path_class:
         result.update({
             "num_classes": 4,

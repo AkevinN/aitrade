@@ -151,6 +151,7 @@ def test_on_meta_emits_complete_inference_meta(stub_model) -> None:
         "total_steps",
         "valid_points",
         "per_symbol_bars",
+        "alignment_drop_rate",  # Task 6：对齐丢弃率回传
     }
     assert set(meta.keys()) == expected_keys
 

@@ -94,6 +94,7 @@ def predict_cnn_signals(
         _extract_aligned_bars,
         _build_grouped_tensor,
     )
+    from .features import ALIGN_DROP_WARN_THRESHOLD, alignment_drop_rate
 
     # 1. Load checkpoint
     model_path = CNN_MODEL_DIR / f"{model_name}.pt"
@@ -167,6 +168,12 @@ def predict_cnn_signals(
         on_progress(38, "按公共时间轴对齐...")
 
     symbols, aligned_df = _align_frames_by_datetime(symbol_frames)
+
+    # 对齐丢弃率测量：旁路纯函数，不改变 aligned_df
+    drop_rate = alignment_drop_rate(symbol_frames, aligned_df.height)
+    if on_progress and drop_rate > 0:
+        drop_warn = "⚠️ " if drop_rate > ALIGN_DROP_WARN_THRESHOLD else ""
+        on_progress(40, f"{drop_warn}对齐丢弃率={drop_rate:.1%}，公共时间步={aligned_df.height}")
 
     all_features: dict[str, np.ndarray] = {}
     for vt_symbol in symbols:
@@ -317,6 +324,7 @@ def predict_cnn_signals(
             "per_symbol_bars": {
                 sym: frame.height for sym, frame in symbol_frames.items()
             },
+            "alignment_drop_rate": drop_rate,
         })
 
     return signal_df
