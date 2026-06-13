@@ -288,23 +288,62 @@ def test_property1_reproducible_and_distinguishable(
 def test_property2_seed_checkpoint_roundtrip(
     seed: int, tmp_path: Any, monkeypatch: Any
 ) -> None:
-    """Property 2: train_config["seed"] 等于训练所用 seed，可从 save_data 读回。
+    """Property 2: train_config["seed"] 在 torch.save→torch.load 磁盘往返后与原始值相等。
 
-    验证：
-    1. save_cnn_model 收到的 data["train_config"]["seed"] == seed（写入正确）。
-    2. 从该 save_data 读出的 seed 等于原始值（往返一致）。
+    验证流程：
+    1. 将 CNN_MODEL_DIR 重定向到 tmp_path，让真实 save_cnn_model 落盘到隔离目录。
+    2. 用合成数据调用 train_cnn_model，触发真实 torch.save。
+    3. 从磁盘用 torch.load 重新加载 checkpoint（而非读同一内存对象）。
+    4. 断言加载后的 train_config["seed"] == 原始 seed。
+
+    Args:
+        seed: Hypothesis 生成的任意合法 seed。
+        tmp_path: pytest 临时目录，隔离落盘文件，测试结束后自动清理。
+        monkeypatch: pytest monkeypatch fixture。
     """
-    data = _train_with_seed(seed, tmp_path, monkeypatch)
+    import torch
 
-    # 写入正确
-    assert "seed" in data["train_config"], "train_config 缺少 'seed' 键"
-    saved_seed = data["train_config"]["seed"]
-    assert saved_seed == seed, (
-        f"Property 2 失败：训练所用 seed={seed}，但 train_config['seed']={saved_seed}"
+    import aitrade.cnn.storage as cnn_storage
+    import aitrade.cnn.trainer as trainer_mod
+
+    X, y, group_mask, info = _make_synthetic_dataset()
+
+    # 用 seed 值构造唯一模型名，避免多 example 之间串扰
+    model_name = f"seed_rt_{seed}"
+
+    # patch build_dataset（不走真实行情 IO）
+    monkeypatch.setattr(trainer_mod, "build_dataset", lambda **_kw: (X, y, group_mask, info))
+
+    # patch CNN_MODEL_DIR → tmp_path；save_cnn_model 读 storage 模块全局变量，
+    # 仅替换此变量即可让真实 torch.save 落盘到隔离的临时目录。
+    monkeypatch.setattr(cnn_storage, "CNN_MODEL_DIR", tmp_path)
+
+    from aitrade.cnn.trainer import train_cnn_model
+
+    result = train_cnn_model(
+        name=model_name,
+        vt_symbols=["AAA.SSE", "BBB.SSE"],
+        start=date(2024, 1, 1),
+        end=date(2024, 6, 30),
+        epochs=2,
+        batch_size=16,
+        lookback=10,
+        dropout=0.0,
+        seed=seed,
     )
 
-    # 往返一致（模拟重载：直接读字典值）
-    reloaded_seed = data["train_config"]["seed"]
+    # train_cnn_model 会在 name 后附加日期后缀，从返回值取实际名称
+    actual_name: str = result["name"]
+    pt_path = tmp_path / f"{actual_name}.pt"
+    assert pt_path.exists(), f"模型文件未落盘：{pt_path}"
+
+    # 真实磁盘往返：通过 torch.load 重新反序列化（而非读同一内存字典）
+    loaded = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+
+    assert "train_config" in loaded, "checkpoint 缺少 'train_config' 键"
+    assert "seed" in loaded["train_config"], "train_config 缺少 'seed' 键"
+    reloaded_seed = loaded["train_config"]["seed"]
     assert reloaded_seed == seed, (
-        f"Property 2 失败（往返）：重载后 seed={reloaded_seed}，期望 {seed}"
+        f"Property 2 失败（磁盘往返）：训练 seed={seed}，"
+        f"torch.load 后 train_config['seed']={reloaded_seed}"
     )
