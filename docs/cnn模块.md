@@ -780,3 +780,54 @@ if prob_sl >= veto_threshold:
 | 回测否决 | 不支持 | 不支持 | veto_threshold + prob_sl |
 | 实盘否决 | — | — | v1 未接线（见 O-002） |
 | label_spec.mode | 任意 | 任意 | 必须 oco |
+
+---
+
+## 六、评估诚实性（迭代 0）
+
+> 特性来源：`.kiro/specs/cnn-eval-honesty-fixes/`，分支 `feat/cnn-eval-honesty-fixes`，Task 1~7 全部落地，Property 1~7 由 Hypothesis 守护。
+>
+> 问题背景：初版训练/推理管道存在三处"静默欺骗"——多种子训出同一模型、阈值类型无法校验、对齐丢样本无告警——导致评估报告看起来健全，实际包含系统性误差。迭代 0 对这三处逐一打补丁并用属性测试锁定修复效果。
+
+### 6.1 种子真生效（多种子 WF）
+
+**问题**：旧实现 `train_cnn_model` 硬编码 `torch.manual_seed(42)`，治理模块的 `n_seeds` 多种子循环实际每次用同一随机状态，稳健性验证形同虚设，跨种子 std 恒为 0。
+
+**修复**：
+- `train_cnn_model(seed: int = 42)`：seed 作为显式参数传入，checkpoint `train_config.seed` 记录实际使用的值。
+- `_train_governance_model`：`seed_index` 映射为 `seed = BASE_SEED(42) + seed_index`，确保不同 seed_index 产出不同的随机状态。
+- `run_walk_forward_evaluate`：折内套 `CNNWalkForwardRequest.n_seeds`（默认 1）循环，每次用不同 seed 训练，聚合跨种子均值/标准差，WF summary 新增 `avg_cross_seed_std`，门禁用跨种子均值。
+
+**怎么用**：
+- 单种子（默认）：直接调用，行为与旧版一致。
+- 多种子验证：治理请求设置 `n_seeds=5`（或更多），WF 结果的 `cross_seed.std` 反映模型对随机初始化的敏感程度——std 越大说明模型越"靠运气"，建议在晋级门禁中设置 `avg_cross_seed_std` 上限。
+- **注意**：seed 在 CPU 上完全可复现；GPU 训练若未强制 `cudnn.deterministic`，单种子结果可能微小浮动（性能权衡，见 O-005）。
+
+### 6.2 信号自描述 objective + 阈值校验
+
+**问题**：`predict_cnn_signals` 返回的信号帧不携带 `objective` 元信息，回测 API、策略、实盘三处消费方无法区分当前模型是分类（概率型阈值 ∈[0,1]）还是回归（收益型阈值，任意量级）；regression 模型配 `buy_threshold=0.6`（概率默认值）静默不开仓，无任何报错。
+
+**修复**：
+- `predict_cnn_signals`：信号帧末列追加常量 `objective`（值为模型 checkpoint 中存储的 `objective` 字符串，如 `"regression"` / `"classification"` / `"path_class"`）。
+- `cnn/thresholds.py:threshold_scale_check(objective, buy, sell)`：纯函数，概率型 objective 要求阈值 ∈[0,1]；regression 且 `buy≥0.5` 视为误用概率默认值，抛出 `ValueError`；`objective=None` 或信号帧无 `objective` 列时静默跳过（向后兼容）。
+- 三处接入：回测 API 端点（400 Bad Request）、策略 `CNNSignalStrategy.on_init`（`_threshold_invalid=True` 防御纵深，仅拦开仓不阻出场）、实盘 `SignalService`（违规返回 hold）。
+
+**怎么用**：
+- 用户侧无需改动，校验自动生效。出现 `ValueError: threshold_scale_check` 即说明 `objective` 与阈值量纲不匹配，按报错信息调整 `buy_threshold`/`sell_threshold` 即可。
+- regression 模型的合理阈值量级是预期收益率（如 `buy_threshold=0.01` 表示预期涨 1% 才开仓），不是概率。
+- **已知限制**：regression 阈值校验是启发式（`buy≥0.5` 判概率误用），不拦"刻意设 0.4 超大收益阈值"这类罕见误配（见 O-005）。
+
+### 6.3 对齐丢弃率测量 + 报警
+
+**问题**：`_align_frames_by_datetime` 对多标的做 inner join，任一标的停牌则该时间步整体丢弃；停牌比例高时大量样本被静默删除，训练集出现系统性偏差，但结果字典不透出丢失比例。
+
+**修复**：
+- `features.alignment_drop_rate(symbol_frames, aligned_height)`：以参与对齐的各标的原始行数最大值为基准，计算丢弃比例（单标的无观测组时返回 0）。
+- 训练路径：`info["alignment_drop_rate"]` + 超阈值时 `info["alignment_warning"]`，trainer 同步写入 checkpoint 与 result warnings。
+- 推理路径：`on_meta["alignment_drop_rate"]`，超阈值时也写入警告。
+- 阈值常量 `ALIGN_DROP_WARN_THRESHOLD = 0.05`（丢失 >5% 触发警告）。
+
+**怎么用**：
+- 训练结果中 `result["alignment_drop_rate"]` 反映本次训练实际丢弃的样本比例；若超过 5% 会同时出现 `result["alignment_warning"]`。
+- 推理时 `on_meta["alignment_drop_rate"]` 可用于判断当前推理窗口的对齐质量，帮助排查"最近几天停牌导致信号缺失"问题。
+- 当 `alignment_drop_rate` 偏高（如 >20%）时，建议检查观测组中是否有长期停牌或数据缺失的标的，酌情从观测组中移除。
