@@ -123,18 +123,22 @@ class CNNGovernanceStore:
 
     @property
     def config_path(self) -> Path:
+        """治理配置文件路径（root/config.json）。"""
         return self.root / "config.json"
 
     @property
     def production_path(self) -> Path:
+        """当前生产模型信息文件路径（root/production.json）。"""
         return self.root / "production.json"
 
     @property
     def history_path(self) -> Path:
+        """治理历史事件日志路径（root/history.jsonl，逐行一条 JSON 事件）。"""
         return self.root / "history.jsonl"
 
     @property
     def scheduler_state_path(self) -> Path:
+        """调度器状态文件路径（root/scheduler_state.json）。"""
         return self.root / "scheduler_state.json"
 
     def get_config(self) -> dict[str, Any]:
@@ -173,15 +177,36 @@ class CNNGovernanceStore:
         return data
 
     def candidate_path(self, candidate_id: str) -> Path:
-        """返回候选模型 JSON 文件的完整路径。"""
+        """返回候选模型 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            candidate_id: 候选 ID，直接作为文件名主干拼为 candidates/{candidate_id}.json。
+
+        Returns:
+            候选文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.candidates_dir / f"{candidate_id}.json"
 
     def report_path(self, report_id: str) -> Path:
-        """返回 WF/OOS 评估报告 JSON 文件的完整路径。"""
+        """返回 WF/OOS 评估报告 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            report_id: 报告 ID，直接作为文件名主干拼为 reports/{report_id}.json。
+
+        Returns:
+            报告文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.reports_dir / f"{report_id}.json"
 
     def replay_path(self, replay_id: str) -> Path:
-        """返回治理回放报告 JSON 文件的完整路径。"""
+        """返回治理回放报告 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            replay_id: 回放报告 ID，直接作为文件名主干拼为 replay_reports/{replay_id}.json。
+
+        Returns:
+            回放报告文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.replay_reports_dir / f"{replay_id}.json"
 
     def save_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
@@ -445,7 +470,30 @@ def _backtest_model(
     capital: float,
     params: CNNBacktestParams,
 ) -> dict[str, Any]:
-    """Run a CNN model backtest without going through the API layer."""
+    """直接在治理流程内回测一个 CNN 模型，绕过 API 层。
+
+    先用 predict_cnn_signals 生成信号，再读取 checkpoint 的训练配置确定标的、
+    输入周期与离场方式（exit_mode="auto" 时由标签规格反推持有/止盈止损），
+    配好交易成本/滑点/T+1/成交价模式后跑回测，最终把训练期验证指标
+    （rank_ic / tp_auc / sl_auc）并入统计供 _core_score 评分。仅供治理模块内部调用。
+
+    Args:
+        model_name: 待回测的模型名（不含 .pt 后缀），对应 CNN_MODEL_DIR 下的权重文件。
+        name: 本次回测的展示名，原样写入返回结果的 name 字段，用于区分候选/生产/各折。
+        start: 回测起始日期（含）。
+        end: 回测结束日期（含）。
+        capital: 初始资金（元），传入引擎时取整。
+        params: 回测参数（买卖阈值、离场方式、成本、滑点、否决阈值等）；
+            exit_mode="auto" 时离场参数由标签规格自动反推。
+
+    Returns:
+        字典，含 name/model/target_symbol/statistics/trades/equity_curve。
+        异常路径下 statistics 仅含 error 键（取值："CNN 推理未产生任何信号"、
+        "信号与行情 datetime 无交集"、"回测期间无成交"），trades/equity_curve 为空列表。
+
+    Raises:
+        FileNotFoundError: 模型权重文件 {model_name}.pt 不存在时抛出。
+    """
     import torch
 
     from .storage import CNN_MODEL_DIR

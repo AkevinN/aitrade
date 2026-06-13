@@ -98,10 +98,22 @@ def list_cnn_models() -> list[dict]:
 
 
 def checkpoint_input_interval(model_path: Path) -> str:
-    """读 checkpoint 文件的训练输入周期（`train_config.input_interval`，默认 "d"）。
+    """读 checkpoint 文件中记录的训练输入周期（`train_config.input_interval`）。
 
-    供 API 层做「间隔锁定」校验（计划/手动决策的 bar_freq 必须与模型训练间隔一致）。
-    文件不存在抛 `FileNotFoundError`；不可读（损坏/非 checkpoint）由 torch 抛原始异常。
+    供 API 层做「间隔锁定」校验（计划 / 手动决策的 bar_freq 必须与模型训练间隔
+    一致），避免用日线模型去跑分钟级决策这类口径错配。
+
+    Args:
+        model_path: checkpoint 的 .pt 文件绝对/相对路径。
+
+    Returns:
+        训练时的输入周期字符串，如 "d" / "1m" / "30m"；checkpoint 缺该字段时
+        回退默认 "d"。
+
+    Raises:
+        FileNotFoundError: 文件不存在时抛出。
+        Exception: 文件损坏或非合法 checkpoint 时，由 torch.load 抛出原始异常
+            （不在此层吞掉）。
     """
     import torch
 
@@ -112,7 +124,19 @@ def checkpoint_input_interval(model_path: Path) -> str:
 
 
 def model_input_interval(name: str) -> str:
-    """按模型名读训练输入周期（默认模型库目录）。"""
+    """按模型名（在默认模型库目录 CNN_MODEL_DIR 下）读取其训练输入周期。
+
+    是 ``checkpoint_input_interval`` 的便捷封装，把模型名拼成 ``{name}.pt`` 路径。
+
+    Args:
+        name: 模型名称（不含 .pt 后缀）。
+
+    Returns:
+        训练时的输入周期字符串，如 "d" / "1m"；checkpoint 缺该字段时回退 "d"。
+
+    Raises:
+        FileNotFoundError: 对应 .pt 文件不存在时抛出（由底层透传）。
+    """
     return checkpoint_input_interval(CNN_MODEL_DIR / f"{name}.pt")
 
 

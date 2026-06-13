@@ -134,7 +134,9 @@ def describe_cnn_architecture(name: str) -> dict[str, Any]:
     handles = []
 
     def _make_hook(mod_name: str):
+        """为指定层名生成一个 forward hook 闭包，捕获其输出张量形状。"""
         def _hook(_module, _inputs, output):
+            """forward hook：将该层输出张量的 shape 记入 captured（非张量输出则跳过）。"""
             if isinstance(output, torch.Tensor):
                 captured[mod_name] = list(output.shape)
         return _hook

@@ -23,11 +23,19 @@ _BARS_PER_DAY: dict[str, int] = {
 
 
 def warmup_days(lookback: int, input_interval: str) -> int:
-    """推理 warm-up 回退的日历天数。
+    """计算推理 warm-up 需向前回退的日历天数。
 
     `lookback` 是 **bar 数**：先按周期折算成所需交易日数，再乘 2.5 的日历裕量
     （周末/节假日/停牌），下限 5 天。日频与历史公式 `lookback * 2.5` 等价；
     分钟频不再把 bar 数当天数（消除数百日分钟数据的过度拉取）。
+
+    Args:
+        lookback: 模型滑窗长度，单位为 **bar 数**（非天数）。
+        input_interval: K 线周期，如 "d" 日线、"30m"/"5m" 分钟线；
+            未识别的周期按每日 1 根 bar 处理。
+
+    Returns:
+        向前回退的日历天数（整数），恒 >= 5。
     """
     import math
 

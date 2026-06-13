@@ -35,7 +35,14 @@ ALIGN_DROP_WARN_THRESHOLD: float = 0.05
 
 
 def check_torch_available() -> bool:
-    """检查 PyTorch 是否可用。"""
+    """检查当前环境是否安装了 PyTorch。
+
+    通过尝试 import torch 判断，不触发任何模型加载或 CUDA 初始化，
+    供调用方在进入训练/推理前做能力探测、给出友好降级提示。
+
+    Returns:
+        torch 可正常导入时返回 True，缺失（ImportError）时返回 False。
+    """
     try:
         import torch  # noqa: F401
         return True
@@ -352,7 +359,23 @@ def _build_grouped_tensor(
     """按观测分组把各证券特征填入 [C, T, S, G] 张量，并生成分组掩码 [1, 1, 1, S, G]。
 
     训练（build_dataset）与推理（predictor）共用同一套填充逻辑，避免两处实现漂移。
-    某个位置缺少特征时保持 0 值且掩码为 0（视为占位/无效证券）。
+    遍历每个分组内的证券，将其 [T, C] 特征转置后写入 (symbol_index, group_index) 槽位；
+    某个位置缺少特征（all_features 中无该证券）时保持 0 值且掩码为 0（视为占位/无效证券）。
+
+    Args:
+        groups: 观测分组列表，每项含 "symbols" 键（该组的证券代码列表），
+            顺序即张量最后一维 G 的排列顺序。
+        all_features: 证券代码 → 形状 [T, C] 特征矩阵的映射，缺某证券即留空填 0。
+        feature_channels: 特征通道数 C，张量第 0 维。
+        total_steps: 时间步数 T，张量第 1 维。
+        max_group_width: 单组最大证券数 S，张量第 2 维（不足处填 0、掩码为 0）。
+        group_count: 分组数 G，张量最后一维，应与 len(groups) 一致。
+
+    Returns:
+        (aligned, group_mask)：
+        - aligned: 形状 [C, T, S, G] 的 float32 张量，填入各证券特征，空槽位为 0。
+        - group_mask: 形状 [1, 1, 1, S, G] 的 float32 掩码，有效证券处为 1.0，
+          占位/缺失处为 0.0。
     """
     aligned = np.zeros(
         (feature_channels, total_steps, max_group_width, group_count), dtype=np.float32
