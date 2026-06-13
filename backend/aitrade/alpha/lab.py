@@ -1343,7 +1343,17 @@ class AlphaLab:
         - tick 来源：事件时刻按 floor 落入 [start, end) 桶后以桶结束时刻标注；
         - 收盘/午盘整点（11:30 / 15:00）并入该 session 最后一个桶（右闭）。
 
-        非交易时段返回 None（由调用方丢弃）。
+        Args:
+            dt: 待归桶的时间戳；带时区会先转为交易所本地裸时间，秒以下精度被截断。
+            interval_minutes: 目标聚合周期的分钟数，如 ``5``、``30``。
+            source_kind: ``"bar"`` 时桶边界用 ceil（结束时刻约定），
+                其余（``"tick"``）用 floor 后归到桶结束时刻。
+            session_profile: 交易时段配置，``"cn_equity"``（默认）按 A 股双时段
+                （09:30~11:30、13:00~15:00）归桶；其他值按全天连续时段处理。
+
+        Returns:
+            该时间戳所属桶的结束时刻（裸 datetime）；
+            ``session_profile="cn_equity"`` 下落在非交易时段时返回 ``None``（由调用方丢弃）。
         """
         normalized = _to_exchange_naive(dt).replace(microsecond=0)
         interval_sec = interval_minutes * 60
@@ -1384,6 +1394,15 @@ class AlphaLab:
           避免在数据正常结束于盘中时静默丢弃合法 K 线；
         - bar 来源：收于 session 收盘时刻（11:30 / 15:00）视为完整；否则要求
           桶内含有标注为该结束时刻的源 K 线（末分钟存在）才视为完整。
+
+        Args:
+            bucket_end: 该桶的结束时刻（``_session_bucket_end`` 的输出）。
+            bucket_rows: 落入该桶的源行记录列表，用于检测末分钟源 K 线是否存在。
+            source_kind: ``"bar"`` 或 ``"tick"``；``"tick"`` 一律视为完整。
+            session_profile: 交易时段配置，``"cn_equity"`` 下额外用 session 收盘时刻判完整。
+
+        Returns:
+            ``True`` 表示该桶完整可写入；``False`` 表示疑似半根 K 线，应由调用方丢弃。
         """
         if source_kind != "bar":
             return True
@@ -1428,6 +1447,19 @@ class AlphaLab:
         target_minutes = _interval_minutes(target_interval)
 
         def build_bucket(bucket_end: datetime, bucket_rows: list[dict[str, Any]]) -> dict[str, Any]:
+            """将同一桶内的原始行聚合成一根 K 线字典。
+
+            按 ``source_kind`` 分支：tick 来源以 ``last_price`` 序列取开高低收，open_interest 置 0；
+            bar 来源直接沿用各行的 ``open/high/low/close`` 并取末行的 open_interest。
+            两种来源的 ``volume``/``turnover`` 均按桶内求和。
+
+            Args:
+                bucket_end: 该桶的结束时刻，作为聚合后 K 线的 ``datetime``。
+                bucket_rows: 落入同一桶、已按时间升序的行记录列表（非空）。
+
+            Returns:
+                含 ``datetime/open/high/low/close/volume/turnover/open_interest`` 的单根 K 线字典。
+            """
             if source_kind == "tick":
                 prices = [float(item["last_price"]) for item in bucket_rows]
                 return {
@@ -2449,6 +2481,10 @@ class AlphaLab:
             return False
 
         def session_id(dt: datetime) -> str | None:
+            """判断时间点属于哪个 A 股交易小节，盘外返回 ``None``。
+
+            上午时段 ``[09:30, 11:30)`` 返回 ``"morning"``，下午时段 ``[13:00, 15:00)`` 返回 ``"afternoon"``。
+            """
             t = dt.time()
             if time(9, 30) <= t < time(11, 30):
                 return "morning"
@@ -2544,6 +2580,26 @@ class AlphaLab:
         - 重叠时间点的数据必须完全一致（OHLC/量额），不一致则拒绝（防止复权口径/源混用）；
         - 分钟线还要求合并结果在交易小节内无断档；
         - 仅 1 个批次且无正式资源时，允许直接晋级为正式（无需重叠）。
+
+        本方法只做计划与校验，不写任何文件；返回值中以下划线开头的内部键
+        （``_batches``/``_merged_df``）供 ``merge_import_batches`` 复用，
+        对外接口（``preview_merge_import_batches``）会过滤掉这些键。
+
+        Args:
+            kind: 合并目标类型，仅支持 ``"raw_bar"`` 或 ``"raw_tick"``。
+            keys: 待合并的批次唯一键列表（至少 1 个），由
+                ``_batch_resource_key`` 生成。
+
+        Returns:
+            合并计划字典。``can_merge`` 标记是否可合并；``errors`` 为所有校验
+            失败原因列表，``reason`` 取其首条；``intersection_start``/
+            ``intersection_end`` 为参与方公共重叠区间；``conflict_count`` 为重叠区
+            数据冲突的时间点数；``estimated_rows`` 为合并后预计行数；
+            ``has_official`` 表示是否含现有正式资源作基底。另含内部键
+            ``_batches``（参与批次列表）与 ``_merged_df``（合并后 DataFrame）。
+
+        Raises:
+            ValueError: ``kind`` 不是 ``"raw_bar"``/``"raw_tick"`` 时抛出。
         """
         result: dict[str, Any] = {
             "can_merge": False,
