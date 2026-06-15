@@ -467,3 +467,119 @@ def test_resolve_window_returns_none_when_no_local_data(monkeypatch) -> None:
     req = _make_request(top_k=1)
     window = runner._resolve_tier2_window("000001.SZSE", req)
     assert window is None
+
+
+# ===========================================================================
+# 危险边界：as_of 早于本地数据起点 → 解析器返回 None，预检清晰跳过，无负天数
+# Feature: cnn-stock-screening, Tier-2 window invariant enforcement
+# ===========================================================================
+
+
+def test_aof_before_local_start_resolver_returns_none() -> None:
+    # Feature: cnn-stock-screening, Tier-2 window invariant enforcement
+    """_resolve_tier2_window：as_of 早于本地数据起点时，end<local_start → 返回 None。
+
+    这是此前的危险边界：旧代码会令 start=local_start（2027）> end=as_of_date（2026），
+    产生反向窗口（available_days=-360），预检偶然靠"<needed"救下，但会打印"本地可用 -360 天"。
+    现在解析器在 end<local_start 时直接返回 None，从根本上杜绝反向窗口。
+    """
+    syms = ["000001.SZSE"]
+    # 本地数据在 2027 年，as_of 在 2026 年 → 完全无交集
+    lab = FakeLab(
+        syms,
+        local_start=datetime(2027, 1, 1),
+        local_end=datetime(2027, 12, 31),
+    )
+    runner = ScreeningRunner(lab)
+    # as_of = _AS_OF = 2026-01-06，早于 local_start 2027-01-01
+    req = _make_request(top_k=1)
+    window = runner._resolve_tier2_window("000001.SZSE", req)
+    assert window is None, "as_of 早于本地数据起点时解析器必须返回 None（不得构造反向窗口）"
+
+
+def test_aof_before_local_start_tier2_skipped_with_clear_note(monkeypatch) -> None:
+    # Feature: cnn-stock-screening, Tier-2 window invariant enforcement
+    """as_of 早于本地数据起点 → Tier-2 SKIPPED，evaluable=False，note 含 as_of 早于数据
+    起点的说明，且 note 中无负数，run_walk_forward_evaluate 不被调用。
+
+    这是此前完全缺失的危险分支测试：旧逻辑会令 available_days≈-360，依赖预检的
+    available_days<needed 侥幸拦截，但 note 会打印"本地可用 -360 天"（语义错误）。
+    现在解析器返回 None，预检走专项分支，note 说明 as_of 早于本地数据起点。
+    """
+    syms = ["000001.SZSE"]
+    _patch_profiler(monkeypatch, syms)
+    captured: list[CNNWalkForwardRequest] = []
+    _patch_wf(monkeypatch, captured)
+
+    # as_of = _AS_OF = 2026-01-06，本地数据起于 2027-01-01（完全在 as_of 之后）
+    lab = FakeLab(
+        syms,
+        local_start=datetime(2027, 1, 1),
+        local_end=datetime(2027, 12, 31),
+    )
+    runner = ScreeningRunner(lab)
+    result = runner.run(_make_request(top_k=1))
+
+    # WF 绝不应被调用
+    assert captured == [], "as_of 早于本地数据起点时，run_walk_forward_evaluate 不得被调用"
+
+    row = next(r for r in result.leaderboard if r.tier1.vt_symbol == "000001.SZSE")
+    assert row.promoted_to_tier2 is True, "Tier-1 仍应入围（画像资格满足）"
+    assert row.tier2 is not None
+    assert row.tier2.evaluable is False
+    assert row.tier2.edge_ok is False
+
+    note = row.tier2.note or ""
+    # note 应提及 as_of 早于本地数据起点，而不是"本地无数据"或负天数
+    assert "2026" in note, f"note 应包含 as_of 日期 2026，实际：{note!r}"
+    assert "2027" in note, f"note 应包含 local_start 2027，实际：{note!r}"
+    # 关键：note 中不得出现"本地可用 -N 天"这类负天数格式（旧逻辑的错误输出）。
+    # 检查"可用 -数字"或"available -数字"模式（空格后紧跟负号再跟数字）。
+    import re
+    assert not re.search(r"可用\s+-\d+", note), f"note 中不得出现负天数（如'可用 -360'），实际：{note!r}"
+    assert "可用" not in note or re.search(r"可用\s+\d+", note), (
+        f"若 note 提及'可用'天数，该值必须为非负整数，实际：{note!r}"
+    )
+
+
+def test_resolve_window_returns_none_when_end_lt_local_start() -> None:
+    # Feature: cnn-stock-screening, Tier-2 window invariant enforcement
+    """_resolve_tier2_window：end < local_start（as_of 与本地数据无交集）→ 返回 None。
+
+    直接单元测试解析器：验证 end<local_start 分支由解析器本身拦截，而非依赖调用方校验。
+    """
+    syms = ["000001.SZSE"]
+    # 本地 [2027-06-01, 2027-12-31]，as_of=2026-01-06 → end=min(2026-01-06, 2027-12-31)=2026-01-06
+    # end(2026-01-06) < local_start(2027-06-01) → 必须返回 None
+    lab = FakeLab(
+        syms,
+        local_start=datetime(2027, 6, 1),
+        local_end=datetime(2027, 12, 31),
+    )
+    runner = ScreeningRunner(lab)
+    req = _make_request(top_k=1)
+    window = runner._resolve_tier2_window("000001.SZSE", req)
+    assert window is None
+
+
+def test_returned_window_satisfies_start_le_end_le_as_of() -> None:
+    # Feature: cnn-stock-screening, Tier-2 window invariant enforcement
+    """_resolve_tier2_window 正常路径返回的窗口必然满足 start <= end <= as_of。
+
+    验证解析器不变量在合法输入下均成立（而非仅靠调用方保证）。
+    """
+    syms = ["000001.SZSE"]
+    # 本地充足，数据范围完全覆盖 as_of 前后
+    lab = FakeLab(
+        syms,
+        local_start=datetime(2022, 1, 1),
+        local_end=datetime(2026, 6, 1),
+    )
+    runner = ScreeningRunner(lab)
+    req = _make_request(top_k=1, train_days=120, fold_test_days=30, eval_window_days=300)
+    window = runner._resolve_tier2_window("000001.SZSE", req)
+
+    assert window is not None, "合法输入应返回非 None 窗口"
+    as_of_date = _AS_OF.date()
+    assert window.start <= window.end, f"窗口反向：start={window.start} > end={window.end}"
+    assert window.end <= as_of_date, f"end={window.end} 越过 as_of={as_of_date}（前视红线）"

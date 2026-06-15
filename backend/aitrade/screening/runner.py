@@ -166,11 +166,17 @@ class Tier2Window:
     由 ``ScreeningRunner._resolve_tier2_window`` 计算并被**数据充足性预检**与
     ``_build_wf_request`` 共同消费，确保两者口径一致（避免分叉导致预检与真正
     评估窗口不符）。``start`` 已被夹进本地数据范围（``max(desired_start, local_start)``），
-    ``end`` 已被夹到 ``min(as_of, local_end)``，故必然 ``start <= end <= as_of``。
+    ``end`` 已被夹到 ``min(as_of, local_end)``。
+
+    **不变量（由解析器强制，非调用方责任）**：任何成功返回的 ``Tier2Window``
+    必然满足 ``start <= end <= as_of``，且 ``end >= local_start``（即本地数据与
+    评估窗口存在非空交集）。无法满足此不变量的情形（本地无数据、``as_of`` 早于
+    本地数据起点等）解析器直接返回 ``None``，不构造对象。
 
     Attributes:
-        start: 评估窗口左界（含），已夹进本地可用范围。
-        end: 评估窗口右界（含），已夹到 ``min(as_of, 本地最新)``，必然 ``<= as_of``。
+        start: 评估窗口左界（含），已夹进本地可用范围，必然 ``<= end``。
+        end: 评估窗口右界（含），已夹到 ``min(as_of, 本地最新)``，必然 ``<= as_of``
+            且 ``>= local_start``（保证窗口与本地数据有交集）。
         train_days: 解析后的每折训练窗口天数（请求覆盖优先，否则规则默认）。
         fold_test_days: 解析后的单折测试集天数。
         step_days: WF 游标步进天数（取自规则）。
@@ -395,13 +401,19 @@ class ScreeningRunner:
         5. **``start = max(desired_start, local_start)``**——把窗口**夹进**本地可用范围
            （更完整的 R9.5）：薄数据标的不会把 ``start`` 落到数据存在之前，从而
            不会在 governance 侧因第一折训练窗无数据而抛晦涩 load error。
+        6. **不变量强制**：若 ``end < local_start``（as_of 早于本地数据起点，完全
+           无可用交集）或 ``start > end``（其他无法形成合法区间的情形）→ 返回 None；
+           由预检产出专项"无可评估区间"结论。这保证任何返回的 ``Tier2Window``
+           必然满足 ``start <= end <= as_of``，docstring 承诺的不变量从解析器本身
+           就得到保障，而非依赖调用方额外校验。
 
         Args:
             vt_symbol: 入围标的代码。
             req: 选股请求，提供 ``as_of``/``interval``/``eval_start`` 与可选覆盖。
 
         Returns:
-            解析后的 ``Tier2Window``（``start <= end <= as_of``）；本地无数据时返回 None。
+            解析后的 ``Tier2Window``（满足 ``start <= end <= as_of``）；
+            本地无数据、``as_of`` 早于本地数据起点、或无法形成合法区间时返回 None。
         """
         params = self._resolved_tier2_params(req)
         as_of_date: date = req.as_of.date()
@@ -422,9 +434,20 @@ class ScreeningRunner:
 
         # end 夹到 min(as_of, 本地最新)：杜绝越过截止时间或本地可用范围（R9.3/R9.5）。
         end = min(as_of_date, local_end_date)
+
+        # 不变量早期检测：若本地数据完全在 as_of 之后（end < local_start），
+        # 不存在任何可用交集 → 返回 None，由预检给出专项提示，避免后续产生反向窗口。
+        if end < local_start_date:
+            return None
+
         desired_start = req.eval_start or (end - timedelta(days=params["eval_window_days"]))
-        # NEW：把窗口左界夹进本地可用范围，避免 start 落到数据存在之前（更完整的 R9.5）。
+        # 把窗口左界夹进本地可用范围，避免 start 落到数据存在之前（更完整的 R9.5）。
         start = max(desired_start, local_start_date)
+
+        # 最终防御：若任何路径导致 start > end（理论上已被上方 end<local_start 拦截，
+        # 此处作双重保险）→ 同样返回 None，绝不输出反向窗口。
+        if start > end:
+            return None
 
         return Tier2Window(
             start=start,
@@ -598,23 +621,42 @@ class ScreeningRunner:
                     window = self._resolve_tier2_window(vt_symbol, req)
 
                     # ---- 数据充足性预检（在调用 WF 之前）----
-                    # 本地无数据，或夹取后可用天数 < 一折所需（train+test）→ 直接清晰跳过，
-                    # 绝不调用 run_walk_forward_evaluate（那会在薄数据下抛晦涩的 load error）。
+                    # 本地无数据、as_of 早于本地数据起点，或夹取后可用天数 < 一折所需
+                    # （train+test）→ 直接清晰跳过，绝不调用 run_walk_forward_evaluate
+                    # （那会在薄数据下抛晦涩的 load error）。
                     needed = params["train_days"] + params["fold_test_days"]
                     if window is None:
+                        # 区分两种无法形成合法窗口的情形，给出针对性提示：
+                        # (a) 本地完全无数据 vs. (b) as_of 早于本地数据起点。
+                        _skip_note: str
+                        try:
+                            _ls, _le = load_local_range(self.lab, vt_symbol, req.interval)
+                        except Exception:  # noqa: BLE001
+                            _ls, _le = None, None
+                        if _ls is None or _le is None:
+                            _skip_note = (
+                                f"数据不足：本地无 {req.interval} 数据，跳过 Tier-2；"
+                                f"可补历史或在高级设置调小窗口"
+                            )
+                        else:
+                            # 本地有数据，但 as_of 早于本地数据起点（完全无交集）。
+                            _ls_date = _ls.date() if isinstance(_ls, datetime) else _ls
+                            _as_of_date: date = req.as_of.date()
+                            _skip_note = (
+                                f"数据不足：as_of {_as_of_date} 早于本地数据起点 {_ls_date}，"
+                                f"无可评估区间，跳过 Tier-2；"
+                                f"请将 as_of 调整到 {_ls_date} 之后，或补充更早历史数据"
+                            )
                         verdict = Tier2Verdict(
                             vt_symbol=vt_symbol,
                             evaluable=False,
                             edge_ok=False,
-                            note=(
-                                f"数据不足：本地无 {req.interval} 数据；"
-                                f"Tier-2 最少需 {needed} 天"
-                                f"（train {params['train_days']} + test {params['fold_test_days']}）；"
-                                f"可补历史或在高级设置调小窗口"
-                            ),
+                            note=_skip_note,
                         )
                     else:
-                        available_days = (window.end - window.start).days
+                        # 防御性 max(0, ...) 确保打印值非负（窗口不变量已由解析器保证，
+                        # 此处为安全冗余，杜绝任何路径输出"本地可用 -N 天"）。
+                        available_days = max(0, (window.end - window.start).days)
                         if available_days < needed:
                             verdict = Tier2Verdict(
                                 vt_symbol=vt_symbol,
