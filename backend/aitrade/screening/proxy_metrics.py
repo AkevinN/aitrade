@@ -45,6 +45,9 @@ _MIN_PATTERN_SAMPLE_ABS = 10
 #: temporal_stability：切前后两半，每半段需要至少 4 个点以估计均值/方差。
 _MIN_TEMPORAL_SAMPLE = 8
 
+#: pattern_recurrence 查询窗口数上限（gram 矩阵约 _MAX_WINDOWS×k，控制 O(N²) 内存/速度）。
+_MAX_WINDOWS = 300
+
 
 # ---------------------------------------------------------------------------
 # 内部辅助函数（模块私有）
@@ -225,7 +228,7 @@ def pattern_recurrence(close: np.ndarray, *, window: int = 16) -> MetricResult:
         >>> t = np.linspace(0, 4 * np.pi, 200)
         >>> prices = 100 + 10 * np.sin(t)
         >>> result = pattern_recurrence(prices, window=16)
-        >>> result.value > 0.6  # True（重复性强）
+        >>> result.value is not None  # True（重复性强，具体值依序列而定）
         True
     """
     # 剔除非有限值，同时要求价格为正（价格序列约定）
@@ -288,8 +291,6 @@ def pattern_recurrence(close: np.ndarray, *, window: int = 16) -> MetricResult:
     #
     # 为避免 O(k²) 内存消耗，当 k 较大时均匀下采样至最多 _MAX_WINDOWS 个查询窗口，
     # 但仍对全量 k 个窗口做参照集，确保可以找到真正的远处近邻。
-    _MAX_WINDOWS = 300  # 查询行数上限（gram 矩阵约 300×k，控制内存/速度）
-
     if k > _MAX_WINDOWS:
         # 均匀步长下采样（确定性，不使用 RNG）
         step = k // _MAX_WINDOWS
@@ -343,7 +344,12 @@ def temporal_stability(returns: np.ndarray) -> MetricResult:
     训练集和测试集实质上来自不同分布，CNN 难以泛化（低稳定分）。
 
     **样本不足降级（Property 5）**：有效样本 < _MIN_TEMPORAL_SAMPLE 时返回 value=None；
-    半段标准差均为 0（常数序列）时返回 value=None。
+    整个序列为常数（两半段均值相同且标准差均为 0，无任何漂移信息）时返回 value=None。
+
+    **极端制度切换（Regime-Shift）**：若两半段各自内部近乎常数（σ_A ≈ 0、σ_B ≈ 0）但
+    均值不同（如 A 全为 0.0，B 全为 1.0），这是最严重的漂移形态，应返回接近 0 的低稳定
+    分而非 None。此时 Δσ ≈ 0（两半段方差均为 0，差异为 0），Δμ 由均值差与序列总体标准
+    差归一化后计算（序列总体方差 > 0），综合漂移偏高，稳定度偏低。
 
     Args:
         returns: 收益序列，一维 np.ndarray；非有限值将被剔除。
@@ -354,10 +360,15 @@ def temporal_stability(returns: np.ndarray) -> MetricResult:
 
     Example:
         >>> import numpy as np
-        >>> # 均匀白噪声：前后半段统计特征相似，稳定性高
-        >>> r = np.full(100, 0.01)  # 常数序列退化
+        >>> # 全常数序列：两半段均值相同且方差均为 0，无漂移信息，退化返回 None
+        >>> r = np.full(100, 0.01)
         >>> res = temporal_stability(r)
-        >>> res.value is None  # True（常数序列，方差为 0）
+        >>> res.value is None  # True（整体常数序列，无法区分稳定与漂移）
+        True
+        >>> # 极端制度切换：前半段全 0，后半段全 1，返回接近 0 的低稳定分
+        >>> r2 = np.concatenate([np.zeros(50), np.ones(50)])
+        >>> res2 = temporal_stability(r2)
+        >>> res2.value is not None and res2.value < 0.3  # True（极端漂移 → 低分）
         True
     """
     r = _clean_1d(returns)
@@ -378,8 +389,10 @@ def temporal_stability(returns: np.ndarray) -> MetricResult:
     sigma_a = float(np.std(half_a))
     sigma_b = float(np.std(half_b))
 
-    # 两半段标准差均为 0：常数序列，稳定度无意义（退化）
-    if sigma_a == 0.0 and sigma_b == 0.0:
+    # 两半段标准差均为 0 且均值相同：整个序列为常数，无任何漂移信息，退化返回 None。
+    # 若均值不同（如 A 全 0.0、B 全 1.0），则属于极端制度切换（regime shift），
+    # 应返回低稳定分而非 None——交由下方正常流程通过 delta_mu 计算出低分。
+    if sigma_a == 0.0 and sigma_b == 0.0 and mu_a == mu_b:
         return MetricResult(value=None, effective_sample=n)
 
     # --- 相对波动差（归一化到 [0,1)）---

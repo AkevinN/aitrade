@@ -73,13 +73,15 @@ class TestNonlinearity:
 
     @settings(max_examples=100)
     @given(
-        arr=st.lists(_finite_float, min_size=0, max_size=_MIN_NONLINEARITY_SAMPLE - 1).map(
-            np.array
-        )
+        # 默认 ar_order=1，真实阈值为 _MIN_NONLINEARITY_SAMPLE + ar_order = 21。
+        # max_size 须等于阈值 - 1（即 20），覆盖所有低于阈值的尺寸（含 size=20）。
+        arr=st.lists(
+            _finite_float, min_size=0, max_size=_MIN_NONLINEARITY_SAMPLE
+        ).map(np.array)
     )
     def test_short_array_returns_none(self, arr: np.ndarray) -> None:
         # Feature: cnn-stock-screening, Property 5: 代理指标样本不足降级
-        """有效样本不足时，nonlinearity value 必须为 None。"""
+        """有效样本不足 _MIN_NONLINEARITY_SAMPLE + ar_order（默认 21）时，value 必须为 None。"""
         result = nonlinearity(arr)
         assert result.value is None, (
             f"期望 value=None，实际={result.value}（len={len(arr)}，"
@@ -178,22 +180,32 @@ class TestPatternRecurrence:
 
     @settings(max_examples=100)
     @given(
-        window=st.integers(min_value=2, max_value=32),
-        arr=st.lists(
-            st.floats(min_value=1.0, max_value=1e4, allow_nan=False, allow_infinity=False),
-            min_size=0,
-            max_size=10,  # 保证短于任何 window * 2
-        ).map(np.array),
-    )
-    def test_short_array_returns_none(self, window: int, arr: np.ndarray) -> None:
-        # Feature: cnn-stock-screening, Property 5: 代理指标样本不足降级
-        """有效样本不足 max(_MIN_PATTERN_SAMPLE_ABS, window * 2) 时，value 为 None。"""
-        min_needed = max(_MIN_PATTERN_SAMPLE_ABS, window * 2)
-        if len(arr) < min_needed:
-            result = pattern_recurrence(arr, window=window)
-            assert result.value is None, (
-                f"期望 None，实际={result.value}（len={len(arr)} < {min_needed}，window={window}）"
+        # 使用 flatmap 让 arr 的长度上界依赖 window，确保每个生成样例严格满足
+        # len(arr) < min_needed，无虚空断言（vacuous assertion）。
+        window_and_arr=st.integers(min_value=2, max_value=32).flatmap(
+            lambda w: st.tuples(
+                st.just(w),
+                st.lists(
+                    st.floats(min_value=1.0, max_value=1e4, allow_nan=False, allow_infinity=False),
+                    min_size=0,
+                    max_size=max(_MIN_PATTERN_SAMPLE_ABS, w * 2) - 1,
+                ).map(np.array),
             )
+        )
+    )
+    def test_short_array_returns_none(self, window_and_arr: tuple) -> None:
+        # Feature: cnn-stock-screening, Property 5: 代理指标样本不足降级
+        """有效样本不足 max(_MIN_PATTERN_SAMPLE_ABS, window * 2) 时，value 为 None。
+
+        使用 flatmap 使数组长度上界严格依赖 window，保证每个生成样例都真正触发降级路径，
+        无虚空断言（vacuous assertion）。
+        """
+        window, arr = window_and_arr
+        min_needed = max(_MIN_PATTERN_SAMPLE_ABS, window * 2)
+        result = pattern_recurrence(arr, window=window)
+        assert result.value is None, (
+            f"期望 None，实际={result.value}（len={len(arr)} < {min_needed}，window={window}）"
+        )
 
     # ── Property 5: window <= 0 时降级 ──────────────────────────────────────
 
@@ -363,6 +375,32 @@ class TestTemporalStability:
         assert r_stable.value is not None and r_drifting.value is not None
         assert r_stable.value > r_drifting.value, (
             f"稳定({r_stable.value:.4f}) 应 > 漂移({r_drifting.value:.4f})"
+        )
+
+    # ── Fix I1：极端制度切换（两半各自常数但均值不同）→ 低稳定分，非 None ────
+
+    def test_regime_shift_constant_halves_returns_low_score(self) -> None:
+        """两个常数半段但均值不同时，value 不为 None 且接近 0（极端漂移）。
+
+        这是 temporal_stability 的制度切换盲点修复验证：
+        - 前半全 0.0、后半全 1.0 → 最极端的均值漂移，应得到接近 0 的低分。
+        - 全常数序列（前后均值相同）→ 无漂移信息，返回 None。
+        """
+        # 两半段各自常数但均值不同：极端制度切换
+        regime_shift = np.concatenate([np.zeros(50), np.ones(50)])
+        result = temporal_stability(regime_shift)
+        assert result.value is not None, (
+            "极端制度切换（A 全 0、B 全 1）应返回低稳定分，而非 None"
+        )
+        assert result.value < 0.3, (
+            f"极端漂移应产生接近 0 的低稳定分，实际={result.value:.4f}"
+        )
+
+        # 对比：整个序列为常数（无漂移信息），应返回 None
+        constant = np.full(100, 0.5)
+        result_const = temporal_stability(constant)
+        assert result_const.value is None, (
+            f"全常数序列应返回 None，实际={result_const.value}"
         )
 
     # ── 边界：稳定序列接近 1 ────────────────────────────────────────────────
