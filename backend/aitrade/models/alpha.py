@@ -45,6 +45,7 @@ class TaskType(str, Enum):
     STRATEGY_SWEEP = "strategy_sweep"
     STRATEGY_WALKFORWARD = "strategy_walkforward"
     LIVE_REBALANCE = "live_rebalance"
+    CNN_SCREENING = "cnn_screening"
 
 
 class TaskModel(BaseModel):

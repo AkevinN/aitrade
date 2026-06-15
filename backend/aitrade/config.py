@@ -34,6 +34,12 @@ SCHEME_PATH: Path = AITRADE_HOME / "schemes"
 # 该目录是 profiling 模块唯一允许写入的位置（只读模块的唯一副作用出口）
 PROFILE_PATH: Path = AITRADE_HOME / "profiles"
 
+# CNN 选股漏斗（CNN Stock Screening）产物持久化目录
+# Tier-1 画像打分 + Tier-2 WF/OOS 治理评估结果均落地于此
+SCREENING_PATH: Path = AITRADE_HOME / "screening"
+# CNN 选股漏斗 Tier-2 治理评估（WF/OOS）专用落地目录
+SCREENING_GOVERNANCE_PATH: Path = AITRADE_HOME / "screening_governance"
+
 # 实盘决策持久化目录（交易操作台，每 signal_id 一个 JSON 文件）
 # DecisionStore(LIVE_DECISION_PATH) 首次实例化时会经 __init__ 的
 # mkdir(parents=True, exist_ok=True) 自动创建该目录
@@ -135,5 +141,5 @@ CSV_REQUIRED_FIELDS: list[str] = ["datetime", "open", "high", "low", "close"]
 # 规则型信号数据目录（转债条款快照 + 历史溢价率，CBTermsStore 使用）
 RULES_DATA_PATH: Path = AITRADE_HOME / "rules"
 
-for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH, RULES_DATA_PATH, TASK_HISTORY_PATH, SCHEDULER_RUN_LOG_PATH]:
+for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH, RULES_DATA_PATH, TASK_HISTORY_PATH, SCHEDULER_RUN_LOG_PATH, SCREENING_PATH, SCREENING_GOVERNANCE_PATH]:
     _dir.mkdir(parents=True, exist_ok=True)
