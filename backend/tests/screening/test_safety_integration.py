@@ -91,11 +91,22 @@ class _MinFakeLab:
         symbols: 进入 raw_bars 的标的列表，每只 row_count=500、interval="d"。
         local_end: load_bar_frame_any_range 返回帧的最晚 datetime（供 Tier-2
             WF 请求构造时探测本地范围）。
+        local_start: 本地最早 datetime；None 时默认取 ``local_end`` 前约 6 年，
+            保证本地范围足够宽、能通过 Tier-2 数据充足性预检（这些安全用例
+            聚焦只读/隔离/草稿性质，不测薄数据）。
     """
 
-    def __init__(self, symbols: list[str], local_end: datetime | None = None) -> None:
+    def __init__(
+        self,
+        symbols: list[str],
+        local_end: datetime | None = None,
+        local_start: datetime | None = None,
+    ) -> None:
         self._symbols = symbols
         self._local_end = local_end
+        if local_start is None and local_end is not None:
+            local_start = local_end - timedelta(days=365 * 6)
+        self._local_start = local_start
 
     def list_data_resources(self) -> dict[str, Any]:
         """返回仅含 raw_bars 条目的合成资源摘要（discover_universe 所需）。"""
@@ -125,10 +136,11 @@ class _MinFakeLab:
         interval: str,
         include_derived: bool = True,
     ) -> pl.DataFrame | None:
-        """返回含单行 datetime 的最小 frame，供 load_local_range 探测右边界使用。"""
+        """返回含 start/end 两行 datetime 的最小 frame，供 load_local_range 探测范围使用。"""
         if self._local_end is None:
             return None
-        return pl.DataFrame({"datetime": [self._local_end], "close": [10.0]})
+        dts = [d for d in (self._local_start, self._local_end) if d is not None]
+        return pl.DataFrame({"datetime": dts, "close": [10.0] * len(dts)})
 
     def load_bar_frame(
         self,

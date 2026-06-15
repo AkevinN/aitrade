@@ -59,6 +59,21 @@ class CNNScreeningRequest(BaseModel):
     # Tier-2 评估区间起点（可选）；缺省时由 as_of 与 ScreeningRules 推导，强制 end <= as_of
     eval_start: Optional[date] = None
 
+    # ---- Tier-2 窗口/训练超参的请求级覆盖（None = 用 ScreeningRules 默认）----
+    # 这些字段让高级用户在单次运行内调整 Tier-2 窗口，无需改全局规则——
+    # 例如薄数据标的可调小 eval_window_days/train_days 让评估能成折。
+    # 取 None 时由 ScreeningRunner 解析为对应的 ScreeningRules 默认值。
+
+    # Tier-2 评估窗口长度（天数）：覆盖 ScreeningRules.eval_window_days；
+    # None = 用规则默认（900）。须满足 eval_window_days >= train_days + fold_test_days。
+    eval_window_days: Optional[int] = Field(default=None, ge=30)
+    # 每折训练窗口（天数）：覆盖 ScreeningRules.train_days；None = 用规则默认（480）。
+    train_days: Optional[int] = Field(default=None, ge=30)
+    # 单折测试集长度（天数）：覆盖 ScreeningRules.fold_test_days；None = 用规则默认（90）。
+    fold_test_days: Optional[int] = Field(default=None, ge=7)
+    # 每折训练随机种子数：覆盖 ScreeningRules.n_seeds；None = 用规则默认（1）。
+    n_seeds: Optional[int] = Field(default=None, ge=1, le=10)
+
     # ---- 持久化 ----
     # 是否将 ScreeningResult 写入 SCREENING_PATH；False 时只在内存返回（Requirement 6.3）
     persist: bool = False

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -156,6 +157,40 @@ def _build_proxies(close: np.ndarray, returns: np.ndarray) -> dict[str, MetricVa
             note=note,
         )
     return proxies
+
+
+@dataclass(frozen=True)
+class Tier2Window:
+    """单只标的解析后的 Tier-2 评估窗口与训练超参（统一真相源）。
+
+    由 ``ScreeningRunner._resolve_tier2_window`` 计算并被**数据充足性预检**与
+    ``_build_wf_request`` 共同消费，确保两者口径一致（避免分叉导致预检与真正
+    评估窗口不符）。``start`` 已被夹进本地数据范围（``max(desired_start, local_start)``），
+    ``end`` 已被夹到 ``min(as_of, local_end)``，故必然 ``start <= end <= as_of``。
+
+    Attributes:
+        start: 评估窗口左界（含），已夹进本地可用范围。
+        end: 评估窗口右界（含），已夹到 ``min(as_of, 本地最新)``，必然 ``<= as_of``。
+        train_days: 解析后的每折训练窗口天数（请求覆盖优先，否则规则默认）。
+        fold_test_days: 解析后的单折测试集天数。
+        step_days: WF 游标步进天数（取自规则）。
+        eval_window_days: 解析后的评估窗口长度天数（用于无 ``eval_start`` 时回推 ``start``）。
+        n_seeds: 解析后的每折训练种子数。
+        epochs: 每次训练 epoch 数（取自规则）。
+        local_start: 本地数据最早日期（用于预检/审计）。
+        local_end: 本地数据最晚日期（用于预检/审计）。
+    """
+
+    start: date
+    end: date
+    train_days: int
+    fold_test_days: int
+    step_days: int
+    eval_window_days: int
+    n_seeds: int
+    epochs: int
+    local_start: date
+    local_end: date
 
 
 class ScreeningRunner:
@@ -311,20 +346,107 @@ class ScreeningRunner:
         return promoted, reasons
 
     # ------------------------------------------------------------------
-    # Tier-2：WF 请求构造
+    # Tier-2：窗口解析 + WF 请求构造
     # ------------------------------------------------------------------
 
-    def _build_wf_request(self, vt_symbol: str, req: CNNScreeningRequest) -> CNNWalkForwardRequest:
-        """为单只入围标的构造 WF/OOS 评估请求，强制 ``end <= as_of``（Property 2）。
+    def _resolved_tier2_params(self, req: CNNScreeningRequest) -> dict[str, int]:
+        """解析 Tier-2 窗口/训练超参（请求级覆盖优先，None 回退 ScreeningRules）。
 
-        评估区间右边界 ``end`` 取 ``min(as_of.date(), 本地最新数据日期)``，杜绝越过
-        截止时间或本地可用范围（Requirement 9.3 / 9.5）。左边界 ``start`` 取
-        ``req.eval_start``（若显式提供）否则 ``end - rules.eval_window_days``。
+        请求字段（``train_days``/``fold_test_days``/``eval_window_days``/``n_seeds``）
+        非 None 时覆盖对应规则默认值；``step_days``/``epochs`` 不开放请求级覆盖，
+        始终取自规则。本函数**不**触碰本地数据范围，故可在 ``run()`` 起始做
+        配置不变量校验时复用（与具体标的无关）。
 
-        WF 窗口超参（``train_days``/``fold_test_days``/``step_days``）全部取自
-        ``ScreeningRules``，保证 ``eval_window_days >= train_days + fold_test_days``
-        这一不变量由规则层维护（违反时 ``walk_forward_windows`` 返回空列表，
-        ``run_walk_forward_evaluate`` 随即抛 ``ValueError``）。
+        Args:
+            req: 选股请求，提供可选的 Tier-2 覆盖字段。
+
+        Returns:
+            ``{"train_days", "fold_test_days", "step_days", "eval_window_days",
+            "n_seeds", "epochs"}`` 全部为已解析的最终整数值。
+        """
+        return {
+            "train_days": req.train_days if req.train_days is not None else self.rules.train_days,
+            "fold_test_days": (
+                req.fold_test_days if req.fold_test_days is not None else self.rules.fold_test_days
+            ),
+            "step_days": self.rules.step_days,
+            "eval_window_days": (
+                req.eval_window_days
+                if req.eval_window_days is not None
+                else self.rules.eval_window_days
+            ),
+            "n_seeds": req.n_seeds if req.n_seeds is not None else self.rules.n_seeds,
+            "epochs": self.rules.epochs,
+        }
+
+    def _resolve_tier2_window(
+        self, vt_symbol: str, req: CNNScreeningRequest
+    ) -> Tier2Window | None:
+        """解析单只标的的 Tier-2 评估窗口（含覆盖参数 + 本地数据夹取），统一供预检与请求构造。
+
+        这是 Tier-2 的**唯一窗口真相源**：数据充足性预检与 ``_build_wf_request``
+        都调用本函数，杜绝两处各算一遍导致口径分叉。计算步骤：
+
+        1. 解析超参（``_resolved_tier2_params``，请求覆盖优先）。
+        2. 探测本地数据范围 ``load_local_range``；任一端缺失（本地无数据）→ 返回 None，
+           由预检判定"数据不足"。
+        3. ``end = min(as_of.date(), local_end)``（R9.3/R9.5：不越 as_of、不越本地最新）。
+        4. ``desired_start = req.eval_start or (end - eval_window_days)``。
+        5. **``start = max(desired_start, local_start)``**——把窗口**夹进**本地可用范围
+           （更完整的 R9.5）：薄数据标的不会把 ``start`` 落到数据存在之前，从而
+           不会在 governance 侧因第一折训练窗无数据而抛晦涩 load error。
+
+        Args:
+            vt_symbol: 入围标的代码。
+            req: 选股请求，提供 ``as_of``/``interval``/``eval_start`` 与可选覆盖。
+
+        Returns:
+            解析后的 ``Tier2Window``（``start <= end <= as_of``）；本地无数据时返回 None。
+        """
+        params = self._resolved_tier2_params(req)
+        as_of_date: date = req.as_of.date()
+
+        try:
+            local_start, local_end = load_local_range(self.lab, vt_symbol, req.interval)
+        except Exception:  # noqa: BLE001 - 本地范围探测失败视同无数据（交预检判定不足）
+            return None
+
+        # 任一端缺失 → 本地无数据，无法界定窗口；交预检产出"数据不足"结论。
+        if local_start is None or local_end is None:
+            return None
+
+        local_start_date = (
+            local_start.date() if isinstance(local_start, datetime) else local_start
+        )
+        local_end_date = local_end.date() if isinstance(local_end, datetime) else local_end
+
+        # end 夹到 min(as_of, 本地最新)：杜绝越过截止时间或本地可用范围（R9.3/R9.5）。
+        end = min(as_of_date, local_end_date)
+        desired_start = req.eval_start or (end - timedelta(days=params["eval_window_days"]))
+        # NEW：把窗口左界夹进本地可用范围，避免 start 落到数据存在之前（更完整的 R9.5）。
+        start = max(desired_start, local_start_date)
+
+        return Tier2Window(
+            start=start,
+            end=end,
+            train_days=params["train_days"],
+            fold_test_days=params["fold_test_days"],
+            step_days=params["step_days"],
+            eval_window_days=params["eval_window_days"],
+            n_seeds=params["n_seeds"],
+            epochs=params["epochs"],
+            local_start=local_start_date,
+            local_end=local_end_date,
+        )
+
+    def _build_wf_request(
+        self, vt_symbol: str, req: CNNScreeningRequest, window: Tier2Window
+    ) -> CNNWalkForwardRequest:
+        """据已解析的 ``Tier2Window`` 构造 WF/OOS 评估请求，强制 ``end <= as_of``（Property 2）。
+
+        本函数不再自行计算窗口/超参——所有 start/end/train_days/test_days/step_days/
+        n_seeds/epochs 均取自 ``window``（由 ``_resolve_tier2_window`` 解析、夹取过），
+        与数据充足性预检共用同一窗口，口径一致。
 
         注意：``eval_window`` 在 ``ScreeningResult`` 中作联合包络回显，
         取所有入围标的 ``start``（最小）/ ``end``（最大）的并集——各标的因本地
@@ -332,38 +454,24 @@ class ScreeningRunner:
 
         Args:
             vt_symbol: 入围标的代码，作为 ``target_symbol``。
-            req: 选股请求，提供 ``as_of``/``interval``/``objective``/``eval_start``。
+            req: 选股请求，提供 ``interval``/``objective``。
+            window: 已解析并夹取过的 Tier-2 窗口与超参。
 
         Returns:
-            构造好的 ``CNNWalkForwardRequest``，``end`` 必然 ``<= as_of``；
-            ``train_days``/``test_days``/``step_days`` 均来自 ``self.rules``。
+            构造好的 ``CNNWalkForwardRequest``，``end`` 必然 ``<= as_of``。
         """
-        as_of_date: date = req.as_of.date()
-
-        # end 夹到 min(as_of, 本地最新)：as_of 晚于本地最新时收窄到本地范围（R9.5）。
-        end = as_of_date
-        try:
-            _, local_end = load_local_range(self.lab, vt_symbol, req.interval)
-            if local_end is not None:
-                local_end_date = local_end.date() if isinstance(local_end, datetime) else local_end
-                end = min(as_of_date, local_end_date)
-        except Exception:  # noqa: BLE001 - 本地范围探测失败时退回 as_of（仍满足 end<=as_of）
-            end = as_of_date
-
-        start = req.eval_start or (end - timedelta(days=self.rules.eval_window_days))
-
         return CNNWalkForwardRequest(
-            name=f"screening_{vt_symbol}_{end.isoformat()}",
+            name=f"screening_{vt_symbol}_{window.end.isoformat()}",
             target_symbol=vt_symbol,
             input_interval=req.interval,
-            start=start,
-            end=end,
-            train_days=self.rules.train_days,
-            test_days=self.rules.fold_test_days,
-            step_days=self.rules.step_days,
-            n_seeds=self.rules.n_seeds,
+            start=window.start,
+            end=window.end,
+            train_days=window.train_days,
+            test_days=window.fold_test_days,
+            step_days=window.step_days,
+            n_seeds=window.n_seeds,
             objective=req.objective,
-            training_params=CNNTrainingParams(epochs=self.rules.epochs),
+            training_params=CNNTrainingParams(epochs=window.epochs),
         )
 
     # ------------------------------------------------------------------
@@ -392,6 +500,20 @@ class ScreeningRunner:
         """
         run_id = f"scr_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         created_at = datetime.now()
+
+        # ---- 配置不变量校验（快速失败）：解析后 eval_window_days 须 >= train+test ----
+        # 与具体标的无关，故提前到一切计算之前；违反时整任务以可操作的清晰报错退出，
+        # 而非静默生成 0 折（那会让每只标的都退化为难懂的 Tier-2 失败）。
+        params = self._resolved_tier2_params(req)
+        min_needed = params["train_days"] + params["fold_test_days"]
+        if params["eval_window_days"] < min_needed:
+            raise ValueError(
+                f"Tier-2 配置无效：eval_window_days({params['eval_window_days']}) "
+                f"< train_days({params['train_days']})+fold_test_days({params['fold_test_days']})"
+                f"={min_needed}，无法生成任何折。请调大 eval_window_days 或调小 "
+                f"train_days/fold_test_days。"
+            )
+
         input_echo = self._build_input_echo(req)
 
         # ---- Universe 发现（只读）----
@@ -472,14 +594,48 @@ class ScreeningRunner:
                     on_progress(pct, f"Tier-2 {_j}/{k}: {_sym} - {m}")
 
                 try:
-                    # 先构造请求以记录评估区间（即便后续评估失败也回显窗口）。
-                    wf_req = self._build_wf_request(vt_symbol, req)
-                    eval_starts.append(wf_req.start)
-                    eval_ends.append(wf_req.end)
-                    report = run_walk_forward_evaluate(
-                        wf_req, on_progress=_sub_progress, store=gov_store
-                    )
-                    verdict = derive_edge(report, self.rules)
+                    # 解析窗口（含覆盖参数 + 本地数据夹取），预检与评估共用同一真相源。
+                    window = self._resolve_tier2_window(vt_symbol, req)
+
+                    # ---- 数据充足性预检（在调用 WF 之前）----
+                    # 本地无数据，或夹取后可用天数 < 一折所需（train+test）→ 直接清晰跳过，
+                    # 绝不调用 run_walk_forward_evaluate（那会在薄数据下抛晦涩的 load error）。
+                    needed = params["train_days"] + params["fold_test_days"]
+                    if window is None:
+                        verdict = Tier2Verdict(
+                            vt_symbol=vt_symbol,
+                            evaluable=False,
+                            edge_ok=False,
+                            note=(
+                                f"数据不足：本地无 {req.interval} 数据；"
+                                f"Tier-2 最少需 {needed} 天"
+                                f"（train {params['train_days']} + test {params['fold_test_days']}）；"
+                                f"可补历史或在高级设置调小窗口"
+                            ),
+                        )
+                    else:
+                        available_days = (window.end - window.start).days
+                        if available_days < needed:
+                            verdict = Tier2Verdict(
+                                vt_symbol=vt_symbol,
+                                evaluable=False,
+                                edge_ok=False,
+                                note=(
+                                    f"数据不足：本地可用 {available_days} 天 "
+                                    f"< Tier-2 最少需 {needed} 天"
+                                    f"（train {params['train_days']} + test {params['fold_test_days']}）；"
+                                    f"可补历史或在高级设置调小窗口"
+                                ),
+                            )
+                        else:
+                            # 预检通过：从同一窗口构造 WF 请求并评估。
+                            wf_req = self._build_wf_request(vt_symbol, req, window)
+                            eval_starts.append(wf_req.start)
+                            eval_ends.append(wf_req.end)
+                            report = run_walk_forward_evaluate(
+                                wf_req, on_progress=_sub_progress, store=gov_store
+                            )
+                            verdict = derive_edge(report, self.rules)
                 except Exception as exc:  # noqa: BLE001 - 单只 Tier-2 失败降级（R5.4）
                     logger.warning("Tier-2 评估失败 %s：%s", vt_symbol, exc)
                     verdict = Tier2Verdict(
@@ -576,14 +732,19 @@ class ScreeningRunner:
     def _build_input_echo(self, req: CNNScreeningRequest) -> dict:
         """构造 ScreeningResult.input 的输入回显字典（供复现与审计）。
 
+        额外回显 ``tier2_config``——本次实际生效的 Tier-2 超参（请求覆盖与规则
+        默认解析后的最终值），便于审计/复现：即便用户在请求里只填了部分覆盖，
+        产物也能完整记录真正用了哪套窗口/种子（Requirement 6.2）。
+
         Args:
             req: 选股请求。
 
         Returns:
             JSON 友好的回显字典，键覆盖请求基础参数、universe 过滤、漏斗、
-            Tier-2 超参与本次所用 ``rules_id``（与 types.py 的 input 字段契约一致，
-            自包含以便序列化后单文件可复现）。
+            Tier-2 超参（含解析后的 ``tier2_config``）与本次所用 ``rules_id``
+            （与 types.py 的 input 字段契约一致，自包含以便序列化后单文件可复现）。
         """
+        params = self._resolved_tier2_params(req)
         return {
             "name": req.name,
             "interval": req.interval,
@@ -600,6 +761,16 @@ class ScreeningRunner:
             "eval_start": req.eval_start.isoformat() if req.eval_start else None,
             "persist": req.persist,
             "rules_id": self.rules.rules_id,
+            # 解析后的 Tier-2 超参（请求覆盖优先，否则规则默认），供复现/审计（R6.2）。
+            "tier2_config": {
+                "train_days": params["train_days"],
+                "fold_test_days": params["fold_test_days"],
+                "step_days": params["step_days"],
+                "eval_window_days": params["eval_window_days"],
+                "n_seeds": params["n_seeds"],
+                "epochs": params["epochs"],
+                "objective": req.objective,
+            },
         }
 
     def _safe_persist(self, result: ScreeningResult) -> None:

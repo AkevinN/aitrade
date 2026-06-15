@@ -21,7 +21,7 @@ CNN 选股编排器 ScreeningRunner 测试。
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import polars as pl
@@ -54,11 +54,23 @@ class FakeLab:
         symbols: 进入 ``raw_bars`` 的标的列表，每只默认 row_count=500、interval="d"。
         local_end: ``load_bar_frame_any_range`` 返回的本地最晚 datetime（探测窗口右界）；
             None 时返回空 frame（载入范围探测得 (None, None)）。
+        local_start: 本地最早 datetime；None 时默认取 ``local_end`` 前约 6 年，
+            保证本地范围足够宽、能通过 Tier-2 数据充足性预检（这些用例聚焦
+            无前视/草稿等性质，不测薄数据）。
     """
 
-    def __init__(self, symbols: list[str], local_end: datetime | None = None) -> None:
+    def __init__(
+        self,
+        symbols: list[str],
+        local_end: datetime | None = None,
+        local_start: datetime | None = None,
+    ) -> None:
         self._symbols = symbols
         self._local_end = local_end
+        # 默认提供约 6 年的宽范围，确保默认规则（eval_window_days=900）下预检通过。
+        if local_start is None and local_end is not None:
+            local_start = local_end - timedelta(days=365 * 6)
+        self._local_start = local_start
 
     def list_data_resources(self) -> dict[str, Any]:
         """返回合成数据资源摘要（仅 raw_bars 有内容）。"""
@@ -85,10 +97,11 @@ class FakeLab:
     def load_bar_frame_any_range(
         self, vt_symbol: str, interval: str, include_derived: bool = True
     ) -> pl.DataFrame | None:
-        """供 load_local_range 探测本地范围；返回含单行 datetime 的最小 frame。"""
+        """供 load_local_range 探测本地范围；返回含 start/end 两行 datetime 的最小 frame。"""
         if self._local_end is None:
             return None
-        return pl.DataFrame({"datetime": [self._local_end], "close": [10.0]})
+        dts = [d for d in (self._local_start, self._local_end) if d is not None]
+        return pl.DataFrame({"datetime": dts, "close": [10.0] * len(dts)})
 
 
 # ---------------------------------------------------------------------------
