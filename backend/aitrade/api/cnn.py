@@ -20,6 +20,7 @@ from ..models.governance import (
     CNNRollbackRequest,
     CNNWalkForwardRequest,
 )
+from ..models.screening import CNNScreeningRequest
 from ..task import task_manager
 
 router = APIRouter(prefix="/api/cnn", tags=["CNN量化预测"])
@@ -371,6 +372,55 @@ async def get_governance_replay(replay_id: str) -> dict:
     if replay is None:
         raise HTTPException(404, f"治理回放报告不存在: {replay_id}")
     return replay
+
+
+# =============================================================================
+# 选股（CNN Screening）
+# =============================================================================
+
+@router.post("/screening/batch")
+async def start_cnn_screening(req: CNNScreeningRequest) -> dict:
+    """启动 CNN 选股批量任务，异步执行并立即返回 task_id。
+
+    POST /api/cnn/screening/batch 的处理函数：创建 CNN_SCREENING 任务并提交后台
+    线程执行，不阻塞请求。前端可凭返回的 task_id 轮询进度与结果。
+
+    选股两阶段漏斗（由 ScreeningRunner 编排）：
+    - Tier-1（只读）：对候选池逐只复用 Profiler 画像 + CNN 代理指标，合成 CNN_Fitness_Score；
+    - Tier-2（可选）：对 top_k 入围标的运行 WF/OOS 实证，派生绝对 edge 结论。
+    结果经 GET /api/alpha/tasks/{task_id} 轮询获取。
+
+    Args:
+        req: CNN 选股请求，含 universe 过滤参数（as_of/exchange/include|exclude_symbols/
+            min_bar_count）、漏斗配置（top_k/run_tier2/min_confidence）、Tier-2 超参
+            （objective/eval_start）与持久化开关（persist）。
+            注意：as_of 为必填，无任何隐式"全量"默认（Requirement 9.1）。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 name（选股任务名称）的字典。
+    """
+    task_id = task_manager.create_task(
+        TaskType.CNN_SCREENING,
+        params=req.model_dump(mode="json"),
+        title="CNN 选股批量评估",
+        entity_type="cnn_screening",
+        entity_name=req.name,
+    )
+
+    def _run(on_progress: Optional[Callable[[float, str], None]] = None) -> dict[str, Any]:
+        """选股任务的后台执行体：在任务线程内调用两阶段漏斗并返回 JSON 可序列化的选股结果。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，透传给 ScreeningRunner；可为 None。
+
+        Returns:
+            run_cnn_screening_batch 产出的 ScreeningResult.model_dump(mode="json") 字典。
+        """
+        from ..screening.runner import run_cnn_screening_batch  # lazy import（避免循环）
+        return run_cnn_screening_batch(req, on_progress=on_progress)
+
+    task_manager.run_async(task_id, _run, enable_progress=True)
+    return {"task_id": task_id, "name": req.name}
 
 
 # =============================================================================
