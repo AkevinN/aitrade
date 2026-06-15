@@ -12,6 +12,7 @@ import {
   FundOutlined,
   ControlOutlined,
   PieChartOutlined,
+  SearchOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
@@ -19,6 +20,7 @@ import DataPrepare from './pages/DataPrepare'
 import ModelTrain from './pages/ModelTrain'
 import CNNTrain from './pages/CNNTrain'
 import CNNGovernance from './pages/CNNGovernance'
+import CNNScreening from './pages/CNNScreening'
 import Signal from './pages/Signal'
 import Backtest from './pages/Backtest'
 import Resource from './pages/Resource'
@@ -36,6 +38,7 @@ const menuItems = [
   { key: '/model-train', icon: <RobotOutlined />, label: '模型训练' },
   { key: '/cnn-train', icon: <ExperimentOutlined />, label: 'CNN训练' },
   { key: '/cnn-governance', icon: <ControlOutlined />, label: 'CNN治理' },
+  { key: '/cnn-screening', icon: <SearchOutlined />, label: 'CNN选股' },
   { key: '/signal', icon: <ThunderboltOutlined />, label: '信号分析' },
   { key: '/backtest', icon: <LineChartOutlined />, label: '回测' },
   { key: '/trading-console', icon: <FundOutlined />, label: '交易操作台' },
@@ -68,6 +71,10 @@ const pageMeta: Record<string, { title: string; description: string }> = {
   '/cnn-governance': {
     title: 'CNN 治理',
     description: '滚动评估、候选模型、半自动晋级、回滚与治理回放回测。',
+  },
+  '/cnn-screening': {
+    title: 'CNN 选股',
+    description: '批量评估 CNN 适配度，Tier-1 打分 + Tier-2 WF/OOS 实证，产出草稿榜单后一键带入训练。',
   },
   '/signal': {
     title: '信号分析',
@@ -245,6 +252,7 @@ const App: React.FC = () => {
         <Route path="/model-train" element={<ModelTrain />} />
         <Route path="/cnn-train" element={<CNNTrain />} />
         <Route path="/cnn-governance" element={<CNNGovernance />} />
+        <Route path="/cnn-screening" element={<CNNScreening />} />
         <Route path="/signal" element={<Signal />} />
         <Route path="/backtest" element={<Backtest />} />
         <Route path="/trading-console" element={<TradingConsole />} />

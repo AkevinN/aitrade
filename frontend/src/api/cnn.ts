@@ -15,6 +15,7 @@ import type {
   CNNPredictRequest,
   TaskStartResponse,
 } from '../types/cnn'
+import type { CNNScreeningRequest } from '../types/screening'
 
 export const cnnService = {
   /**
@@ -94,4 +95,24 @@ export const cnnService = {
    */
   runBacktest: (req: CNNBacktestRequest) =>
     api.post<TaskStartResponse>('/api/cnn/backtest/run', req).then((r) => r.data),
+
+  /**
+   * 启动 CNN 批量选股任务（分层漏斗 Tier-1 廉价预筛 + 可选 Tier-2 WF/OOS 实证）。
+   *
+   * 后端异步执行：Tier-1 对 universe 批量打 CNN 适配度综合分，
+   * Tier-2 对排名靠前的 top_k 只运行 WF/OOS 实证（`req.run_tier2=true` 时）。
+   * 返回 task_id 后需通过 `useTask` 轮询至 completed，再从 `task.data.result`
+   * 中读取 `ScreeningResult`。
+   *
+   * @param req - 选股请求体（标的池过滤、截止时间、漏斗配置与 Tier-2 超参）
+   * @returns 异步任务启动凭据（含 task_id，需轮询至 completed）
+   *
+   * @example
+   * ```ts
+   * const res = await cnnService.runScreening({ name: 'screen_20250601', interval: 'd', as_of: '2025-06-01', lookback_days: 250, top_k: 15, run_tier2: true, min_bar_count: 250, objective: 'classification' })
+   * setTaskId(res.task_id)
+   * ```
+   */
+  runScreening: (req: CNNScreeningRequest) =>
+    api.post<TaskStartResponse>('/api/cnn/screening/batch', req).then((r) => r.data),
 }
