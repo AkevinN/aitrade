@@ -43,35 +43,77 @@ def _normalize_symbol_list(vt_symbols: list[str]) -> list[str]:
 
 @router.get("/governance/config")
 async def get_governance_config() -> dict:
-    """读取 CNN 治理配置（晋级门禁参数、调度策略等）。"""
+    """读取 CNN 治理配置（晋级门禁参数、调度策略等）。
+
+    GET /api/cnn/governance/config 的处理函数，从治理存储读取当前生效配置。
+
+    Returns:
+        治理配置字典，含晋级门禁阈值、调度策略等字段；
+        从未保存过配置时返回存储侧的默认配置。
+    """
     from ..cnn.governance import store
     return store.get_config()
 
 
 @router.put("/governance/config")
 async def update_governance_config(req: CNNGovernanceConfig) -> dict:
-    """更新 CNN 治理配置并追加 config_updated 历史事件。"""
+    """更新 CNN 治理配置并追加 config_updated 历史事件。
+
+    PUT /api/cnn/governance/config 的处理函数，整体覆盖式保存治理配置，
+    并向治理历史写入一条 config_updated 事件以便审计。
+
+    Args:
+        req: 新的治理配置（晋级门禁阈值、调度策略等），整体替换旧配置。
+
+    Returns:
+        保存后落盘的治理配置字典。
+    """
     from ..cnn.governance import store
     return store.save_config(req)
 
 
 @router.get("/governance/production")
 async def get_governance_production() -> dict:
-    """读取当前生产模型信息（model_name/version/promoted_at 等）。"""
+    """读取当前生产模型信息（model_name/version/promoted_at 等）。
+
+    GET /api/cnn/governance/production 的处理函数，返回当前已晋级到生产的模型指针。
+
+    Returns:
+        生产模型信息字典，含 model_name/version/promoted_at 等字段；
+        尚无生产模型时返回存储侧定义的空/默认结构。
+    """
     from ..cnn.governance import store
     return store.get_production()
 
 
 @router.get("/governance/candidates")
 async def list_governance_candidates() -> list[dict]:
-    """列出所有候选模型，按创建时间降序排列。"""
+    """列出所有候选模型，按创建时间降序排列。
+
+    GET /api/cnn/governance/candidates 的处理函数。
+
+    Returns:
+        候选模型元数据字典列表，最新创建者在前；无候选时返回空列表。
+    """
     from ..cnn.governance import store
     return store.list_candidates()
 
 
 @router.get("/governance/candidates/{candidate_id}")
 async def get_governance_candidate(candidate_id: str) -> dict:
-    """读取指定候选模型的元数据（含 WF 报告 ID 与训练结果摘要）。"""
+    """读取指定候选模型的元数据（含 WF 报告 ID 与训练结果摘要）。
+
+    GET /api/cnn/governance/candidates/{candidate_id} 的处理函数。
+
+    Args:
+        candidate_id: 候选模型 ID，取自路径参数。
+
+    Returns:
+        候选模型元数据字典，含关联的 WF/OOS 报告 ID 与训练结果摘要。
+
+    Raises:
+        HTTPException: 候选不存在时返回 404。
+    """
     from ..cnn.governance import store
     candidate = store.get_candidate(candidate_id)
     if candidate is None:
@@ -81,7 +123,17 @@ async def get_governance_candidate(candidate_id: str) -> dict:
 
 @router.post("/governance/evaluate")
 async def start_governance_evaluate(req: CNNWalkForwardRequest) -> dict:
-    """启动 WF/OOS 评估任务，异步执行并立即返回 task_id。"""
+    """启动 WF/OOS（滚动前向/样本外）评估任务，异步执行并立即返回 task_id。
+
+    POST /api/cnn/governance/evaluate 的处理函数：创建 CNN_WF_EVALUATE 任务并提交后台
+    线程执行，不阻塞请求。前端可凭返回的 task_id 轮询进度与结果。
+
+    Args:
+        req: WF/OOS 评估请求，含评估名称、标的、滚动窗口与门禁参数等。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 name（评估名称）的字典。
+    """
     task_id = task_manager.create_task(
         TaskType.CNN_WF_EVALUATE,
         params=req.model_dump(mode="json"),
@@ -91,6 +143,14 @@ async def start_governance_evaluate(req: CNNWalkForwardRequest) -> dict:
     )
 
     def _run(on_progress: Optional[Callable[[float, str], None]] = None) -> dict[str, Any]:
+        """WF/OOS 评估任务的后台执行体：在任务线程内调用滚动前向评估并返回治理报告。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给底层评估逐步上报；可为 None。
+
+        Returns:
+            run_walk_forward_evaluate 产出的治理报告字典。
+        """
         from ..cnn.governance import run_walk_forward_evaluate
         return run_walk_forward_evaluate(req, on_progress=on_progress)
 
@@ -100,7 +160,17 @@ async def start_governance_evaluate(req: CNNWalkForwardRequest) -> dict:
 
 @router.post("/governance/candidates/train")
 async def start_governance_candidate_train(req: CNNCandidateTrainRequest) -> dict:
-    """启动候选模型训练任务（WF/OOS 评估 + 最终模型训练），异步执行并立即返回 task_id。"""
+    """启动候选模型训练任务（WF/OOS 评估 + 最终模型训练），异步执行并立即返回 task_id。
+
+    POST /api/cnn/governance/candidates/train 的处理函数：创建 CNN_CANDIDATE_TRAIN 任务并
+    提交后台线程执行。任务内先做滚动前向评估再训练最终模型，产出一个待晋级候选。
+
+    Args:
+        req: 候选训练请求，含候选名称、标的、训练超参与 WF/OOS 评估配置等。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 name（候选名称）的字典。
+    """
     task_id = task_manager.create_task(
         TaskType.CNN_CANDIDATE_TRAIN,
         params=req.model_dump(mode="json"),
@@ -110,6 +180,14 @@ async def start_governance_candidate_train(req: CNNCandidateTrainRequest) -> dic
     )
 
     def _run(on_progress: Optional[Callable[[float, str], None]] = None) -> dict[str, Any]:
+        """候选训练任务的后台执行体：在任务线程内做 WF/OOS 评估并训练最终模型，返回候选信息。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给底层训练逐步上报；可为 None。
+
+        Returns:
+            train_candidate 产出的候选模型信息字典。
+        """
         from ..cnn.governance import train_candidate
         return train_candidate(req, on_progress=on_progress)
 
@@ -119,7 +197,21 @@ async def start_governance_candidate_train(req: CNNCandidateTrainRequest) -> dic
 
 @router.post("/governance/candidates/{candidate_id}/promote")
 async def promote_governance_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict:
-    """将指定候选模型晋级为生产模型（同步执行）。"""
+    """将指定候选模型晋级为生产模型（同步执行）。
+
+    POST /api/cnn/governance/candidates/{candidate_id}/promote 的处理函数：把候选指针写为
+    新的生产模型并记录晋级事件。同步完成，返回时晋级已生效。
+
+    Args:
+        candidate_id: 待晋级候选模型 ID，取自路径参数。
+        req: 晋级请求，含晋级备注（note）等。
+
+    Returns:
+        晋级后的生产模型信息字典。
+
+    Raises:
+        HTTPException: 候选不存在（底层抛 FileNotFoundError）时返回 404。
+    """
     from ..cnn.governance import promote_candidate
     try:
         return promote_candidate(candidate_id, req)
@@ -129,7 +221,21 @@ async def promote_governance_candidate(candidate_id: str, req: CNNPromotionReque
 
 @router.post("/governance/candidates/{candidate_id}/reject")
 async def reject_governance_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict:
-    """拒绝指定候选模型，更新其状态为 rejected（同步执行）。"""
+    """拒绝指定候选模型，更新其状态为 rejected（同步执行）。
+
+    POST /api/cnn/governance/candidates/{candidate_id}/reject 的处理函数：将候选标记为
+    rejected 并记录拒绝备注，不影响当前生产模型。
+
+    Args:
+        candidate_id: 待拒绝候选模型 ID，取自路径参数。
+        req: 晋级/拒绝请求，此处仅取其中的 note 作为拒绝备注。
+
+    Returns:
+        更新后的候选模型元数据字典（状态已置为 rejected）。
+
+    Raises:
+        HTTPException: 候选不存在（底层抛 FileNotFoundError）时返回 404。
+    """
     from ..cnn.governance import reject_candidate
     try:
         return reject_candidate(candidate_id, note=req.note)
@@ -139,7 +245,20 @@ async def reject_governance_candidate(candidate_id: str, req: CNNPromotionReques
 
 @router.post("/governance/rollback")
 async def rollback_governance_production(req: CNNRollbackRequest) -> dict:
-    """将生产模型回滚到上一版本（或指定模型），同步执行。"""
+    """将生产模型回滚到上一版本（或请求指定的模型），同步执行。
+
+    POST /api/cnn/governance/rollback 的处理函数：把生产指针指回历史版本并记录回滚事件。
+
+    Args:
+        req: 回滚请求，含目标版本/模型与回滚备注；未指定目标时回滚到上一版本。
+
+    Returns:
+        回滚后的生产模型信息字典。
+
+    Raises:
+        HTTPException: 目标模型不存在或无可回滚版本（底层抛 FileNotFoundError/ValueError）
+            时返回 400。
+    """
     from ..cnn.governance import rollback_production
     try:
         return rollback_production(req)
@@ -149,14 +268,32 @@ async def rollback_governance_production(req: CNNRollbackRequest) -> dict:
 
 @router.get("/governance/history")
 async def get_governance_history() -> list[dict]:
-    """读取全量治理历史事件列表（JSONL，按写入时间升序）。"""
+    """读取全量治理历史事件列表（JSONL，按写入时间升序）。
+
+    GET /api/cnn/governance/history 的处理函数，返回配置更新、晋级、拒绝、回滚等审计事件。
+
+    Returns:
+        治理事件字典列表，按写入时间升序（最早在前）；无事件时返回空列表。
+    """
     from ..cnn.governance import store
     return store.history()
 
 
 @router.get("/governance/reports/{report_id}")
 async def get_governance_report(report_id: str) -> dict:
-    """读取指定 WF/OOS 评估报告（含各折统计与晋级门禁结果）。"""
+    """读取指定 WF/OOS 评估报告（含各折统计与晋级门禁结果）。
+
+    GET /api/cnn/governance/reports/{report_id} 的处理函数。
+
+    Args:
+        report_id: WF/OOS 评估报告 ID，取自路径参数。
+
+    Returns:
+        评估报告字典，含各折（fold）统计与晋级门禁判定结果。
+
+    Raises:
+        HTTPException: 报告不存在时返回 404。
+    """
     from ..cnn.governance import store
     report = store.get_report(report_id)
     if report is None:
@@ -166,7 +303,17 @@ async def get_governance_report(report_id: str) -> dict:
 
 @router.post("/governance/replay/run")
 async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
-    """启动治理回放回测任务，在历史区间对比三条基线策略，异步执行并立即返回 task_id。"""
+    """启动治理回放回测任务，在历史区间对比三条基线策略，异步执行并立即返回 task_id。
+
+    POST /api/cnn/governance/replay/run 的处理函数：创建 CNN_GOVERNANCE_REPLAY 任务并提交
+    后台线程执行，在选定历史区间回放治理决策并与三条基线策略对比。
+
+    Args:
+        req: 治理回放请求，含回放名称、历史区间与基线对比配置等。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 name（回放名称）的字典。
+    """
     task_id = task_manager.create_task(
         TaskType.CNN_GOVERNANCE_REPLAY,
         params=req.model_dump(mode="json"),
@@ -176,6 +323,14 @@ async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
     )
 
     def _run(on_progress: Optional[Callable[[float, str], None]] = None) -> dict[str, Any]:
+        """治理回放任务的后台执行体：在任务线程内对历史区间做基线对比回放并返回回放报告。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给底层回放逐步上报；可为 None。
+
+        Returns:
+            run_governance_replay 产出的治理回放报告字典。
+        """
         from ..cnn.governance import run_governance_replay
         return run_governance_replay(req, on_progress=on_progress)
 
@@ -185,14 +340,32 @@ async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
 
 @router.get("/governance/replay")
 async def list_governance_replays() -> list[dict]:
-    """列出所有治理回放报告，按创建时间降序排列。"""
+    """列出所有治理回放报告，按创建时间降序排列。
+
+    GET /api/cnn/governance/replay 的处理函数。
+
+    Returns:
+        治理回放报告字典列表，最新创建者在前；无报告时返回空列表。
+    """
     from ..cnn.governance import store
     return store.list_replay_reports()
 
 
 @router.get("/governance/replay/{replay_id}")
 async def get_governance_replay(replay_id: str) -> dict:
-    """读取指定治理回放报告（含三条基线对比、晋级事件与结论）。"""
+    """读取指定治理回放报告（含三条基线对比、晋级事件与结论）。
+
+    GET /api/cnn/governance/replay/{replay_id} 的处理函数。
+
+    Args:
+        replay_id: 治理回放报告 ID，取自路径参数。
+
+    Returns:
+        治理回放报告字典，含三条基线策略对比、回放期内晋级事件与结论。
+
+    Raises:
+        HTTPException: 报告不存在时返回 404。
+    """
     from ..cnn.governance import store
     replay = store.get_replay_report(replay_id)
     if replay is None:
@@ -205,7 +378,13 @@ async def get_governance_replay(replay_id: str) -> dict:
 # =============================================================================
 
 def _check_torch() -> bool:
-    """检查 PyTorch 是否可用。"""
+    """检测当前环境是否已安装 PyTorch。
+
+    通过尝试 import torch 判断，供各路由在执行依赖 torch 的训练/推理/回测前做前置校验。
+
+    Returns:
+        torch 可正常导入时返回 True，导入失败（未安装）时返回 False。
+    """
     try:
         import torch
         return True
@@ -214,7 +393,12 @@ def _check_torch() -> bool:
 
 
 def _get_device() -> str:
-    """返回 PyTorch 可用的设备（cuda/cpu）。"""
+    """返回 PyTorch 推荐使用的计算设备标识。
+
+    Returns:
+        CUDA 可用时返回 "cuda"，仅 CPU 时返回 "cpu"；
+        torch 不可用或探测异常时返回 "N/A"。
+    """
     try:
         import torch
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -228,7 +412,14 @@ def _get_device() -> str:
 
 @router.get("/status")
 async def get_cnn_status() -> dict:
-    """检查 CNN 功能是否可用（PyTorch 是否安装）。"""
+    """检查 CNN 功能是否可用（即 PyTorch 是否安装及可用设备）。
+
+    GET /api/cnn/status 的处理函数，供前端在进入 CNN 相关页面前判断功能是否就绪。
+
+    Returns:
+        含 torch_installed（bool，是否已安装 PyTorch）与 device（str，可用计算设备；
+        torch 未安装时为 "N/A"）的字典。
+    """
     torch_ok = _check_torch()
     return {
         "torch_installed": torch_ok,
@@ -242,11 +433,27 @@ async def get_cnn_status() -> dict:
 
 @router.post("/train")
 async def start_cnn_train(req: CNNTrainRequest) -> dict:
-    """
-    启动 CNN 训练任务。
+    """启动 CNN 训练任务，异步执行并立即返回 task_id。
 
-    通过 TaskManager 在后台线程执行，立即返回 task_id。
-    前端可通过 /api/alpha/tasks/{task_id} 轮询进度。
+    POST /api/cnn/train 的处理函数。先做一系列请求级参数校验（日期顺序、train_ratio
+    取值、输入数据/周期组合、label 配置、objective↔label 约束），再将观测组与显式标的
+    归一化去重后合成最终训练标的集，最后创建 CNN_TRAIN 任务交给 TaskManager 在后台线程
+    执行。前端可通过 /api/alpha/tasks/{task_id} 轮询进度。
+
+    Args:
+        req: CNN 训练请求。关键字段：start/end 训练区间（start 必须早于 end）；
+            train_ratio 训练集占比，须在 (0, 1) 开区间；input_data_kind 输入类型，
+            "bar" 或 "tick"；input_interval K 线周期，取 d/1m/5m/10m/15m/30m/60m，
+            tick 输入不支持 "d"；vt_symbols 与 observation_groups 提供观测标的，
+            target_symbol 为预测目标（缺省则取观测集，但二者不能全空）；label_spec
+            标签定义（horizon_bars 模式须给 horizon，oco 模式须给正的 take_profit 与
+            stop_loss）；objective 训练目标，path_class 时 label_spec.mode 必须为 oco。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 name（模型名）的字典。
+
+    Raises:
+        HTTPException: PyTorch 未安装、上述任一参数校验不通过时返回 400。
     """
     if not _check_torch():
         raise HTTPException(400, "PyTorch 未安装，请先执行: pip install torch")
@@ -300,6 +507,17 @@ async def start_cnn_train(req: CNNTrainRequest) -> dict:
     )
 
     def _run(on_progress: Optional[Callable[[float, str], None]] = None) -> dict[str, Any]:
+        """CNN 训练任务的后台执行体：在任务线程内用请求参数训练 CNN 模型并返回训练结果。
+
+        闭包捕获外层已校验的 effective_symbols、target_symbol、input_interval、label_spec
+        等，组装观测分组后调用 train_cnn_model。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给训练过程逐步上报；可为 None。
+
+        Returns:
+            train_cnn_model 产出的训练结果字典。
+        """
         from ..cnn import train_cnn_model
         return train_cnn_model(
             name=req.name,
@@ -339,14 +557,32 @@ async def start_cnn_train(req: CNNTrainRequest) -> dict:
 
 @router.get("/models")
 async def list_models() -> list[dict]:
-    """列出已保存的 CNN 模型。"""
+    """列出已保存的 CNN 模型。
+
+    GET /api/cnn/models 的处理函数。
+
+    Returns:
+        每个 CNN 模型的摘要信息字典列表；无模型时返回空列表。
+    """
     from ..cnn import list_cnn_models
     return list_cnn_models()
 
 
 @router.get("/models/{name}")
 async def get_model_detail(name: str) -> dict:
-    """获取模型详情（含训练历史）。"""
+    """获取指定 CNN 模型的详情（含训练配置与训练历史）。
+
+    GET /api/cnn/models/{name} 的处理函数。
+
+    Args:
+        name: 模型名，取自路径参数。
+
+    Returns:
+        模型详情字典，含训练配置、指标与逐 epoch 训练历史等。
+
+    Raises:
+        HTTPException: 模型不存在（底层抛 FileNotFoundError）时返回 404。
+    """
     from ..cnn import get_cnn_model_detail
     try:
         return get_cnn_model_detail(name)
@@ -356,7 +592,20 @@ async def get_model_detail(name: str) -> dict:
 
 @router.get("/models/{name}/architecture")
 async def get_model_architecture(name: str) -> dict:
-    """探查模型的真实网络结构（重建实例 + 加载权重 + 逐层形状）。"""
+    """探查指定 CNN 模型的真实网络结构（重建实例 + 加载权重 + 逐层形状）。
+
+    GET /api/cnn/models/{name}/architecture 的处理函数。需要 PyTorch 以重建模型实例。
+
+    Args:
+        name: 模型名，取自路径参数。
+
+    Returns:
+        网络结构描述字典，含各层类型与逐层输入/输出形状等。
+
+    Raises:
+        HTTPException: PyTorch 未安装时返回 400；模型不存在（底层抛 FileNotFoundError）
+            时返回 404。
+    """
     if not _check_torch():
         raise HTTPException(400, "PyTorch 未安装，无法探查模型结构")
     from ..cnn import describe_cnn_architecture
@@ -368,7 +617,19 @@ async def get_model_architecture(name: str) -> dict:
 
 @router.delete("/models/{name}")
 async def delete_model(name: str) -> dict:
-    """删除 CNN 模型。"""
+    """删除指定 CNN 模型。
+
+    DELETE /api/cnn/models/{name} 的处理函数。
+
+    Args:
+        name: 待删除模型名，取自路径参数。
+
+    Returns:
+        含 deleted（被删除的模型名）的字典。
+
+    Raises:
+        HTTPException: 模型不存在（删除返回 False）时返回 404。
+    """
     from ..cnn import delete_cnn_model
     ok = delete_cnn_model(name)
     if not ok:
@@ -438,6 +699,12 @@ def _run_cnn_backtest(
         on_progress(10, "正在进行 CNN 推理...")
 
     def inference_progress(pct: float, msg: str) -> None:
+        """推理进度适配器：把推理段的 0~100% 线性映射到整体回测进度的 10~50% 后上报。
+
+        Args:
+            pct: 推理自身进度百分比（0~100）。
+            msg: 推理阶段的进度文案，会加上 "[推理] " 前缀。
+        """
         if on_progress:
             # Map inference progress (0-100) to overall (10-50)
             on_progress(10 + pct * 0.4, f"[推理] {msg}")
@@ -639,10 +906,25 @@ def _run_cnn_backtest(
 
 @router.post("/backtest/run")
 async def start_cnn_backtest(req: CNNBacktestRequest) -> dict:
-    """
-    启动 CNN 模型回测任务。
+    """启动 CNN 模型回测任务，异步执行并立即返回 task_id。
 
-    通过 CNN 推理生成信号后，使用共享回测引擎执行回测。
+    POST /api/cnn/backtest/run 的处理函数。先做请求级校验（日期顺序、buy/sell 阈值取值与
+    大小关系），再在模型已存在时读取 checkpoint 的 objective，按其口径（分类=概率尺度、
+    回归=收益尺度）校验阈值是否被误用——回归模型误用概率阈值或概率阈值越界会当场拒绝，
+    避免任务静默空跑；该校验与回测策略、实盘 service 共用同一 threshold_scale_check。
+    校验通过后创建 CNN_BACKTEST 任务，任务内经 CNN 推理生成信号并用共享回测引擎执行回测。
+
+    Args:
+        req: CNN 回测请求。关键字段：start/end 回测区间（start 须早于 end）；model 模型名；
+            buy_threshold/sell_threshold 买入/卖出阈值，均须落在 (-1, 1) 开区间且
+            buy_threshold > sell_threshold；其余成本/出场参数透传给回测任务。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 message（启动提示）的字典。
+
+    Raises:
+        HTTPException: PyTorch 未安装、日期顺序错误、阈值越界或大小关系不成立、
+            阈值尺度与模型 objective 不匹配时返回 400。
     """
     if not _check_torch():
         raise HTTPException(400, "PyTorch 未安装，请先执行: pip install torch")
@@ -683,6 +965,14 @@ async def start_cnn_backtest(req: CNNBacktestRequest) -> dict:
     )
 
     def execute(on_progress: Optional[Callable[[float, str], None]] = None) -> dict:
+        """CNN 回测任务的后台执行体：在任务线程内调用 _run_cnn_backtest 并返回回测结果。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给回测过程逐步上报；可为 None。
+
+        Returns:
+            _run_cnn_backtest 产出的回测结果字典。
+        """
         return _run_cnn_backtest(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -697,7 +987,23 @@ def _run_cnn_predict(
     req: CNNPredictRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """执行 CNN 推理，将概率信号保存到信号库（供 Alpha 回测复用）。"""
+    """执行 CNN 推理，将信号保存到信号库（供 Alpha 回测复用）。
+
+    在 CNN_PREDICT 任务的后台线程内运行：校验模型存在 → 调用 predict_cnn_signals 生成
+    [datetime, vt_symbol, signal] 信号表 → 以请求名保存到 AlphaLab 信号库。期间通过
+    on_progress 上报进度（5% 起步、推理段映射到 5~90%、保存后 100%）。
+
+    Args:
+        req: CNN 推理请求，含 name（保存的信号名）、model（模型名）、start/end（推理区间）。
+        on_progress: 进度回调 ``(percent, message)``，可为 None（不上报）。
+
+    Returns:
+        结果字典。产生信号时含 name/model/signal_count/signal_mean/start/end；
+        未产生任何信号时含 name/signal_count=0/message，且不写入信号库。
+
+    Raises:
+        ValueError: CNN 模型文件不存在时抛出。
+    """
     from ..alpha import AlphaLab
     from ..config import ALPHA_LAB_PATH
     from ..cnn.predictor import predict_cnn_signals
@@ -713,6 +1019,12 @@ def _run_cnn_predict(
 
     # 2. CNN 推理生成信号
     def inference_progress(pct: float, msg: str) -> None:
+        """推理进度适配器：把推理段的 0~100% 线性映射到整体推理任务进度的 5~90% 后上报。
+
+        Args:
+            pct: 推理自身进度百分比（0~100）。
+            msg: 推理阶段的进度文案，会加上 "[推理] " 前缀。
+        """
         if on_progress:
             # 将推理进度 (0-100) 映射到整体 (5-90)
             on_progress(5 + pct * 0.85, f"[推理] {msg}")
@@ -753,10 +1065,20 @@ def _run_cnn_predict(
 
 @router.post("/predict")
 async def start_cnn_predict(req: CNNPredictRequest) -> dict:
-    """
-    启动 CNN 推理任务，生成概率信号并保存到信号库。
+    """启动 CNN 推理任务，生成信号并保存到信号库，异步执行并立即返回 task_id。
 
-    保存后的信号可在「Alpha 因子回测」中作为普通信号直接复用。
+    POST /api/cnn/predict 的处理函数。校验通过后创建 CNN_PREDICT 任务交后台线程执行；
+    任务产出的信号会写入信号库，可在「Alpha 因子回测」中作为普通信号直接复用。
+
+    Args:
+        req: CNN 推理请求，含 name（保存的信号名）、model（模型名）、start/end（推理区间，
+            start 须早于 end）。
+
+    Returns:
+        含 task_id（任务 ID，用于轮询）与 message（启动提示）的字典。
+
+    Raises:
+        HTTPException: PyTorch 未安装或日期顺序错误时返回 400。
     """
     if not _check_torch():
         raise HTTPException(400, "PyTorch 未安装，请先执行: pip install torch")
@@ -773,6 +1095,14 @@ async def start_cnn_predict(req: CNNPredictRequest) -> dict:
     )
 
     def execute(on_progress: Optional[Callable[[float, str], None]] = None) -> dict:
+        """CNN 推理任务的后台执行体：在任务线程内调用 _run_cnn_predict 生成并保存信号。
+
+        Args:
+            on_progress: 进度回调 ``(percent, message)``，转交给推理过程逐步上报；可为 None。
+
+        Returns:
+            _run_cnn_predict 产出的结果字典（含信号统计或未产生信号提示）。
+        """
         return _run_cnn_predict(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)

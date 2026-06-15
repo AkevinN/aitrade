@@ -305,7 +305,18 @@ class CNNSignalStrategy(BaseStrategy):
 
     # ------------------------------------------------------------------
     def _target_volume(self, portfolio_value: float, price: float) -> int:
-        """按组合市值与 position_ratio 估算可买入手数（向下取整到 min_volume）"""
+        """按组合市值与 position_ratio 估算可买入股数（向下取整到 min_volume 整数倍）。
+
+        买入金额 = portfolio_value * position_ratio，再按 price 折算股数并向下
+        取整到 min_volume（A股 100 股）的整数倍，确保下单量合法。
+
+        Args:
+            portfolio_value: 当前组合总市值，单位元；非正值会得到 0 股。
+            price: 标的当前价格，单位元/股。
+
+        Returns:
+            可买入股数（min_volume 的整数倍）；price <= 0 时返回 0（无法下单）。
+        """
         if price <= 0:
             return 0
         buy_value = portfolio_value * self.position_ratio

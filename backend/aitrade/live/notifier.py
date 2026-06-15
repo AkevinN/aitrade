@@ -27,6 +27,18 @@ class Notifier(Protocol):
     """
 
     def send(self, title: str, message: str) -> bool:
+        """发送一条通知，返回是否送达成功。
+
+        实现类须在内部完成网络调用、超时与异常处理，不向调用方传播网络错误；
+        无法送达时以返回 False 表达，而非抛异常。
+
+        Args:
+            title:   通知标题（短文本，如"买入信号"）。
+            message: 通知正文（详细内容）。
+
+        Returns:
+            True 表示至少一条通知成功送达；False 表示全部失败。
+        """
         ...
 
 

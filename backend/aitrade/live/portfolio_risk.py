@@ -89,6 +89,15 @@ class PortfolioRiskManager:
         *,
         lab: Any = None,
     ) -> None:
+        """构造组合风控管理器。
+
+        Args:
+            state_store: 运行时状态存储，承载各组合的 peak/熔断状态并跨请求持久化。
+            config: 组合风控配置；为 None 时使用 PortfolioRiskConfig 默认值
+                （回撤阈值 15%、MA60 趋势闸门、沪深 300 ETF 基准）。
+            lab: 行情数据访问对象（须提供 load_bar_frame）；为 None 时趋势闸门
+                fail-open（始终判定趋势正常，不压缩 buy_factor）。
+        """
         self._store = state_store
         self.config = config or PortfolioRiskConfig()
         self._lab = lab
@@ -120,12 +129,21 @@ class PortfolioRiskManager:
         portfolio_value: float,
         as_of: date,
     ) -> PortfolioRiskVerdict:
-        """执行组合风控评估，返回裁决与明细 records。
+        """执行组合风控评估，按 circuit→drawdown→trend 顺序检查并返回裁决与明细。
 
-        参数：
-            portfolio_id    — 组合 ID（与 RuntimeStateStore 中的键对应）
-            portfolio_value — 当前组合净值
-            as_of           — 评估日期（用于熔断记录与趋势查询）
+        每次调用都从 store 读取该组合最新状态，仅在 peak 更新或熔断触发时写回。
+        已熔断或本次触发熔断时短路返回（allow_buy=False、buy_factor=0.0）；
+        正常时趋势仅影响 buy_factor 不影响 allow_buy。
+
+        Args:
+            portfolio_id: 组合 ID，对应 RuntimeStateStore 中 "portfolio_risk" 下的子键。
+            portfolio_value: 当前组合净值，用于更新峰值与计算回撤。
+            as_of: 评估日期，写入熔断记录并作为趋势查询的截止日。
+
+        Returns:
+            PortfolioRiskVerdict：含 allow_buy、buy_factor（1.0 正常 /
+            below_ma_buy_factor 趋势弱 / 0.0 熔断）、broken 及 records 明细列表
+            （每个检查产出一条 {check, passed, detail}）。
         """
         records: list[dict] = []
         pstate = self._load_state(portfolio_id)
@@ -243,6 +261,12 @@ class PortfolioRiskManager:
         清零 peak 的理由：熔断后人工处置完毕，残留的旧高点会使新周期立即触发
         重新熔断（peak 依然是历史高位），因此与 broken 一并清除，让组合从当前
         净值重新起算。
+
+        Args:
+            portfolio_id: 待复位的组合 ID；不存在时静默无操作（幂等）。
+
+        Returns:
+            None。状态变更直接写回 RuntimeStateStore。
         """
         all_states: dict = self._store.get(_PORTFOLIO_RISK_KEY, {}) or {}
         all_states = dict(all_states)
@@ -255,11 +279,19 @@ class PortfolioRiskManager:
     # ------------------------------------------------------------------
 
     def _check_trend(self, as_of: date) -> tuple[bool, str]:
-        """检查基准指数趋势。
+        """检查基准指数趋势：当日收盘是否站上 MA{trend_ma_window}。
 
-        返回 (passed, detail)：
-        - passed=True  → 趋势强（close >= MA）或 fail-open（数据不足/lab 为 None）
-        - passed=False → 趋势弱（close < MA），detail 说明差距
+        从 lab 加载基准标的截至 as_of 的日线（向前多取 window*3 自然日以覆盖
+        非交易日），取最近 window 根 close 求均线。任一前置条件不满足
+        （lab 未注入 / 加载异常 / 数据不足）均 fail-open 判为趋势正常。
+
+        Args:
+            as_of: 趋势查询的截止日期（含）。
+
+        Returns:
+            (passed, detail) 二元组：passed=True 表示趋势强（close >= MA）或
+            fail-open；passed=False 表示趋势弱（close < MA）。detail 为人类可读
+            说明，写入 evaluate 的 records。
         """
         if self._lab is None:
             return True, "lab 未注入，趋势闸门跳过（fail-open）"

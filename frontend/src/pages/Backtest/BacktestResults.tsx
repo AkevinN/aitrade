@@ -55,6 +55,15 @@ const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }
     statistics.stamp_duty !== undefined ||
     statistics.slippage !== undefined ||
     statistics.price_add !== undefined
+  /**
+   * 把小数形式的费率换算成基点（bp）展示字符串。
+   *
+   * 1 个基点为万分之一，故将传入的小数乘以 10000 并保留一位小数；
+   * 用于成本假设区展示佣金率、印花税、滑点等。
+   *
+   * @param value - 小数形式的费率（如 0.0003 表示万分之三）；为 undefined 时显示占位符 "-"
+   * @returns 形如 "3.0 bp" 的字符串，未提供时返回 "-"
+   */
   const bps = (value?: number) => (value === undefined ? '-' : `${(value * 10000).toFixed(1)} bp`)
 
   return (

@@ -52,6 +52,7 @@ export interface MetricHelp {
   description: string
 }
 
+/** 画像指标键名到中文标签与说明的映射表；键为后端返回的指标键名。 */
 export const METRIC_HELP: Record<string, MetricHelp> = {
   count_valid_bars: {
     label: '有效 K 线数',
@@ -128,6 +129,14 @@ export function metricHelp(metricKey: string): MetricHelp {
   }
 }
 
+/**
+ * 把金额按量级压成带「万」「亿」单位的紧凑字符串，末位多余的零会去掉。
+ *
+ * 绝对值 ≥ 1 亿用「亿」、≥ 1 万用「万」、更小则取整不带单位；保留两位有效小数。
+ *
+ * @param value - 金额，单位为元；可为负，负号原样保留。
+ * @returns 形如 `1.23 亿` / `5.6 万` / `800` 的字符串。
+ */
 function compactMoney(value: number): string {
   const abs = Math.abs(value)
   if (abs >= 100_000_000) {
@@ -139,6 +148,13 @@ function compactMoney(value: number): string {
   return value.toFixed(0)
 }
 
+/**
+ * 把数值格式化为简洁小数：整数直接显示，极小值用科学计数法，其余保留至多 4 位并去末位零。
+ *
+ * @param value - 任意有限数值。
+ * @returns 整数返回原值字符串；绝对值小于 0.0001 的非零值返回如 `1.23e-5`；
+ *   其余返回最多 4 位小数且去除末尾零的字符串（如 `0.5`、`1.2345`）。
+ */
 function compactDecimal(value: number): string {
   if (Number.isInteger(value)) {
     return String(value)
@@ -150,6 +166,12 @@ function compactDecimal(value: number): string {
   return value.toFixed(4).replace(/\.?0+$/, '')
 }
 
+/**
+ * 把 0~1 的比例值格式化为百分比字符串，保留至多两位小数并去除末位零。
+ *
+ * @param value - 比例值，单位为「占比」（如 0.1234 表示 12.34%）。
+ * @returns 形如 `12.34%` / `5%` 的字符串。
+ */
 function percent(value: number): string {
   return `${(value * 100).toFixed(2).replace(/\.?0+$/, '')}%`
 }
@@ -288,6 +310,10 @@ export interface SuggestionFormMapping {
   unmapped: SuggestionItem[]
 }
 
+/**
+ * 「强参数」字段集合：当建议处于降级（degraded）状态时，这些字段不自动写入表单，
+ * 而是放入 `unmapped` 交由用户手动确认，避免低可信建议直接改动关键标注/预测参数。
+ */
 const STRONG_FIELDS = new Set([
   'label_spec.mode',
   'label_spec.take_profit',
@@ -297,6 +323,12 @@ const STRONG_FIELDS = new Set([
   'predictor.params.label_type',
 ])
 
+/**
+ * 把比例值（0~1）转换为百分比数值，供表单数字输入框使用；非有限数返回 undefined。
+ *
+ * @param value - 期望为比例数值（如 0.05 表示 5%）；非 number 或非有限值时无法转换。
+ * @returns 乘以 100 后保留至多 4 位小数的百分比数值（如 0.05 → 5）；输入无效时返回 `undefined`。
+ */
 function percentValue(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined

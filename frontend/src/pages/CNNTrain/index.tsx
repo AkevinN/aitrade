@@ -112,7 +112,20 @@ const OBJECTIVE_OPTIONS = [
   { label: '路径形态分类（四类剧本概率）', value: 'path_class' },
 ]
 
+/**
+ * 把比率（小数）格式化为保留一位小数的百分比字符串。
+ *
+ * @param value - 比率，单位为小数（0.123 表示 12.3%）；null/undefined 视为缺值
+ * @returns 形如 "12.3%" 的字符串；缺值返回 "-"
+ */
 const pct = (value?: number) => (value === undefined || value === null ? '-' : `${(value * 100).toFixed(1)}%`)
+
+/**
+ * 把数值格式化为保留三位小数的字符串，常用于 IC / AUC / F1 等指标。
+ *
+ * @param value - 待格式化的指标值；null/undefined 视为缺值
+ * @returns 保留三位小数的字符串；缺值返回 "-"
+ */
 const num3 = (value?: number | null) => (value === undefined || value === null ? '-' : value.toFixed(3))
 
 /**
@@ -183,6 +196,14 @@ const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = (
   )
 }
 
+/**
+ * 把用户输入的多证券文本拆成去重前的代码列表。
+ *
+ * 以换行或逗号为分隔符切分，逐项去除首尾空白并丢弃空串。
+ *
+ * @param raw - 原始文本，证券代码以换行或逗号分隔
+ * @returns 非空、已 trim 的证券代码数组；无有效内容时返回空数组
+ */
 const parseSymbols = (raw: string) => (
   raw
     .split(/[\n,]+/)
@@ -190,9 +211,23 @@ const parseSymbols = (raw: string) => (
     .filter(Boolean)
 )
 
+/**
+ * 把张量形状数组渲染成可读字符串。
+ *
+ * @param shape - 各维大小组成的数组；null/undefined 表示形状不可用
+ * @returns 形如 "[6, 30, 4]" 的字符串；非数组时返回 "-"
+ */
 const shapeText = (shape?: number[] | null) =>
   Array.isArray(shape) ? `[${shape.join(', ')}]` : '-'
 
+/**
+ * 把画像置信度等级渲染成带悬浮说明的彩色标签。
+ *
+ * 颜色、文案、描述均取自 {@link confidenceStyle}，描述以 Tooltip 形式悬浮展示。
+ *
+ * @param confidence - 画像整体置信度等级
+ * @returns 渲染好的置信度 Tag（含 Tooltip）
+ */
 function profilingConfidenceTag(confidence: ConfidenceLevel) {
   const style = confidenceStyle(confidence)
   return (
@@ -222,9 +257,19 @@ const profilingSummaryValueStyle: React.CSSProperties = {
   fontWeight: 600,
 }
 
+/**
+ * 最近画像摘要条：在训练表单内联展示最近一次标的画像的关键字段。
+ *
+ * 展示整体置信度、来源（历史画像/本次评估）、可用性、标的与周期、有效 bar
+ * 数及 artifact_id；若画像携带方案建议，提示可在详情中回填训练表单。
+ * 点击「查看详情」回调由父组件打开完整画像面板。
+ */
 const ProfilingResultSummary: React.FC<{
+  /** 最近一次画像评估结果 */
   result: SymbolProfileResponse
+  /** true=展示的是历史缓存画像，false=本次刚评估的画像 */
   historical: boolean
+  /** 点击「查看详情」时触发，用于打开完整画像面板 */
   onOpenDetail: () => void
 }> = ({ result, historical, onOpenDetail }) => {
   return (
@@ -277,8 +322,21 @@ const ProfilingResultSummary: React.FC<{
   )
 }
 
-/** 真实网络结构卡片：模块树 + 逐层形状 + 参数量，数据全部来自后端加载权重后的真实实例 */
-const ArchitectureCard: React.FC<{ arch: CNNArchitecture | null; loading: boolean }> = ({ arch, loading }) => {
+/**
+ * 真实网络结构卡片：模块树 + 逐层形状 + 参数量。
+ *
+ * 数据全部来自后端加载权重后探查到的真实实例：展示输入/输出形状、可训练参数量、
+ * 逐层输出形状与参数量，以及 PyTorch 原生模块树。当结构与权重不完全匹配
+ * （`arch.verified === false`）或逐层形状探查失败（`arch.forward_error`）时给出告警。
+ * `loading` 为 true 时显示加载态；`arch` 为 null 时显示「无法探查」空态
+ * （通常因 PyTorch 未安装或模型读取失败）。
+ */
+const ArchitectureCard: React.FC<{
+  /** 后端探查到的真实网络结构；null 表示探查失败或尚未加载 */
+  arch: CNNArchitecture | null
+  /** 是否正在加载并探查结构，true 时展示 Spin 加载态 */
+  loading: boolean
+}> = ({ arch, loading }) => {
   const layerColumns = [
     { title: '#', width: 48, render: (_: unknown, __: unknown, idx: number) => idx + 1 },
     { title: '层', dataIndex: 'name', width: 150, render: (v: string) => <Text code>{v}</Text> },
@@ -376,6 +434,19 @@ const ArchitectureCard: React.FC<{ arch: CNNArchitecture | null; loading: boolea
   )
 }
 
+/**
+ * CNN 训练工作流页面：从选输入源到启动训练、查看已保存模型详情的完整闭环。
+ *
+ * 左栏四步表单：选输入源（标的/周期/时间范围）、配目标证券与语义观测组、
+ * 定义标签（含 OCO 三重障碍）、设训练参数；支持「按时间窗口」自动换算回看
+ * bar 数 T 并对超上限（{@link LOOKBACK_MAX}）做拦截，path_class 目标会锁定
+ * OCO 标签。右栏展示已保存模型列表与选中模型的真实训练历史、评估指标、
+ * 观测组与网络结构。还集成只读画像评估（{@link ProfilingPanel}），可把
+ * 画像建议回填表单。
+ *
+ * 通过路由 `location.state` 接收预设（preset，预填标的/周期等）和
+ * focusModelName（进入即打开指定模型详情）。
+ */
 const CNNTrain: React.FC = () => {
   const { message } = App.useApp()
   const location = useLocation()
@@ -597,6 +668,14 @@ const CNNTrain: React.FC = () => {
     }
   }, [viewDetail?.name])
 
+  /**
+   * 校验观测组子表单并把一条新的语义观测组追加到列表。
+   *
+   * 证券列表支持数组（tags 模式）或多行/逗号文本，统一 trim 去空后入组。
+   * 角色为 target 时拒绝添加（目标证券在上方单独配置），证券为空时拒绝添加，
+   * 两种情况均以 message.warning 提示并 return。成功后重置子表单为默认值。
+   * 表单校验失败由 antd 表单自身提示，这里静默吞掉异常。
+   */
   const addGroup = async () => {
     try {
       const values = await groupForm.validateFields()
@@ -624,11 +703,24 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 按下标删除一条观测组。
+   *
+   * @param index - 待删除观测组在 observationGroups 中的下标
+   */
   const removeGroup = (index: number) => {
     setObservationGroups((current) => current.filter((_item, itemIndex) => itemIndex !== index))
   }
 
-  // 按当前关键配置自动生成模型名称：cnn_{标的}_{周期}_{标签}_{目标}_T{回看}_{计价口径}_{时间戳}
+  /**
+   * 按当前关键配置自动生成并回填模型名称。
+   *
+   * 命名格式为 `cnn_{标的}_{周期}_{标签}_{目标}_T{回看}_{计价口径}_{时间戳}`：
+   * 标的取目标证券去除非字母数字字符（缺失时用 'sym'）；周期对 tick 输入加 'tk' 前缀；
+   * 标签按 label_mode 缩写（nb/h{N}/sc/nsc/oco_tp{x}_sl{y}_h{z}）；目标 cls/reg；
+   * 计价口径 cl/no/nc/vw。末尾 MMDDHHmm 时间戳保证唯一、避免重名覆盖。
+   * 结果直接写入表单 name 字段，用户仍可手动修改。
+   */
   const autoFillModelName = () => {
     const sym = (targetSymbol || '').replace(/\.$/, '').replace(/[^0-9A-Za-z]/g, '') || 'sym'
     const kindInterval = `${inputDataKind === 'tick' ? 'tk' : ''}${inputInterval}`
@@ -662,6 +754,16 @@ const CNNTrain: React.FC = () => {
     form.setFieldsValue({ name })
   }
 
+  /**
+   * 校验主表单并提交 CNN 训练任务，记下返回的 task_id 以便轮询进度。
+   *
+   * 提交前做两道前端拦截：目标证券为空、回看窗口 T 超过 {@link LOOKBACK_MAX}，
+   * 均以 message.warning 提示并 return。阈值/止盈/止损按百分比转小数（除以 100
+   * 并取非负）；label_horizon 仅在 horizon_bars 模式下传，take_profit/stop_loss/
+   * max_hold 仅在 oco 模式下传；regression 与 path_class 目标强制 loss_weighting 为 'none'。
+   * 启动成功后写入 taskId 并提示；表单校验或网络异常时以 message.error 提示。
+   * 全程通过 submitting 控制按钮 loading 态。
+   */
   const handleTrain = async () => {
     try {
       const values = await form.validateFields()
@@ -717,6 +819,13 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 拉取指定模型的训练详情并填入右栏详情区。
+   *
+   * 成功后写入 viewDetail（触发网络结构探查）；失败以 message.error 提示。
+   *
+   * @param name - 模型名称
+   */
   const handleViewModel = async (name: string) => {
     try {
       const detail = await cnnService.getModel(name)
@@ -726,6 +835,14 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定 CNN 模型并刷新列表。
+   *
+   * 成功后提示并 refetch 模型列表；若被删模型正是当前详情区展示的模型，
+   * 一并清空 viewDetail。失败以 message.error 提示。
+   *
+   * @param name - 待删除模型名称
+   */
   const handleDeleteModel = async (name: string) => {
     try {
       await cnnService.deleteModel(name)
@@ -739,6 +856,16 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 把画像面板给出的方案建议回填到训练表单。
+   *
+   * 当前为 path_class 目标时，强制把建议里的 label_mode 覆盖为 'oco'（path_class
+   * 必须用 OCO 标签，避免禁用的 Select 显示非法值），并在提示中额外说明已锁定。
+   * 有可填字段时按是否存在未映射建议给出不同成功提示；无可填字段时给 warning。
+   *
+   * @param values - 可直接回填的表单字段键值对（已由画像面板映射）
+   * @param unmappedCount - 未能自动映射、需人工处理的建议条数
+   */
   const handleApplyProfilingSuggestion = (values: Record<string, unknown>, unmappedCount: number) => {
     if (Object.keys(values).length > 0) {
       // path_class 必须使用 OCO 标签，若建议中携带了其他 label_mode，强制覆盖为 'oco'

@@ -80,8 +80,15 @@ class LgbModel(AlphaModel):
     def fit(self, dataset: AlphaDataset) -> None:
         """训练 LightGBM 模型，含早停机制。
 
+        从 dataset 取训练集 / 验证集，以 MSE 为目标迭代提升，验证集损失连续
+        early_stopping_rounds 轮不改善即提前终止。
+
         Args:
             dataset: 已完成 prepare_data 与 process_data 的 AlphaDataset 实例。
+
+        Returns:
+            None。训练结果以副作用形式写入 self.model（lgb.Booster），供后续
+            predict / detail 使用。
         """
         ds: list[lgb.Dataset] = self._prepare_data(dataset)
 

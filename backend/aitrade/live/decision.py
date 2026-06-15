@@ -147,7 +147,14 @@ class DecisionStore:
         """归档式删除：决策文件移入 archive/ 子目录（文件名追加时间戳）。
 
         解除该 signal_id 的幂等占位——之后同一 Decision_Bar 可重新产出决策与提醒；
-        归档文件保留审计痕迹，不被 get/list_ids 纳入。不存在则返回 None。
+        归档文件保留审计痕迹，不被 get/list_ids 纳入。
+
+        Args:
+            signal_id: 待归档决策的幂等键。
+
+        Returns:
+            归档后的文件路径（archive/{stem}.{时间戳}.json）；该 signal_id
+            无落盘文件时返回 None。
         """
         path = self._path(signal_id)
         if not path.exists():

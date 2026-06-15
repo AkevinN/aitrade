@@ -33,6 +33,14 @@ const { Text, Title } = Typography
 // ============================================================
 // 调仓明细表格列定义（参考 RebalancePlanCard 思路，独立定义不复用组件）
 // ============================================================
+
+/**
+ * 调仓详情 Modal 内单条调仓指令表格的列定义。
+ *
+ * 渲染规则：方向 buy 标红「买入」、其余标绿「卖出」；数量按千分位展示；
+ * 参考价 price 与信号值 signal 为 null/undefined 时显示占位符「—」，
+ * 分别保留 2、4 位小数；原因列超长时省略。常量级定义，组件外共享一份引用。
+ */
 const DETAIL_COLUMNS: ColumnsType<RebalanceItem> = [
   {
     title: '标的',
@@ -84,10 +92,16 @@ const DETAIL_COLUMNS: ColumnsType<RebalanceItem> = [
 // ============================================================
 // 调仓历史表格行类型
 // ============================================================
+
+/** 调仓历史列表的单行摘要，对应后端 listRebalances 返回项中页面用到的字段。 */
 interface RebalanceSummary {
+  /** 调仓信号唯一标识，点击行时用于拉取调仓详情 */
   signal_id: string
+  /** 调仓状态，"confirmed" 渲染为「已确认」，其余视为「待确认」 */
   status: string
+  /** 所属组合 ID，页面侧按当前选中组合过滤历史列表 */
   portfolio_id: string
+  /** 创建时刻，ISO 字符串，展示时转本地时区 */
   created_at: string
 }
 

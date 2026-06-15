@@ -73,15 +73,23 @@ _configure_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    应用生命周期管理。
+    """FastAPI 应用生命周期管理：启动时拉起依赖、关闭时优雅清理。
+
+    作为 FastAPI 的 lifespan 上下文使用，yield 之前为 Startup 阶段、之后为 Shutdown 阶段。
 
     Startup:
       - 注册并初始化数据源提供者（tushare → akshare → mock 降级链）
-      - 启动进程内交易计划调度器（PlanScheduler），经单实例锁防并发触发
+      - 若 SCHEDULER_ENABLED，启动进程内交易计划调度器（PlanScheduler）；经单实例锁
+        防同机多进程并发触发，锁被占用时不注册为运行中实例。
 
     Shutdown:
-      - 停止调度器并释放单实例锁
+      - 停止调度器并释放单实例锁（仅当本进程成功启动了调度器时）。
+
+    Args:
+        app: 当前 FastAPI 应用实例，由框架在启动时传入（本函数不直接读取其属性）。
+
+    Yields:
+        None。yield 处即应用就绪、开始处理请求；控制权交回框架直至关闭。
     """
     tushare_provider = TushareProvider()
     datasource_manager.register(tushare_provider, priority=0)
@@ -113,11 +121,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app(history_store=None) -> FastAPI:
-    """创建 FastAPI 应用实例。
+    """创建并装配 FastAPI 应用实例（CORS、各业务路由、WebSocket、根路由）。
+
+    应用工厂：模块底部以默认参数调用一次得到全局 app；测试可重复调用以注入桩件。
 
     Args:
-        history_store: 可选的 TaskHistoryStore 实例（测试注入用）。
-                       None 时使用默认路径（TASK_HISTORY_PATH）的单例。
+        history_store: 可选的 TaskHistoryStore 实例，挂到 app.state.history_store
+            供 alpha 路由使用（主要用于测试注入）。None 时按默认路径
+            TASK_HISTORY_PATH 构造一个实例。
+
+    Returns:
+        装配完成、已注册全部路由与中间件的 FastAPI 实例。
     """
     from .task.history import TaskHistoryStore as _TaskHistoryStore
     from .config import TASK_HISTORY_PATH as _TASK_HISTORY_PATH
@@ -148,7 +162,13 @@ def create_app(history_store=None) -> FastAPI:
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        """WebSocket 连接端点，用于实时事件推送。"""
+        """WebSocket 连接端点：建立连接后循环接收客户端消息并交由 ws_manager 处理。
+
+        用于实时事件推送（如任务进度、行情）。连接断开或处理出错时统一注销该连接。
+
+        Args:
+            websocket: FastAPI 注入的 WebSocket 连接对象。
+        """
         await ws_manager.connect(websocket)
         try:
             while True:
@@ -161,6 +181,12 @@ def create_app(history_store=None) -> FastAPI:
 
     @app.get("/")
     async def root() -> dict[str, str]:
+        """根路由健康探针：返回服务名、运行状态与 API 文档地址。
+
+        Returns:
+            形如 {"name": ..., "status": "running", "docs": "/docs"} 的 dict，
+            供探活 / 快速确认服务在线。
+        """
         return {
             "name": "Aitrade Backend",
             "status": "running",

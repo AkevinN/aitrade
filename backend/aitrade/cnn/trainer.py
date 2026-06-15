@@ -1,5 +1,10 @@
-"""
-CNN trainer — grouped market observation training pipeline.
+"""分组行情 CNN 训练流水线。
+
+提供 train_cnn_model 主入口：构建样本集、在训练集上拟合逐通道归一化、
+按训练目标（classification/regression/path_class）选择损失并迭代训练，
+依业务指标（AUC/RankIC/tp_auc 等）选最佳 epoch 与早停，最后持久化
+checkpoint 与训练历史。配套若干评估指标工具函数（AUC、IC/RankIC、
+方向准确率与多数类基线等），用于戳破「看似不错实则接近随机」的假象。
 """
 
 from __future__ import annotations
@@ -89,7 +94,16 @@ def _rank_auc(
 ) -> float | None:
     """二分类 AUC（Mann-Whitney U 秩和法，避免引入 sklearn 依赖）。
 
-    单一类别（全涨或全跌）时 AUC 无定义，返回 None。并列分数取平均秩。
+    等价于「随机取一个正样本、一个负样本，正样本得分更高的概率」。
+    并列分数取平均秩，因此完全无区分度时为 0.5。
+
+    Args:
+        y_true: 真值标签，取值 {0, 1}（正类为 1）；list 或一维 ndarray，内部展平。
+        y_score: 模型给出的正类得分/概率，越大越倾向正类；与 y_true 等长。
+
+    Returns:
+        AUC 值（float，0~1）；当样本里只有单一类别（全为正或全为负，
+        正负样本数任一为 0）AUC 无定义时返回 None。
     """
     y_true_arr = np.asarray(y_true, dtype=np.float64).reshape(-1)
     y_score_arr = np.asarray(y_score, dtype=np.float64).reshape(-1)
@@ -123,7 +137,18 @@ def _classification_metrics(
 
     重点是 baseline_acc（多数类基线）与 excess_acc（超额准确率），用于戳破
     「涨跌近 50/50 时 accuracy 接近随机却看起来还行」的假象；另含 AUC 与
-    正类的查准/查全/F1。
+    正类的查准/查全/F1。预测以 0.5 为阈值二值化（prob > 0.5 判为上涨）。
+
+    Args:
+        y_true: 真值标签，取值 {0, 1}（1 为上涨）；list 或一维 ndarray，内部展平。
+        y_prob: 模型预测的上涨概率，值域 [0, 1]；与 y_true 等长。
+        positive_ratio: 正样本（上涨）占比，用于推算多数类基线
+            baseline_acc = max(positive_ratio, 1 - positive_ratio)。
+
+    Returns:
+        指标字典，键含 acc/baseline_acc/excess_acc/auc/precision/recall/f1，
+        数值均保留 4 位小数；auc 在单一类别时为 None。
+        y_true 为空时返回各项为 0.0、auc 为 None 的占位字典。
     """
     y_true_arr = np.asarray(y_true, dtype=np.float64).reshape(-1)
     y_prob_arr = np.asarray(y_prob, dtype=np.float64).reshape(-1)
@@ -157,7 +182,15 @@ def _classification_metrics(
 
 
 def _rankdata(x: "list[float] | np.ndarray") -> np.ndarray:
-    """并列取平均秩（1-based），供 RankIC 使用。"""
+    """把一组数值转成秩次（1-based），并列值取平均秩，供 RankIC 计算使用。
+
+    Args:
+        x: 待排秩的数值序列；list 或一维 ndarray，内部展平为一维。
+
+    Returns:
+        与输入等长的 ndarray，元素为对应位置的秩次（最小值秩为 1）；
+        相等的数值共享其名次的平均值（如两个并列第 2、3 名均记 2.5）。
+    """
     arr = np.asarray(x, dtype=np.float64).reshape(-1)
     order = np.argsort(arr, kind="mergesort")
     ranks = np.empty(len(arr), dtype=np.float64)
@@ -174,7 +207,18 @@ def _rankdata(x: "list[float] | np.ndarray") -> np.ndarray:
 
 
 def _pearson(a: "list[float] | np.ndarray", b: "list[float] | np.ndarray") -> float | None:
-    """皮尔逊相关；任一方差为 0 或样本不足时返回 None。"""
+    """皮尔逊线性相关系数。
+
+    用于计算 IC（预测值对真值）/RankIC（两者秩次的相关）。
+
+    Args:
+        a: 第一组数值；list 或一维 ndarray，内部展平。
+        b: 第二组数值；与 a 等长。
+
+    Returns:
+        相关系数（float，-1~1）；当样本数 < 2，或任一序列标准差近 0
+        （< 1e-12，相关无定义）时返回 None。
+    """
     arr_a = np.asarray(a, dtype=np.float64).reshape(-1)
     arr_b = np.asarray(b, dtype=np.float64).reshape(-1)
     if len(arr_a) < 2 or arr_a.std() < 1e-12 or arr_b.std() < 1e-12:
@@ -188,7 +232,21 @@ def _regression_metrics(
     up_ratio: float,
 ) -> dict[str, Any]:
     """回归评估指标：IC/RankIC（预测收益与真实收益的相关性，量化最关心）、
-    MAE/RMSE（误差幅度），以及方向准确率 + 多数类基线（与分类口径衔接）。"""
+    MAE/RMSE（误差幅度），以及方向准确率 + 多数类基线（与分类口径衔接）。
+
+    方向准确率按符号判定（预测与真值同为正/同为非正即算命中）。
+
+    Args:
+        y_true: 真实收益序列；list 或一维 ndarray，内部展平。
+        y_pred: 模型预测的收益序列；与 y_true 等长。
+        up_ratio: 上涨样本（真值 > 0）占比，用于推算方向基线
+            baseline_acc = max(up_ratio, 1 - up_ratio)。
+
+    Returns:
+        指标字典，键含 ic/rank_ic/mae/rmse/dir_acc/baseline_acc/excess_acc；
+        ic/rank_ic 在方差为 0 或样本不足时为 None，其余为 float；
+        y_true 为空时返回 ic/rank_ic 为 None、其余为 0.0 的占位字典。
+    """
     yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
     yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
     if len(yt) == 0:

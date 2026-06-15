@@ -91,13 +91,29 @@ class AkshareProviderError(RuntimeError):
 
 
 class AkshareProvider(BaseProvider):
-    """AKShare 数据源：提供开源免费的 A 股历史 K 线（无需 token）。"""
+    """AKShare 数据源：提供开源免费的 A 股历史 K 线（无需 token）。
+
+    实现 BaseProvider 接口，对接 AKShare 的东方财富/新浪行情：股票分派到
+    stock_zh_a_hist（日/周/月线）与 stock_zh_a_hist_min_em（分钟线，东财失败降级新浪），
+    可转债分派到 bond_zh_hs_cov_daily。负责代码归一化、网络重试与失败原因显式抛出。
+    akshare 依赖延迟到 init() 时导入，未安装或被开关禁用时整体降级为不可用。
+
+    Attributes:
+        name: Provider 唯一标识，固定为 ``"akshare"``。
+        display_name: 面向用户的显示名。
+        description: Provider 能力简介，供前端展示。
+    """
 
     name = "akshare"
     display_name = "AKShare 数据服务"
     description = "通过 AKShare（东方财富）获取 A 股日/周/月线与分钟线历史行情，开源免费、无需 token"
 
     def __init__(self) -> None:
+        """初始化实例状态，但不导入 akshare（导入延迟到 init() 调用时）。
+
+        从配置项 AKSHARE_ENABLED 读取启用开关；akshare 模块句柄与初始化标志
+        置为未就绪，需调用 init() 后才可用。
+        """
         self._ak = None
         self._inited = False
         self._enabled = AKSHARE_ENABLED
@@ -156,6 +172,24 @@ class AkshareProvider(BaseProvider):
         product_type: str = "",
         exchange: str = "",
     ) -> list[ContractInfo] | None:
+        """拉取 A 股合约列表并按品类/交易所过滤后返回标准化合约信息。
+
+        通过 _fetch_contract_frame() 取得 AKShare 合约表（代码+名称），逐行归一化代码
+        与交易所，按统一的股票参数（size=1、pricetick=0.01、min_volume=100）封装为
+        ContractInfo。无法识别的代码行被静默跳过。
+
+        Args:
+            product_type: 品类过滤。空串表示不限；仅接受 ``"股票"`` 或 ``"stock"``，
+                传入其他值直接返回 None（AKShare 当前只支持股票）。
+            exchange: 交易所过滤（支持 SH/SSE/SZ/SZSE/BJ/BSE 等写法）。空串表示不限；
+                归一化后若不在 AK_SUPPORTED_EXCHANGES（SSE/SZSE/BSE）内则返回 None。
+
+        Returns:
+            ContractInfo 列表；品类/交易所不支持、源数据为空或过滤后无结果时返回 None。
+
+        Raises:
+            AkshareProviderError: Provider 未就绪（已禁用或未初始化）时抛出。
+        """
         self._ensure_ready()
         if product_type and product_type not in ("股票", "stock"):
             return None
@@ -197,6 +231,21 @@ class AkshareProvider(BaseProvider):
         return result if result else None
 
     def get_contract(self, symbol: str, exchange: str) -> ContractInfo | None:
+        """查询单只标的的合约信息。
+
+        先将入参归一化，再调用 get_contracts() 取该交易所全部股票合约，从中匹配出
+        目标代码对应的 ContractInfo。
+
+        Args:
+            symbol: 合约代码，支持多种写法（``"000415.SZSE"`` / ``"sz000415"`` / 纯数字等）。
+            exchange: 交易所字符串（可为空，会结合代码推断）。
+
+        Returns:
+            匹配到的 ContractInfo；合约列表为空或无匹配项时返回 None。
+
+        Raises:
+            AkshareProviderError: 代码无法识别、交易所不匹配或不支持，或 Provider 未就绪时抛出。
+        """
         ak_symbol, canonical_symbol, canonical_exchange = self._normalize_symbol_inputs(symbol, exchange)
         contracts = self.get_contracts(product_type="股票", exchange=canonical_exchange)
         if not contracts:
@@ -217,6 +266,28 @@ class AkshareProvider(BaseProvider):
         start: datetime,
         end: datetime | None = None,
     ) -> list[BarRecord] | None:
+        """拉取单只标的在指定区间、指定周期的历史 K 线。
+
+        归一化代码后按品种与周期分派：可转债（前3位命中转债前缀）走 bond_zh_hs_cov_daily
+        且仅支持日线类周期；普通股票日/周/月线走 stock_zh_a_hist，分钟线走
+        stock_zh_a_hist_min_em（东财失败降级新浪）。与「无数据」语义区分清晰：网络失败、
+        空结果、解析失败均显式抛出带可读提示的错误而非返回 None。
+
+        Args:
+            symbol: 合约代码，支持多种写法（``"600519.SSE"`` / ``"sh600519"`` / 纯数字等）。
+            exchange: 交易所字符串（可为空，会结合代码推断）。
+            interval: K 线周期。日线类支持 ``"d"``/``"w"``/``"m"``；分钟线支持
+                ``"1m"``/``"5m"``/``"15m"``/``"30m"``/``"1h"``/``"60m"``（其中 1m 历史深度有限）。
+            start: 起始时间（含）。
+            end: 截止时间（含）；None 时默认取当前时刻 datetime.now()。
+
+        Returns:
+            按 datetime 升序排列的非空 BarRecord 列表。
+
+        Raises:
+            AkshareProviderError: 不支持的周期、转债用了非日线周期、网络请求失败、
+                区间内无数据，或返回数据无法解析为 K 线，以及 Provider 未就绪时抛出。
+        """
         self._ensure_ready()
         ak_symbol, canonical_symbol, canonical_exchange = self._normalize_symbol_inputs(symbol, exchange)
         end = end or datetime.now()
@@ -312,6 +383,7 @@ class AkshareProvider(BaseProvider):
         bond_symbol = f"{prefix}{ak_symbol}"
 
         def _fetch():
+            """调用 bond_zh_hs_cov_daily 拉取转债日线，把「未上市新债」的 KeyError('date') 转为友好错误。"""
             try:
                 return self._ak.bond_zh_hs_cov_daily(symbol=bond_symbol)
             except KeyError as exc:
@@ -511,6 +583,7 @@ class AkshareProvider(BaseProvider):
             pandas DataFrame（含代码与名称列）；失败时返回 None（软失败）。
         """
         def _fetch():
+            """拉取 A 股合约列表：优先用 stock_info_a_code_name，缺失时回退到 stock_zh_a_spot_em。"""
             if hasattr(self._ak, "stock_info_a_code_name"):
                 return self._ak.stock_info_a_code_name()
             return self._ak.stock_zh_a_spot_em()

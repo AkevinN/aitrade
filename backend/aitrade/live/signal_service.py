@@ -113,11 +113,27 @@ class SignalService:
           调用方（orchestrator）可读取该属性以落盘通知实录（R5.1）。
 
         Args:
+            instant: 决策时刻（含 as_of 与 bar_freq）；bar_freq 参与 signal_id 生成。
+            decision_bar_dt: Decision_Bar 的收盘时刻，与 bar_freq 一起决定幂等键 signal_id。
+            signal: 模型信号值（概率/得分），与 buy_threshold 比较决定是否触发买入。
+            price: Decision_Bar 收盘价（元/股），用于仓位规模换算与提醒展示。
+            portfolio: 组合快照（总市值/持仓股数/持仓市值），供风控与仓位规模计算。
+            vt_symbol: 目标标的合约代码，如 "000001.SZSE"。
+            should_exit: 是否到出场条件（由调用方依持有期/出场规则给出），默认 False；
+                为 True 且当前有持仓时优先产出卖出决策。
+            halted: 标的是否停牌/封死，默认 False；传入风控做买入放行判定。
+            trigger_source: 触发来源标签（如 "manual"/"schedule"），落盘时写入 Decision；
+                默认空串。
             objective: 信号帧自描述的模型输出口径（``"classification"`` /
                 ``"regression"`` / ``"path_class"`` / None）。非 None 时按其口径用
                 :func:`threshold_scale_check` 自检 buy_threshold；尺度不匹配（如回归
                 模型套了 0.6 概率阈值）则该次决策标记拒绝（不产生买入），与回测
                 端点共用同一规则（回测实盘一致红线）。None（legacy 信号帧）跳过校验。
+
+        Returns:
+            Decision 对象（action ∈ buy/sell/hold，含 volume/price/signal/reason）。
+            幂等命中（同 signal_id 已落盘）时直接返回既有 Decision，不重新走风控、不提醒、
+            不重复落盘（此时 self.last_notify_ok 保持 None）。
         """
         self.last_notify_ok: bool | None = None  # Wave 2c：实测通知结果
 

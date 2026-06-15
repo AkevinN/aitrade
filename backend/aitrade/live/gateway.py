@@ -85,8 +85,50 @@ class BrokerGateway(Protocol):
     幂等红线：`send_order` 同 client_order_id 重复提交时必须返回首单结果，不产生双重下单。
     """
 
-    def send_order(self, req: OrderRequest) -> OrderReport: ...
-    def cancel_order(self, client_order_id: str) -> bool: ...
-    def query_orders(self) -> list[OrderReport]: ...
-    def query_positions(self) -> dict[str, float]: ...
-    def query_account(self) -> dict: ...
+    def send_order(self, req: OrderRequest) -> OrderReport:
+        """提交一笔委托，幂等。
+
+        同 client_order_id 重复提交必须返回首单结果，不产生双重下单。
+
+        Args:
+            req: 委托请求，含 client_order_id 幂等键。
+
+        Returns:
+            OrderReport；被风控/券商拒单时 status=rejected，message 为原因。
+        """
+        ...
+
+    def cancel_order(self, client_order_id: str) -> bool:
+        """按 client_order_id 撤销一笔委托。
+
+        Args:
+            client_order_id: 要撤销的委托幂等键。
+
+        Returns:
+            True 表示撤单成功，False 表示订单不存在或已终结、不可撤。
+        """
+        ...
+
+    def query_orders(self) -> list[OrderReport]:
+        """查询全部订单回报。
+
+        Returns:
+            OrderReport 列表；无订单时返回空列表。
+        """
+        ...
+
+    def query_positions(self) -> dict[str, float]:
+        """查询当前持仓。
+
+        Returns:
+            vt_symbol → 持仓数量（股数/手数）的字典；无持仓时返回空字典。
+        """
+        ...
+
+    def query_account(self) -> dict:
+        """查询账户资金信息。
+
+        Returns:
+            账户资金字段字典（如可用资金、总权益等），具体键由各网关实现约定。
+        """
+        ...

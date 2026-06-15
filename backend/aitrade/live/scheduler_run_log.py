@@ -33,6 +33,12 @@ class SchedulerRunLog:
     """
 
     def __init__(self, store: JsonlDayStore) -> None:
+        """注入底层 JSONL 存储，构成语义事件记录层。
+
+        Args:
+            store: 已初始化的 JsonlDayStore，所有 record_* / query 调用都委托给它；
+                本类不持有其它状态，仅在其之上封装事件形态与去重键。
+        """
         self._store = store
 
     # ------------------------------------------------------------------

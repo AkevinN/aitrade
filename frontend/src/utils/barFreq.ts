@@ -4,9 +4,9 @@
  * 间隔锁定：bar_freq 由所选模型的训练间隔（input_interval）派生，前端不提供自由选择。
  */
 
+/** 受支持的日内（盘中监控）bar_freq 取值集合，作为 {@link isIntradayBarFreq} 的判定白名单。 */
 export const INTRADAY_BAR_FREQS = ['1m', '5m', '10m', '15m', '30m', '60m'] as const
 
-/** 模型训练间隔（AlphaLab 口径，"d"/"30m"...）→ 决策域 bar_freq（"1d"/"30m"...）。 */
 /**
  * 将模型训练间隔（AlphaLab 口径）映射为决策域 bar_freq。
  *

@@ -35,11 +35,17 @@ class RebalancingTopKStrategy(EquityDemoStrategy):
         self._last_bar_date: _date | None = None
 
     def _is_rebalance_day(self, current_date: _date) -> bool:
-        """判定当前 bar 是否为调仓日。
+        """按 rebalance_freq 判定给定日期是否为调仓日。
 
-        D  → 始终是调仓日；
-        W  → current_date 所在 ISO 周编号与上一根 bar 不同（或首根 bar）；
-        M  → current_date 的自然月与上一根 bar 不同（或首根 bar）。
+        依赖 self._last_bar_date（上一根已处理 bar 的日期）做跨周期边界比较。
+
+        Args:
+            current_date: 当前 bar 的日期。
+
+        Returns:
+            是否为调仓日。判定规则：``D`` 或未知频率始终 True；首根 bar
+            （_last_bar_date 为 None）始终 True；``W`` 当 current_date 所在 ISO
+            周编号与上一根 bar 不同；``M`` 当自然月（年, 月）与上一根 bar 不同。
         """
         if self.rebalance_freq == "D":
             return True
@@ -74,6 +80,13 @@ class RebalancingTopKStrategy(EquityDemoStrategy):
             先撤掉本策略遗留的全部未成交限价单（BaseStrategy.cancel_all），
             再调 super().on_bars(bars) 执行完整截面轮动（父类内部会再次
             触发 holding_days 自增 + execute_trading）。
+
+        Args:
+            bars: 当前这一根 K 线截面的标的数据，键为 vt_symbol（合约代码，如
+                "000001.SZSE"），值为该标的当前根 K 线的 BarData。由回测/实盘
+                引擎在每根 bar 收齐后逐根回调传入；本方法仅在调仓日将其原样透传给
+                super().on_bars 做截面轮动，非调仓日不读取其内容（仅按持仓自增
+                holding_days）。
         """
         # 取引擎当前时间轴日期
         current_dt = self.strategy_engine.datetime

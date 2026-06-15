@@ -77,8 +77,18 @@ export default function BacktestCharts({ result, interval, start, end }: Backtes
     [result?.trades, barTimeRange],
   )
 
-  // K 线区内容：标的缺失 / 行情失败 / 正常三种分支。
-  // 关键：错误仅在 K 线卡片内呈现，绝不影响上方净值曲线与既有统计卡片（Req 6.6、6.7）。
+  /**
+   * 渲染 K 线卡片内的内容，按当前数据状态在三种分支间选择。
+   *
+   * 分支语义：
+   * - 无标的（vtSymbol 为空）：视为本次回测无成交，渲染空状态而非报错（Req 6.4）。
+   * - 行情请求失败：在卡片内就地渲染错误 Alert，并明确提示净值曲线与统计数字不受影响。
+   * - 正常：渲染带买卖点 markers 的 KLineChart，并透传加载态。
+   *
+   * 关键：所有错误/空态都被限制在 K 线卡片内呈现，绝不影响上方的净值曲线与既有统计卡片（Req 6.6、6.7）。
+   *
+   * @returns 对应当前状态的 K 线区域 React 节点
+   */
   const renderKLine = () => {
     if (!vtSymbol) {
       // 无 target_symbol 也无成交 → 本次回测无成交，给空状态而非报错（Req 6.4）。

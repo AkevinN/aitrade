@@ -54,6 +54,20 @@ def create_market_cnn(
     import torch.nn as nn
 
     class GroupAwareMarketCNN(nn.Module):
+        """分组感知的多尺度行情 CNN（``torch.nn.Module`` 子类）。
+
+        在 ``create_market_cnn`` 工厂内定义并实例化，承担从原始多证券行情张量到
+        分类/回归/路径分类预测的端到端前向计算：三路并行多尺度 2D 卷积（短/中/长期）
+        → 分组掩码加权池化 → 1D 时序卷积 → 全连接融合头。网络结构、输入张量
+        ``[B, C, T, S, G]`` 与 group_mask ``[B, 1, 1, S, G]`` 的完整规约见工厂函数
+        ``create_market_cnn`` 的 docstring。
+
+        Attributes:
+            time_steps: 时间步数 T（即 lookback），决定 temporal_conv 的输入长度。
+            max_group_width: 每组最大证券数 S，掩码池化在该维度上聚合。
+            group_count: 观测分组数 G，决定融合头展开宽度。
+        """
+
         def __init__(self, C: int, T: int, S: int, G: int, drop: float = 0.5, task: str = "classification") -> None:
             """初始化网络层。
 

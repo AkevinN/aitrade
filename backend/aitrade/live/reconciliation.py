@@ -2,7 +2,7 @@
 每日对账（迭代 7）：理论 vs 实盘，差异超阈值告警并阻断下一轮自动下单。
 
 - reconcile_positions：逐标的对比理论/实盘持仓，返回差异明细。
-- reconcile_value：对比理论/实盘 PnL 或市值。
+- reconcile：综合对账（持仓 + 市值/盈亏），任一超阈值即告警并建议阻断。
 - ReconciliationResult.should_block：差异超阈值时为 True，调用方据此阻断自动交易。
 """
 

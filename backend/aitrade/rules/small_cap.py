@@ -59,6 +59,22 @@ class _SmallCapSource:
         fundamental_store: Any,
         contracts: dict[str, dict] | None,
     ) -> None:
+        """构造小市值信号源，保存过滤参数与依赖（不做任何 IO）。
+
+        Args:
+            top_k: 信息用的目标持仓数；仅用于描述组合规模，predict 不据此截断结果。
+            min_price: 最低收盘价（元），低于此价的标的当日剔除。
+            min_list_days: 最小上市天数；上市不足此天数的新股剔除，>0 时才启用，
+                需 contracts 注入 list_date 才真正生效，缺失时保守保留。
+            min_amount: 近 20 日日均成交额下限（元），不足此值的标的剔除（流动性过滤）。
+            exclude_st: 是否剔除名称含 ST/*ST 的标的；需 contracts 注入才生效，
+                未注入时仅打 warning 降级。
+            interval: 行情加载周期，"d" 为日线。
+            lab: AlphaLab 实例，提供 load_bar_frame 行情读取能力。
+            fundamental_store: FundamentalStore 实例，提供 list_symbols/load 基本面读取。
+            contracts: 合约信息字典 {vt_symbol: {"name": str, "list_date": "YYYY-MM-DD"|None}}；
+                None 表示未注入，此时 ST 过滤与上市天数过滤降级（保守保留）。
+        """
         self._top_k = top_k  # 信息用：真实持仓数在策略层（TopK rule）配置，此处不截断
         self._min_price = min_price
         self._min_list_days = min_list_days
@@ -275,8 +291,12 @@ class _SmallCapSource:
 
         严格使用 ≤ as_of 的最新一条记录，**禁止使用未来日（无前视红线）**。
 
+        Args:
+            fund_df: 单只标的的基本面历史（含 datetime/total_mv 列）；None 或空表视为无数据。
+            as_of: 查询基准日；只取 datetime ≤ as_of 的记录中最新一条。
+
         Returns:
-            total_mv 值（万元）；无数据时返回 None。
+            最近一条记录的 total_mv（万元）；无符合记录、值为空或无法转为 float 时返回 None。
         """
         if fund_df is None or fund_df.is_empty():
             return None
@@ -307,9 +327,15 @@ def _build_small_cap_source(params: dict) -> SignalProvider:
                 ``params["_contracts"]`` 注入合约信息字典
                   {vt_symbol: {"name": str, "list_date": str | None}}（测试用途）。
                 下划线前缀表示内部参数，param_spec 不展示。
+                公开参数（top_k/min_price/min_list_days/min_amount/exclude_st/interval）
+                缺省时取 param_spec 中的默认值。
+
+    Returns:
+        实现 SignalProvider 协议的 _SmallCapSource 实例；未注入 _lab/_fundamental_store
+        时按需懒加载默认实现（AlphaLab(ALPHA_LAB_PATH) / FundamentalStore()）。
 
     Raises:
-        ValueError: 参数类型不合法。
+        ValueError: 公开参数无法转为目标类型（如 top_k 非整数）时抛出。
     """
     top_k = int(params.get("top_k", 20))
     min_price = float(params.get("min_price", 2.0))

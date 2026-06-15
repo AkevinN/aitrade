@@ -83,6 +83,7 @@ class TaskHistoryStore:
         q_end = end or today
 
         def predicate(r: dict[str, Any]) -> bool:
+            """按 status / task_type 过滤单条记录，命中保留则返回 True。"""
             if status is not None and r.get("status") != status:
                 return False
             if task_type is not None and r.get("type") != task_type:
@@ -110,6 +111,7 @@ class TaskHistoryStore:
 
         # 剔除内部字段（`_` 前缀键 和 `ts` 键），保持与内存任务响应形态对称
         def _strip_internal(r: dict[str, Any]) -> dict[str, Any]:
+            """剔除记录里的内部字段（`_` 前缀键与 `ts` 键），返回对外可见的副本。"""
             return {k: v for k, v in r.items() if not k.startswith("_") and k != "ts"}
 
         return [_strip_internal(r) for r in results]

@@ -259,14 +259,23 @@ const HistoryTable: React.FC<HistoryTableProps> = ({ task }) => {
   )
 }
 
-/** 数字字段安全格式化：null/undefined → 占位符。 */
+/**
+ * 数字字段安全格式化：把可能缺失的数值转成可直接渲染的字符串。
+ *
+ * @param value - 待格式化的数值；null/undefined/NaN 视为缺失
+ * @param suffix - 追加在数字后的单位后缀（如 " 股"），缺省为空串；缺失时不追加
+ * @returns 缺失时返回占位符 "—"，否则返回 `数字 + 后缀`
+ */
 function fmtNumber(value: number | null | undefined, suffix = ''): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—'
   return `${value}${suffix}`
 }
 
+/** {@link DecisionDetail} 组件 props。 */
 interface DecisionDetailProps {
+  /** 待展示的决策；为 undefined 时按「无数据/加载中」渲染空态 */
   decision?: Decision
+  /** 是否处于详情查询加载中；与 decision 缺失共同决定是否渲染空态 */
   loading: boolean
 }
 

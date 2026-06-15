@@ -51,7 +51,19 @@ class ConfidenceThreshold(BaseModel):
     @field_validator("low_below")
     @classmethod
     def _low_ge_insufficient(cls, v: int, info: Any) -> int:
-        """校验 low_below >= insufficient_below，确保分档单调。"""
+        """校验 ``low_below >= insufficient_below``，确保分档单调非降。
+
+        Args:
+            v: 待校验的 low_below 值。
+            info: pydantic 校验上下文，``info.data`` 含已校验的先序字段
+                （此处取 insufficient_below；若其缺失则跳过校验）。
+
+        Returns:
+            原样返回校验通过的 v。
+
+        Raises:
+            ValueError: low_below 小于 insufficient_below（破坏分档单调性）时抛出。
+        """
         below = info.data.get("insufficient_below")
         if below is not None and v < below:
             raise ValueError("low_below 必须 >= insufficient_below（分档需单调非降）")
@@ -60,7 +72,19 @@ class ConfidenceThreshold(BaseModel):
     @field_validator("medium_below")
     @classmethod
     def _medium_ge_low(cls, v: int, info: Any) -> int:
-        """校验 medium_below >= low_below，确保分档单调。"""
+        """校验 ``medium_below >= low_below``，确保分档单调非降。
+
+        Args:
+            v: 待校验的 medium_below 值。
+            info: pydantic 校验上下文，``info.data`` 含已校验的先序字段
+                （此处取 low_below；若其缺失则跳过校验）。
+
+        Returns:
+            原样返回校验通过的 v。
+
+        Raises:
+            ValueError: medium_below 小于 low_below（破坏分档单调性）时抛出。
+        """
         low = info.data.get("low_below")
         if low is not None and v < low:
             raise ValueError("medium_below 必须 >= low_below（分档需单调非降）")
@@ -106,7 +130,16 @@ class ProfilingRules(BaseModel):
     def confidence_threshold_for(self, metric_key: str) -> ConfidenceThreshold:
         """取指定指标的分档；缺失时回退到合理的 fallback 分档。
 
-        优先级：精确键 → rules.confidence["default"] → 模块级 _FALLBACK_CONFIDENCE。
+        查找优先级：精确键 ``confidence[metric_key]`` → ``confidence["default"]``
+        → 模块级 ``_FALLBACK_CONFIDENCE``，保证任意指标键都能拿到一组分档阈值。
+
+        Args:
+            metric_key: 指标键，需与 metrics.py 各指标返回的 key 对齐
+                （如 "avg_turnover"、"hurst_exponent"）。
+
+        Returns:
+            匹配到的 ConfidenceThreshold；三级查找均落空时返回保守的
+            模块级 _FALLBACK_CONFIDENCE，永不返回 None。
         """
         if metric_key in self.confidence:
             return self.confidence[metric_key]
@@ -206,6 +239,15 @@ def confidence_for(metric_key: str, effective_sample: int, rules: ProfilingRules
     - ``metric_key`` 不在 ``rules.confidence`` 时回退到合理的 fallback 分档。
 
     负样本量按 0 处理（防御性），同样落入 insufficient。
+
+    Args:
+        metric_key: 指标键，决定使用哪组分档阈值；缺失时按
+            confidence_threshold_for 的优先级回退。
+        effective_sample: 该指标的有效样本量；小于 0 时按 0 处理。
+        rules: 提供分档阈值的规则对象。
+
+    Returns:
+        置信度等级字符串，取值为 "insufficient" / "low" / "medium" / "high" 之一。
     """
     threshold = rules.confidence_threshold_for(metric_key)
     n = max(0, int(effective_sample))
@@ -224,8 +266,16 @@ def _bucket_by_lower_bounds(value: float, bounds: dict[str, float], lowest: str)
     单调性保证：value 增大时，满足 ``value >= 下界`` 的档集合只增不减，
     取其中下界最大者，故返回档关于 value 单调非降（Property 9）。
     边界含等于：``value >= 下界`` 即视为进入该档。
-    NaN 防御：非有限值归入最低档 ``lowest``。
-    任意输入都落在 ``{lowest} ∪ bounds.keys()`` 这一有限等级集合内。
+
+    Args:
+        value: 待分档的标量；None 或非有限值（NaN/inf）按防御性处理归入 lowest。
+        bounds: "档名 → 进入该档的数值下界" 映射，通常只列出非最低档
+            （如 {"medium": ..., "high": ...}）。
+        lowest: 未达任何下界（或输入非有限）时返回的最低档名。
+
+    Returns:
+        value 满足下界的最高档名；任意输入都落在
+        ``{lowest} ∪ bounds.keys()`` 这一有限等级集合内。
     """
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return lowest
@@ -242,7 +292,14 @@ def liquidity_level(turnover: float, rules: ProfilingRules) -> str:
     """依据成交额给出流动性等级（高/中/低）。Requirement 4.3
 
     纯函数，关于 ``turnover`` 单调非降：成交额越高等级不降。
-    未达任何档下界者归 ``"low"``。
+
+    Args:
+        turnover: 日均成交额（本币金额）；None/NaN 等非有限值归入 "low"。
+        rules: 提供 ``liquidity_levels`` 分档下界的规则对象。
+
+    Returns:
+        流动性等级字符串："low" / "medium" / "high" 等（取决于
+        rules.liquidity_levels 配置的档名）；未达任何档下界者归 "low"。
     """
     return _bucket_by_lower_bounds(turnover, rules.liquidity_levels, lowest="low")
 
@@ -251,7 +308,14 @@ def volatility_level(vol: float, rules: ProfilingRules) -> str:
     """依据波动值给出波动等级（高/中/低）。Requirement 5.2
 
     纯函数，关于 ``vol`` 单调非降：波动越高等级不降。
-    未达任何档下界者归 ``"low"``。
+
+    Args:
+        vol: 波动值（如已实现波动率）；None/NaN 等非有限值归入 "low"。
+        rules: 提供 ``volatility_levels`` 分档下界的规则对象。
+
+    Returns:
+        波动等级字符串："low" / "medium" / "high" 等（取决于
+        rules.volatility_levels 配置的档名）；未达任何档下界者归 "low"。
     """
     return _bucket_by_lower_bounds(vol, rules.volatility_levels, lowest="low")
 
@@ -274,6 +338,17 @@ def structure_judgement(
     - 方差比 VR > 1 → 趋势；< 1 → 均值回复。
     - ADF p 值 < 0.05 → 平稳（均值回复）；>= 0.05 → 非平稳（趋势倾向）。
     多个可用信号投票，票数持平或无可用信号 → indeterminate。
+
+    Args:
+        hurst: Hurst 指数；None 或非有限值视为该信号缺失、不参与投票。
+        vr: 方差比（variance ratio）；None 或非有限值视为缺失、不参与投票。
+        adf_p: ADF 检验 p 值；None 或非有限值视为缺失、不参与投票。
+        confidence: 本次判定依据的综合置信度；为 "insufficient" 或 "low"
+            时直接门控返回 "indeterminate"，不再投票。
+
+    Returns:
+        结构判定字符串："trending" / "mean_reverting" / "indeterminate" 之一；
+        无可用信号、票数持平或被置信度门控时返回 "indeterminate"。
     """
     if confidence in ("insufficient", "low"):
         return "indeterminate"
@@ -282,6 +357,7 @@ def structure_judgement(
     mr_votes = 0
 
     def _ok(x: float | None) -> bool:
+        """判断信号值是否可参与投票：非 None、为数值类型且为有限值。"""
         return x is not None and isinstance(x, (int, float)) and math.isfinite(float(x))
 
     if _ok(hurst):
@@ -311,8 +387,15 @@ def overall_confidence(metric_confidences: list[str]) -> str:
     """综合置信度：取列表中最低等级。Requirement 7.4
 
     纯函数。在序 ``insufficient < low < medium < high`` 下返回最低等级，
-    保证综合置信度不高于任一关键指标置信度。空列表返回 ``"insufficient"``。
-    未知等级按最低（insufficient）处理，作为保守降级。
+    保证综合置信度不高于任一关键指标置信度。
+
+    Args:
+        metric_confidences: 各关键指标的置信度等级列表；元素应为
+            "insufficient" / "low" / "medium" / "high"，未知等级按最低
+            （insufficient）处理作保守降级。
+
+    Returns:
+        列表中的最低置信度等级字符串；空列表返回 "insufficient"。
     """
     if not metric_confidences:
         return "insufficient"

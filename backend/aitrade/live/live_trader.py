@@ -42,7 +42,14 @@ class LiveTrader:
         self.min_volume = min_volume
 
     def current_positions(self) -> dict[str, float]:
-        """权威持仓来自网关（支持重启恢复）。"""
+        """查询当前实际持仓，以网关为权威来源（支持重启恢复）。
+
+        每次实时向 BrokerGateway 查询，不在本地缓存仓位，因而进程重启后也能
+        与券商账户保持一致；调仓 diff 即基于此结果计算。
+
+        Returns:
+            持仓字典 {vt_symbol: 持仓股数}；空仓时返回空字典。
+        """
         return self.gateway.query_positions()
 
     def rebalance_to_target(

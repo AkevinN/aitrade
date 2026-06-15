@@ -125,7 +125,9 @@ def _label_from_return(
     threshold: float,
     neutral_policy: str,
 ) -> float | None:
-    """把未来收益映射为方向标签。
+    """把未来收益映射为二分类方向标签（上涨 1.0 / 下跌 0.0）。
+
+    供 classification 目标与 OCO 时间止损分支共用的方向判定核心：
 
     - threshold <= 0：保持旧行为（收益 > 0 记为上涨，其余为下跌），不丢样本。
     - threshold > 0：引入去噪 dead-zone：
@@ -133,6 +135,16 @@ def _label_from_return(
         收益 < -阈值 → 0.0（下跌）
         |收益| <= 阈值 视为噪声，按 neutral_policy 处理
         （drop → 返回 None 由调用方丢弃；negative → 并入下跌类 0.0）
+
+    Args:
+        future_return: 未来收益率（如 0.023 表示 +2.3%），可正可负。
+        threshold: 去噪 dead-zone 阈值（收益率，>=0）；<=0 时关闭去噪走旧二分类行为。
+        neutral_policy: dead-zone 样本处置策略，"drop"（返回 None 丢弃）或
+            "negative"（并入下跌类 0.0）；仅在 threshold > 0 时生效。
+
+    Returns:
+        方向标签浮点值 ``1.0``（上涨）或 ``0.0``（下跌）；落入 dead-zone 且
+        neutral_policy 为 "drop" 时返回 ``None``，由调用方计入 skipped_neutral 并丢弃。
     """
     if threshold <= 0.0:
         return 1.0 if future_return > 0 else 0.0

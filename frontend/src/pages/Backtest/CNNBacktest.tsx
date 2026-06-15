@@ -59,6 +59,7 @@ const CNNBacktest: React.FC = () => {
   const [taskId, setTaskId] = useState<string | null>(null)
 
   const task = useTask(taskId)
+  // 从回测结果中抽出核心统计指标（收益/回撤/夏普等），供指标卡片与一致性提示消费；任务未完成或无结果时为 undefined
   const statistics = useMemo(
     () => (task.data?.result as { statistics?: BacktestStatistics } | undefined)?.statistics,
     [task.data?.result]

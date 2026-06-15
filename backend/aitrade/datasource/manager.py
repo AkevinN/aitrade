@@ -300,7 +300,26 @@ class DataSourceManager:
         end: datetime | None = None,
         provider_name: str = "",
     ) -> list[BarRecord]:
-        """Query historical K-line bars with fallback."""
+        """查询历史K线，按优先级依次尝试 Provider 直到取到非 None 结果。
+
+        与其他查询方法的关键差异在错误处理：当显式指定 provider_name 时，该 Provider
+        抛出的异常会被原样向上抛出（而非吞掉返回空列表），避免把「数据源报错」误报成
+        「无数据」；未指定时则继续回退到下一个 Provider，全部失败才返回空列表。
+
+        Args:
+            symbol: 合约代码（不含交易所后缀），如 ``"600519"``。
+            exchange: 交易所代码，如 ``"SSE"``。
+            interval: K线周期，``"d"`` 日线，``"1m"``/``"30m"`` 等分钟线。
+            start: 起始时间（含）。
+            end: 截止时间（含）；None 时由 Provider 取至最新可用数据。
+            provider_name: 锁定使用的 Provider 名；空字符串表示按优先级尝试所有支持该品类的 Provider。
+
+        Returns:
+            BarRecord 列表；未指定 provider_name 且全部 Provider 失败时返回空列表。
+
+        Raises:
+            Exception: 指定了 provider_name 且该 Provider 查询过程中抛错时，原样抛出其真实异常。
+        """
         providers = self._resolve_providers(DataCategory.BAR_HISTORY, provider_name)
         last_error: Exception | None = None
         for provider in providers:

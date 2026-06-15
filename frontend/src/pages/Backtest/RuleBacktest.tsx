@@ -303,6 +303,12 @@ const RuleBacktest: React.FC = () => {
     )
   }
 
+  /**
+   * Sweep 与 Walk-Forward 结果表共用的列定义。
+   *
+   * 每行对应一组参数的回测指标：total_return / max_ddpercent 为小数比率，
+   * 渲染时乘 100 显示为百分比；sharpe_ratio 保留 3 位小数。
+   */
   const sweepColumns = [
     {
       title: '参数',

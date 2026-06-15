@@ -27,7 +27,18 @@ from pathlib import Path
 
 @dataclass
 class RebalanceItem:
-    """单只标的调仓指令。"""
+    """单只标的的一条调仓指令（增持或减持），是 RebalanceDecision.items 的元素。
+
+    描述"对某标的买/卖多少股"，并附带决策时刻的参考价与信号值，供回溯与下单使用。
+
+    Attributes:
+        vt_symbol: 合约代码，如 ``"000001.SZSE"``。
+        action: 调仓方向，取值 ``"buy"``（增持）或 ``"sell"``（减持）。
+        volume: 本次调仓股数，正整数。
+        price: 决策时刻的参考价（当时行情），None 表示决策时无可用报价。
+        signal: 触发该调仓的策略信号值，None 表示未携带信号。
+        reason: 人类可读的调仓理由，空串表示未填写。
+    """
 
     vt_symbol: str
     action: str             # "buy" | "sell"
@@ -39,7 +50,28 @@ class RebalanceItem:
 
 @dataclass
 class RebalanceDecision:
-    """一次规则策略产出的调仓决策（幂等键 signal_id，由编排器负责生成）。"""
+    """一次规则策略产出的完整调仓决策，是 RebalanceStore 的持久化单元。
+
+    汇集本轮所有标的的增减持指令（items）、调仓后目标持仓快照、风控摘要与状态，
+    以 signal_id 作为幂等键保证同一信号只落盘一次。编排器产出、用户确认后流转 status。
+
+    Attributes:
+        signal_id: 幂等键，由 make_signal_id 产出，scheme 命名空间（如 ``"rule:..."``）由编排器负责。
+        decision_bar_dt: 触发决策的那根 bar 的时刻，ISO 字符串。
+        as_of: 做出决策的时刻，ISO 字符串。
+        bar_freq: bar 周期，如 ``"d"``/``"30m"``。
+        scheme: 产出该决策的策略方案标识。
+        portfolio_id: 所属组合标识。
+        items: 本轮所有标的的调仓指令列表，可能为空（无需调仓）。
+        target_portfolio: 调仓后的目标持仓快照，``{合约代码: 股数}``。
+        risk_summary: RiskInspector 风控检查记录，元素形如 ``{check, passed, detail}``；默认空列表。
+        status: 决策状态，``"proposed"``（待确认）或 ``"confirmed"``（已确认）。
+        created_at: 创建时间 ISO 字符串，默认取当前时刻（秒精度）。
+        confirmed_at: 确认时间 ISO 字符串，空串表示尚未确认。
+        trigger_source: 触发来源，``"scheduler"``/``"manual"``/``""``（旧数据默认空串）。
+        elapsed_ms: 从编排器入口到落盘完成的耗时毫秒数，None 表示未记录。
+        notify_ok: Notifier.send 的实测返回值；未尝试发送（幂等命中/hold）时为 None。
+    """
 
     signal_id: str          # 幂等键（make_signal_id 产出，scheme 命名空间 "rule:..." 由编排器负责）
     decision_bar_dt: str    # 决策 bar 时刻 ISO
@@ -83,18 +115,53 @@ class RebalanceStore:
     """
 
     def __init__(self, base_path: Path | str) -> None:
+        """绑定存储目录并确保其存在。
+
+        Args:
+            base_path: 决策文件根目录，通常为 config.LIVE_REBALANCE_PATH；
+                不存在时会连同父目录一并创建。
+        """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, signal_id: str) -> Path:
+        """把 signal_id 映射为对应的 JSON 文件路径。
+
+        将 signal_id 中的 ``/`` 与 ``:`` 替换为 ``_`` 以得到合法文件名。
+
+        Args:
+            signal_id: 决策幂等键。
+
+        Returns:
+            base_path 下形如 ``<safe_id>.json`` 的文件路径（不保证文件已存在）。
+        """
         safe = signal_id.replace("/", "_").replace(":", "_")
         return self.base_path / f"{safe}.json"
 
     def exists(self, signal_id: str) -> bool:
+        """判断指定 signal_id 的决策文件是否已落盘。
+
+        Args:
+            signal_id: 决策幂等键。
+
+        Returns:
+            文件存在返回 True，否则 False（不读取/解析文件内容）。
+        """
         return self._path(signal_id).exists()
 
     def get(self, signal_id: str) -> RebalanceDecision | None:
-        """读取单条决策；不存在返回 None。"""
+        """按幂等键读取单条调仓决策。
+
+        命中后从 JSON 反序列化并经 _decision_from_dict 还原（含 items 嵌套
+        list[dict]→list[RebalanceItem]、旧字段默认值兜底）。
+
+        Args:
+            signal_id: 决策幂等键，定位对应 JSON 文件（路径映射见 _path）。
+
+        Returns:
+            还原后的 RebalanceDecision（items 已还原为 RebalanceItem 列表）；
+            文件不存在时返回 None。
+        """
         path = self._path(signal_id)
         if not path.exists():
             return None
@@ -102,7 +169,18 @@ class RebalanceStore:
         return _decision_from_dict(raw)
 
     def save(self, decision: RebalanceDecision) -> Path:
-        """无条件写入（覆盖已有）。常规持久化场景使用此方法。"""
+        """无条件写入决策（覆盖同 signal_id 的已有文件）。
+
+        常规持久化场景使用此方法；需要幂等占位（已存在则不写）时改用
+        save_if_absent。文件名由 decision.signal_id 经 _path 映射得到。
+
+        Args:
+            decision: 待写入的调仓决策对象；其 signal_id 决定目标文件名，
+                整体经 asdict 序列化为 JSON（含 items 等嵌套字段）。
+
+        Returns:
+            写入后的 JSON 文件路径（base_path 下的 ``<safe_id>.json``）。
+        """
         path = self._path(decision.signal_id)
         path.write_text(json.dumps(asdict(decision), ensure_ascii=False, indent=2), encoding="utf-8")
         return path

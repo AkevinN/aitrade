@@ -35,7 +35,8 @@ class JsonlDayStore:
         *,
         now_fn: Callable[[], datetime] | None = None,
     ) -> None:
-        """
+        """初始化存储，建好根目录并准备按日去重集合。
+
         Args:
             base_path: 日志根目录，不存在时自动创建。
             now_fn:    可注入的"当前时间"函数（用于测试），默认 datetime.now(timezone.utc)。
@@ -54,10 +55,26 @@ class JsonlDayStore:
     # ------------------------------------------------------------------
 
     def _day_path(self, day: date) -> Path:
+        """拼出某天对应的 JSONL 文件路径（{base}/{YYYY-MM-DD}.jsonl）。
+
+        Args:
+            day: 目标日期。
+
+        Returns:
+            该日文件的 Path（不保证文件已存在）。
+        """
         return self._base / f"{day.isoformat()}.jsonl"
 
     def _ensure_dedup_loaded(self, day: date) -> None:
-        """首次访问某天时，从文件回放重建去重集合（持锁调用）。"""
+        """首次访问某天时，从文件回放重建去重集合（持锁调用）。
+
+        懒加载：若 day 已在内存 _dedup 中则直接返回；否则逐行读当日文件，
+        把每条记录的 _dedup 字段收集成 set 存入内存。文件不存在或读 IO 异常时，
+        以空集合兜底（warning 已记录），保证后续 append 仍能写入。
+
+        Args:
+            day: 要重建去重集合的目标日期，对应 {base}/{day}.jsonl 文件。
+        """
         if day in self._dedup:
             return
         seen: set[str] = set()
@@ -134,7 +151,18 @@ class JsonlDayStore:
     # ------------------------------------------------------------------
 
     def read_day(self, day: date) -> list[dict[str, Any]]:
-        """读取指定日期的全部记录（只读，坏行跳过+warning）。"""
+        """读取指定日期的全部记录（只读，坏行跳过+warning）。
+
+        逐行解析当日 JSONL 文件；JSON 解析失败的坏行跳过并记 warning，
+        不中断整体读取。返回前会剥离内部去重字段 _dedup，仅对外投影业务字段。
+
+        Args:
+            day: 目标日期，对应 {base}/{day}.jsonl 文件（含其全部记录）。
+
+        Returns:
+            该日全部有效记录组成的列表，按文件中出现顺序排列，每条已去掉 _dedup 字段；
+            文件不存在、读 IO 异常或全为坏行时返回空 list。
+        """
         path = self._day_path(day)
         if not path.exists():
             return []

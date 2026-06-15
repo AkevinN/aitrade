@@ -43,6 +43,17 @@ export function buildAvailableSymbols(
     return symbolMap
   }
 
+  /**
+   * 把单条资源记录并入 `symbolMap`：按合约（去尾点后的 vt_symbol）累计可用性。
+   *
+   * 已存在该合约时，把 `interval` 加入周期集合，并把整体 `start`/`end` 与
+   * 对应周期的 `intervalRanges` 区间分别向最小/最大方向扩展；首次出现时新建一条
+   * `SymbolAvailability`。`vt_symbol` 去尾点后为空则直接跳过。直接修改外层
+   * `symbolMap`（闭包副作用），无返回值。
+   *
+   * @param item - 单条资源记录，仅取 vt_symbol/interval/start/end 四个字段；
+   *   start/end 为可按字典序比较的日期字符串（如 "2025-01-01"）。
+   */
   const addResource = (item: ResourceLike): void => {
     const sym = item.vt_symbol.replace(/\.$/, '')
     if (!sym) return

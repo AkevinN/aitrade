@@ -47,6 +47,16 @@ class _EtfMomentumSource:
         interval: str,
         lab: Any,  # AlphaLab 实例（类型声明用 Any 避免循环/延迟 import 问题）
     ) -> None:
+        """初始化 ETF 动量信号源，缓存宇宙与计算参数。
+
+        Args:
+            universe: 参与轮动的 ETF vt_symbol 列表，按此顺序逐只加载行情。
+            lookback: 动量回看交易日数（须 >= 1），动量 = close / close.shift(lookback) - 1。
+            min_momentum: 绝对动量门槛，信号低于该值的行被过滤掉（负门槛日空仓防御）。
+            interval: 行情加载周期，"d" 日线、"1m"/"30m" 分钟线等。
+            lab: AlphaLab 实例，提供本地行情读取（load_bar_frame）；
+                类型声明为 Any 以规避循环/延迟 import。
+        """
         self._universe = universe
         self._lookback = lookback
         self._min_momentum = min_momentum
@@ -156,15 +166,23 @@ class _EtfMomentumSource:
 
 
 def _build_etf_momentum_source(params: dict) -> SignalProvider:
-    """工厂函数：从 params 构造 _EtfMomentumSource。
+    """工厂函数：校验 params 并构造一个实现 SignalProvider 协议的 ETF 动量信号源。
+
+    供 register_signal_source 注册回调使用；缺省键回退到 param_spec 中的默认值
+    （universe=_DEFAULT_UNIVERSE、lookback=20、min_momentum=0.0、interval="d"）。
 
     Args:
-        params: 参数字典，键值说明见 param_spec。
-                可通过 ``params["_lab"]`` 注入 AlphaLab 实例（测试用途，
-                下划线前缀表示内部参数，param_spec 不展示）。
+        params: 参数字典，键值说明见模块底部 param_spec。
+            可通过 ``params["_lab"]`` 注入 AlphaLab 实例（测试用途，
+            下划线前缀表示内部参数，param_spec 不展示）；未注入时按项目配置
+            的 ALPHA_LAB_PATH 构造默认实例。
+
+    Returns:
+        配置完毕的 _EtfMomentumSource（满足 SignalProvider 协议，可直接调用 predict）。
 
     Raises:
-        ValueError: 参数类型不合法或 lookback < 1。
+        ValueError: universe 非字符串列表、lookback 非整数或 < 1、
+            min_momentum 非数值、interval 非字符串时抛出。
     """
     # universe
     universe: list[str] = params.get("universe", list(_DEFAULT_UNIVERSE))

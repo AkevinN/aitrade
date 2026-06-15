@@ -33,12 +33,23 @@ export interface DateRangeSelectorProps {
   showPresets?: boolean
 }
 
+/** 一个快捷区间预设（如「近1月」），描述按钮文案与区间构造方式。 */
 type DateRangePreset = {
+  /** 预设唯一标识，用作 React key 与内部区分，如 `"1m"`、`"3y"`。 */
   key: string
+  /** 按钮上展示的文案，如 `"近1月"`。 */
   label: string
+  /**
+   * 根据锚点结束日构造区间。
+   *
+   * @param anchorEnd - 区间右端锚点（通常为本地数据结束日或今天）。
+   * @param localRange - 本地可用范围，预留给需感知边界的预设；当前内置预设未使用。
+   * @returns `[start, end]` 区间，尚未经 {@link clampRange} 夹紧。
+   */
   build: (anchorEnd: Dayjs, localRange?: LocalDateRange | null) => [Dayjs, Dayjs]
 }
 
+/** 内置快捷区间预设：近1月/3月/6月/1年/3年，均以锚点结束日向前回溯。 */
 const DATE_RANGE_PRESETS: DateRangePreset[] = [
   {
     key: '1m',
@@ -116,11 +127,25 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
     [localRange],
   )
 
+  /**
+   * 应用一个快捷预设区间：按预设规则算出起止日期，约束到本地范围后回调出去。
+   *
+   * 以 `anchorEnd`（本地数据末尾或今天）为锚点调用 `preset.build` 生成区间，
+   * 再经 {@link clampRange} 夹到 `localRange` 内，最后通过 `onChange` 通知父组件更新选中值。
+   *
+   * @param preset - 被点击的预设项，含 `build` 函数与展示标签（如「近1月」）
+   */
   const applyPreset = (preset: DateRangePreset) => {
     const nextRange = clampRange(preset.build(anchorEnd, localRange), localRange)
     onChange?.(nextRange)
   }
 
+  /**
+   * 一键把选中区间设为本地数据的完整可用区间。
+   *
+   * 取 `localRange` 的起止日期（截取到日，去掉时间部分）作为新区间并通过 `onChange` 回调；
+   * 若未传入 `localRange` 则直接返回、不做任何操作。
+   */
   const applyLocalRange = () => {
     if (!localRange) {
       return

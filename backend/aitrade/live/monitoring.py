@@ -15,7 +15,20 @@ from typing import Any, Optional
 
 @dataclass
 class MonitorHub:
-    """运行时状态汇总（最新快照）。"""
+    """运行时状态汇总，持有实盘最新快照供看板（WS 推送）读取。
+
+    收集运行过程中的持仓、账户资金、盈亏、成交与日志，对外通过 snapshot()
+    导出一份扁平 dict。各字段由 update_* / add_trade / log 等方法增量更新，
+    本身不做持久化，进程重启即清零。
+
+    Attributes:
+        positions: 当前持仓，vt_symbol -> 股数；零持仓的标的会被移除而非保留 0。
+        cash: 当前可用现金（元）。
+        realized_pnl: 已实现盈亏（元）。
+        unrealized_pnl: 未实现（浮动）盈亏（元）。
+        trades: 成交记录列表，每条为调用方约定格式的 dict。
+        logs: 运行日志文本列表，按追加顺序保存，供看板展示。
+    """
     positions: dict[str, float] = field(default_factory=dict)   # vt_symbol -> 股数
     cash: float = 0.0
     realized_pnl: float = 0.0

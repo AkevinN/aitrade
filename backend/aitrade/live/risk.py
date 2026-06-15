@@ -65,7 +65,19 @@ class RiskManager:
         self.circuit_broken = False
 
     def update_daily_pnl(self, today_pnl: float, capital: float) -> bool:
-        """更新当日盈亏，触发熔断返回 True。"""
+        """更新当日盈亏，达熔断阈值则置位 circuit_broken 标志。
+
+        仅当 daily_loss_limit > 0 且 capital > 0 时才评估；亏损达到
+        daily_loss_limit×capital（含等于）即触发熔断。熔断一旦置位不会因后续
+        盈亏回升而自动复位，需经 reset() 人工恢复。
+
+        Args:
+            today_pnl: 当日盈亏（元），盈为正、亏为负。
+            capital: 组合总市值/本金基准（元），用作熔断阈值的分母。
+
+        Returns:
+            当前熔断状态：True 表示已熔断（本次或此前触发），False 表示未熔断。
+        """
         if self.config.daily_loss_limit > 0 and capital > 0:
             if today_pnl <= -abs(self.config.daily_loss_limit) * capital:
                 self.circuit_broken = True
@@ -141,11 +153,22 @@ class RiskManager:
         current_symbol_value: float = 0.0,
         halted: bool = False,
     ) -> tuple[float, str]:
-        """返回当前可新增买入金额上限。
+        """返回该标的当前还能新增的买入金额上限（元）。
 
-        黑名单、停牌、kill-switch/熔断等硬风控返回 0；总仓位/单票仓位上限返回
-        二者剩余额度的较小值。调用方仍需按手数向下取整，并最终再走 `check_buy`
-        做权威校验。
+        黑名单、停牌/封死、kill-switch/熔断、组合市值非正等硬风控直接返回 0；否则
+        取总仓位剩余额度与单票剩余额度的较小值（下限截到 0）。本方法只算「容量」，
+        不做最终放行——调用方仍需按手数向下取整后再走 check_buy 做权威校验。
+
+        Args:
+            vt_symbol: 目标标的（仅关键字传参）。
+            portfolio_value: 组合总市值（元）。
+            current_total_position_value: 当前总持仓市值（元），不含本次买入。
+            current_symbol_value: 该标的当前持仓市值（元），默认 0.0。
+            halted: 标的当日是否停牌/涨跌停封死，默认 False。
+
+        Returns:
+            (容量金额, 原因)。容量 ≥ 0：被硬风控拦截时为 0.0 且原因非空；正常
+            时为可新增买入金额上限且原因为 ""。
         """
         ok, reason = self.can_trade()
         if not ok:

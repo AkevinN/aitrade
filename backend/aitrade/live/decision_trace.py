@@ -132,6 +132,18 @@ class DecisionTraceStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def save_if_absent(self, signal_id: str, trace: dict) -> bool:
+        """幂等写入 trace：仅当文件不存在时写盘，已存在则原样保留（满足 8.9）。
+
+        以 UTF-8、缩进 2、``ensure_ascii=False``（保留中文）序列化为 JSON 写入
+        ``{safe}.trace.json``。同一 signal_id 二次决策若想覆盖，须先 `archive`。
+
+        Args:
+            signal_id: 幂等键，决定目标文件名。
+            trace:     待持久化的 trace dict（通常来自 ``TraceBuilder.to_trace``）。
+
+        Returns:
+            True 表示本次新写入成功；False 表示文件已存在、未做任何写入。
+        """
         path = self._path(signal_id)
         if path.exists():
             return False
@@ -139,11 +151,18 @@ class DecisionTraceStore:
         return True
 
     def archive(self, signal_id: str) -> Optional[Path]:
-        """归档式删除：trace 文件移入 archive/ 子目录（文件名追加时间戳）。
+        """归档式删除：把 trace 文件移入 ``archive/`` 子目录（文件名追加时间戳）。
 
         必须与 `DecisionStore.archive` 成对调用——只删决策不删 trace 会使重新决策后
         `save_if_absent` 因旧文件存在而不写，造成「决策是新的、档案是旧的」错位。
-        归档文件保留审计痕迹。不存在则返回 None。
+        归档而非物理删除，保留审计痕迹。
+
+        Args:
+            signal_id: 幂等键，定位待归档的 .trace.json 文件。
+
+        Returns:
+            归档后的目标路径（形如 ``archive/{stem}.{YYYYMMDDTHHMMSSffffff}.trace.json``）；
+            原文件不存在时返回 None（视作无需归档）。
         """
         path = self._path(signal_id)
         if not path.exists():

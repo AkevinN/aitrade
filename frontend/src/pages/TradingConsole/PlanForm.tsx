@@ -62,29 +62,59 @@ const parseHHmm = (value: string): Dayjs => {
   return dayjs().hour(hh).minute(mm).second(0).millisecond(0)
 }
 
+/**
+ * 交易计划表单的内部字段模型。
+ *
+ * 同时承载 cnn / rule 两种策略的输入：cnn 模式只用上半部分字段，rule 模式额外用末尾的
+ * signal_* / trigger_schedule / portfolio_id 字段；提交时由 handleSubmit 按 strategy_type
+ * 分支裁剪并组装为 TradingPlanRequest。注意这是表单态结构（trigger_times 为 Dayjs），
+ * 与落库的 TradingPlanRequest（trigger_times 为 "HH:mm" 字符串）不同。
+ */
 interface PlanFormValues {
+  /** 计划名称；提交时去除首尾空白。 */
   name: string
+  /** 策略类型，决定显示哪组字段：cnn 为 CNN 决策，rule 为规则调仓。 */
   strategy_type: 'cnn' | 'rule'
+  /** CNN 模型名（cnn 模式）；rule 模式提交时置空串。 */
   model: string
+  /** 目标标的代码，如 "000001.SZSE"（cnn 模式）；rule 模式提交时置空串。 */
   vt_symbol: string
+  /** 方案名，如 "eod_buy_v1"（cnn 模式）；rule 模式提交时置空串。 */
   scheme: string
+  /** 每日唤醒时刻列表，表单态为 Dayjs；提交时去重排序后格式化为 "HH:mm"。 */
   trigger_times: Dayjs[]
+  /** 推送通道名列表；仅通道名，凭证由后端环境变量管理（不在前端录入）。 */
   notify_channels: NotifyChannel[]
+  /** 数据来源：pull 为接口拉取，upload 为上传文件。 */
   data_source: 'upload' | 'pull'
+  /** 是否启用自动调度；启用后调度器在决策时点触发，仅提醒不下单。 */
   enabled: boolean
+  /** 买入概率阈值，取值 [0, 1]（cnn 模式）；rule 模式提交时为 0。 */
   buy_threshold: number
+  /** 目标仓位比例，取值 [0, 1]（cnn 模式）；rule 模式提交时为 0。 */
   position_ratio: number
+  /** 最小成交手数，下界 1（cnn 模式）；rule 模式提交时为 0。 */
   min_volume: number
+  /** 模型版本号；为空串表示用模型默认版本。隐藏字段。 */
   model_version: string
+  /** 组合总资金，单位元（cnn 模式）。 */
   portfolio_value: number
+  /** 当前总持仓市值，单位元（cnn 模式）。 */
   total_position_value: number
+  /** 目标标的当前持仓数量，单位股（cnn 模式）。 */
   current_position: number
+  /** 目标标的当前持仓市值，单位元（cnn 模式）。 */
   current_symbol_value: number
   // rule 模式字段
+  /** 信号源名（rule 模式）；对应后端注册的 SignalSource。 */
   signal_source: string
+  /** 触发周期（rule 模式）：每交易日 / 每周首个交易日 / 每月首个交易日。 */
   trigger_schedule: 'daily' | 'weekly_first' | 'monthly_first'
+  /** 持仓组合标识符（rule 模式）；与后端账本关联，提交时去除首尾空白。 */
   portfolio_id: string
+  /** 股票池文本（rule 模式）；按换行/逗号/空白分割成代码列表后写入 signal_params.universe。 */
   signal_universe: string
+  /** 最大持仓数量（rule 模式）；写入 plan.portfolio.top_k，后端 _trigger_plan 从此读取。 */
   signal_top_k: number
 }
 

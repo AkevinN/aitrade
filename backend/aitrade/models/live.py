@@ -25,7 +25,13 @@ class PortfolioSnapshotRequest(BaseModel):
     current_symbol_value: float = Field(default=0.0, description="目标标的当前持仓市值")
 
     def to_domain(self) -> PortfolioSnapshot:
-        """映射为既有 PortfolioSnapshot 领域对象。"""
+        """把请求模型逐字段映射为既有 PortfolioSnapshot 领域对象。
+
+        纯字段拷贝，不做任何校验或换算；供编排器在收到前端请求后转换使用。
+
+        Returns:
+            字段与本请求一一对应的 PortfolioSnapshot 实例。
+        """
         return PortfolioSnapshot(
             portfolio_value=self.portfolio_value,
             total_position_value=self.total_position_value,
@@ -42,7 +48,14 @@ class RiskConfigRequest(BaseModel):
     allow_when_halted: bool = Field(default=False, description="停牌/涨跌停封死时是否允许交易")
 
     def to_domain(self) -> RiskConfig:
-        """映射为既有 RiskConfig 领域对象；blacklist: list[str] -> set[str]。"""
+        """把请求模型映射为既有 RiskConfig 领域对象。
+
+        其余字段直传，仅 blacklist 做转换：逐个经 normalize_vt_symbol 归一化后
+        由 list[str] 去重为 set[str]，便于风控层做 O(1) 黑名单命中判断。
+
+        Returns:
+            字段对应本请求、blacklist 已归一化去重的 RiskConfig 实例。
+        """
         return RiskConfig(
             blacklist={normalize_vt_symbol(symbol) for symbol in self.blacklist},
             max_total_position_ratio=self.max_total_position_ratio,
@@ -74,6 +87,17 @@ class LiveDecisionRequest(BaseModel):
     @field_validator("bar_freq")
     @classmethod
     def _valid_bar_freq(cls, v: str) -> str:
+        """pydantic 校验器：拒绝不在 SUPPORTED_BAR_FREQS 内的 bar 频率。
+
+        Args:
+            v: 待校验的 bar_freq 取值，如 "1d"/"30m"。
+
+        Returns:
+            原样返回校验通过的 v（不做归一化）。
+
+        Raises:
+            ValueError: v 不在 SUPPORTED_BAR_FREQS 列表内时抛出（pydantic 转为校验错误）。
+        """
         if v not in SUPPORTED_BAR_FREQS:
             raise ValueError(f"bar_freq 仅支持 {SUPPORTED_BAR_FREQS}：{v!r}")
         return v
@@ -108,6 +132,17 @@ class RebalanceRequest(BaseModel):
     @field_validator("bar_freq")
     @classmethod
     def _valid_bar_freq(cls, v: str) -> str:
+        """pydantic 校验器：拒绝不在 SUPPORTED_BAR_FREQS 内的 bar 频率。
+
+        Args:
+            v: 待校验的 bar_freq 取值，如 "1d"/"30m"。
+
+        Returns:
+            原样返回校验通过的 v（不做归一化）。
+
+        Raises:
+            ValueError: v 不在 SUPPORTED_BAR_FREQS 列表内时抛出（pydantic 转为校验错误）。
+        """
         if v not in SUPPORTED_BAR_FREQS:
             raise ValueError(f"bar_freq 仅支持 {SUPPORTED_BAR_FREQS}：{v!r}")
         return v

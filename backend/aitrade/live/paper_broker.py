@@ -39,7 +39,8 @@ class PaperBroker(BrokerGateway):
         stamp_duty: float = 0.0005,
         size: float = 1.0,
     ) -> None:
-        """
+        """初始化模拟盘网关：设定初始资金、费率与合约乘数，并建立空持仓/订单/成交簿。
+
         Args:
             cash:            初始资金（元）。
             commission_rate: 单边佣金率（买卖均收）。

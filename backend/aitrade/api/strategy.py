@@ -56,18 +56,27 @@ logger = logging.getLogger(__name__)
 
 
 def _ak_bond_zh_cov():
-    """调用 akshare.bond_zh_cov()，返回转债列表 DataFrame（pandas）。
+    """调用 akshare.bond_zh_cov 拉取全市场转债列表快照。
 
     集中在此函数以便测试 monkeypatch（不在业务代码中散落 akshare.xxx 调用）。
+
+    Returns:
+        akshare 返回的 pandas DataFrame，每行一只转债，含债券代码、债券简称等字段。
     """
     import akshare as ak  # type: ignore  延迟 import，仅在实际调用时加载
     return ak.bond_zh_cov()
 
 
 def _ak_bond_zh_cov_value_analysis(symbol: str):
-    """调用 akshare.bond_zh_cov_value_analysis(symbol, indicator='转股溢价率')。
+    """调用 akshare.bond_zh_cov_value_analysis 拉取单只转债的转股溢价率历史。
 
-    symbol 格式为 6 位纯数字（如 "113050"）。
+    集中在此函数以便测试 monkeypatch（不在业务代码中散落 akshare.xxx 调用）。
+
+    Args:
+        symbol: 6 位纯数字转债代码（不含交易所后缀，如 "113050"）。
+
+    Returns:
+        akshare 返回的 pandas DataFrame，含转股溢价率等历史时序列。
     """
     import akshare as ak  # type: ignore
     return ak.bond_zh_cov_value_analysis(symbol=symbol, indicator="转股溢价率")
@@ -82,7 +91,15 @@ _datasource_manager: DataSourceManager | None = None
 
 
 def _get_datasource_manager() -> DataSourceManager:
-    """获取全局 DataSourceManager 单例（延迟初始化）。测试通过 monkeypatch 此函数注入 mock。"""
+    """获取全局 DataSourceManager 单例（延迟初始化）。
+
+    首次调用时实例化 DataSourceManager 并缓存到模块级变量，后续调用复用同一实例；
+    测试可通过 monkeypatch 此函数注入 mock，绕过真实数据源。
+
+    Returns:
+        进程内共享的 DataSourceManager 单例，恒为非 None：尚未初始化时当场创建后返回，
+        之后每次返回的都是同一对象（缓存于模块级 _datasource_manager）。
+    """
     global _datasource_manager  # noqa: PLW0603
     if _datasource_manager is None:
         _datasource_manager = DataSourceManager()
@@ -95,9 +112,18 @@ def _fetch_fundamental(
     start_str: str,
     end_str: str,
 ) -> list:
-    """经 datasource_manager 拉取单标的基本面数据，返回 FundamentalRecord 列表。
+    """经 datasource_manager 拉取单标的基本面日度数据。
 
     集中在此函数便于测试 monkeypatch（与 _ak_* 系列桩点约定一致）。
+
+    Args:
+        symbol: 不含交易所后缀的标的代码（如 "600519"）。
+        exchange: 交易所代码（如 "SSE"/"SZSE"）。
+        start_str: 起始日期，格式 "YYYYMMDD"（含）。
+        end_str: 结束日期，格式 "YYYYMMDD"（含）。
+
+    Returns:
+        FundamentalRecord 列表，逐交易日一条；区间内无数据时为空列表。
     """
     manager = _get_datasource_manager()
     return manager.get_fundamental(symbol, exchange, start_str, end_str)
@@ -109,7 +135,13 @@ def _fetch_fundamental(
 
 
 class FundamentalRefreshRequest(BaseModel):
-    """基本面刷新请求体。"""
+    """POST /fundamental/refresh 的请求体：指定要刷新基本面的标的与日期区间。
+
+    Attributes:
+        vt_symbols: 待刷新的标的列表，元素为带交易所后缀的 vt_symbol（如 "600519.SSE"）。
+        start: 数据起始日期（含）。
+        end: 数据结束日期（含）。
+    """
 
     vt_symbols: list[str]
     start: date
@@ -128,7 +160,15 @@ router = APIRouter(
 
 
 def _get_lab() -> AlphaLab:
-    """每次创建 AlphaLab 实例（轻量对象，无状态副作用）。测试通过 monkeypatch 此函数注入 tmp_path lab。"""
+    """构造一个绑定到 ALPHA_LAB_PATH 的 AlphaLab 实例。
+
+    AlphaLab 为轻量对象、无跨调用的状态副作用，故每次调用都新建一个、不做缓存；
+    测试可通过 monkeypatch 此函数注入指向 tmp_path 的 lab，隔离真实数据目录。
+
+    Returns:
+        新建的 AlphaLab 实例，恒为非 None；每次调用返回相互独立的对象，
+        互不共享内部状态，路径固定为模块常量 ALPHA_LAB_PATH。
+    """
     return AlphaLab(ALPHA_LAB_PATH)
 
 
@@ -150,9 +190,15 @@ async def refresh_cb_terms(
 ) -> dict:
     """启动异步任务：拉取转债列表快照 + 逐债溢价率历史（带进度上报）。
 
+    任务注册到共享 task_manager 后立即返回，实际下载在后台线程进行；
+    前端经 /api/alpha/tasks/{id} 轮询终态与进度。
+
     Args:
-        symbols: 可选 vt_symbol 子集（如 ``["113050.SSE"]``），为空则全量拉取。
+        symbols: 可选 vt_symbol 子集（如 ``["113050.SSE"]``），为 None 或空则全量拉取。
                  全量 1000+ 只耗时 20+ 分钟，建议在维护窗口执行。
+
+    Returns:
+        dict，含 ``task_id``（轮询用的任务 id）与 ``message``（中文提示文案）。
     """
     task_id = task_manager.create_task(
         TaskType.STRATEGY_BACKTEST,  # 复用已有任务类型，无需新增枚举
@@ -163,6 +209,14 @@ async def refresh_cb_terms(
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """task_manager 调度的任务体：转发到 _refresh_cb_terms 执行实际下载。
+
+        Args:
+            on_progress: task_manager 注入的进度回调（进度 0~100，中文描述）。
+
+        Returns:
+            _refresh_cb_terms 的统计 dict（snapshot_count/success/failed/...）。
+        """
         return _refresh_cb_terms(symbols=symbols or [], on_progress=on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -189,7 +243,17 @@ async def refresh_cb_terms(
     ),
 )
 async def refresh_fundamental(req: FundamentalRefreshRequest) -> dict:
-    """启动异步任务：批量下载基本面数据并落盘。"""
+    """启动异步任务：批量下载基本面数据并落盘。
+
+    任务注册后立即返回，实际逐标的下载在后台线程进行；
+    前端经 /api/alpha/tasks/{id} 轮询终态与进度。
+
+    Args:
+        req: 请求体，含待刷新的 vt_symbols 与日期区间，见 FundamentalRefreshRequest。
+
+    Returns:
+        dict，含 ``task_id``（轮询用任务 id）与 ``message``（中文提示文案）。
+    """
     task_id = task_manager.create_task(
         TaskType.STRATEGY_BACKTEST,
         params={"vt_symbols": req.vt_symbols, "start": req.start.isoformat(), "end": req.end.isoformat()},
@@ -199,6 +263,14 @@ async def refresh_fundamental(req: FundamentalRefreshRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """task_manager 调度的任务体：转发到 _refresh_fundamental 执行实际下载。
+
+        Args:
+            on_progress: task_manager 注入的进度回调（进度 0~100，中文描述）。
+
+        Returns:
+            _refresh_fundamental 的统计 dict（success/failed/failed_symbols）。
+        """
         return _refresh_fundamental(
             vt_symbols=req.vt_symbols,
             start=req.start,
@@ -220,7 +292,12 @@ async def refresh_fundamental(req: FundamentalRefreshRequest) -> dict:
     description="列出所有已注册信号源（name / description / param_spec）。",
 )
 async def list_sources() -> list[dict]:
-    """直接返回注册表元信息（同步，无 I/O）。"""
+    """列出所有已注册信号源的元信息（同步，无 I/O）。
+
+    Returns:
+        每个信号源一个 dict，含 ``name`` / ``description`` / ``param_spec``；
+        无任何注册时返回空列表。
+    """
     return list_signal_sources()
 
 
@@ -234,7 +311,17 @@ async def list_sources() -> list[dict]:
     description="提交单次规则策略回测异步任务，返回 task_id。前端经 /api/alpha/tasks/{id} 轮询结果。",
 )
 async def run_backtest(req: StrategyBacktestRequest) -> dict:
-    """创建并启动回测任务。"""
+    """创建并启动单次规则策略回测异步任务。
+
+    任务注册后立即返回，回测在后台线程执行（_run_strategy_backtest）；
+    前端经 /api/alpha/tasks/{id} 轮询结果。
+
+    Args:
+        req: 回测请求体，含信号源/策略名/参数/日期区间/成本配置等，见 StrategyBacktestRequest。
+
+    Returns:
+        dict，含 ``task_id``（轮询用任务 id）与 ``message``（中文提示文案）。
+    """
     task_id = task_manager.create_task(
         TaskType.STRATEGY_BACKTEST,
         params={
@@ -247,6 +334,14 @@ async def run_backtest(req: StrategyBacktestRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """task_manager 调度的任务体：转发到 _run_strategy_backtest 执行回测。
+
+        Args:
+            on_progress: task_manager 注入的进度回调（进度 0~100，中文描述）。
+
+        Returns:
+            _run_strategy_backtest 的回测结果 dict（statistics/trades/universe_coverage 等）。
+        """
         return _run_strategy_backtest(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -263,7 +358,17 @@ async def run_backtest(req: StrategyBacktestRequest) -> dict:
     description="提交参数网格扫描异步任务，返回 task_id。",
 )
 async def run_sweep(req: StrategySweepRequest) -> dict:
-    """创建并启动 grid sweep 任务。"""
+    """创建并启动参数网格扫描（grid sweep）异步任务。
+
+    任务注册后立即返回，扫参在后台线程执行（_run_sweep）；
+    前端经 /api/alpha/tasks/{id} 轮询结果。
+
+    Args:
+        req: 扫参请求体，含信号源、基准参数与待扫描网格 ``grid``，见 StrategySweepRequest。
+
+    Returns:
+        dict，含 ``task_id``（轮询用任务 id）与 ``message``（中文提示文案）。
+    """
     task_id = task_manager.create_task(
         TaskType.STRATEGY_SWEEP,
         params={
@@ -276,6 +381,14 @@ async def run_sweep(req: StrategySweepRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """task_manager 调度的任务体：转发到 _run_sweep 执行网格扫描。
+
+        Args:
+            on_progress: task_manager 注入的进度回调（进度 0~100，中文描述）。
+
+        Returns:
+            _run_sweep 的结果 dict（含 ``rows`` 逐网格点结果与 ``base_params``）。
+        """
         return _run_sweep(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -292,7 +405,18 @@ async def run_sweep(req: StrategySweepRequest) -> dict:
     description="提交 Walk-Forward 验证异步任务，返回 task_id。",
 )
 async def run_walkforward(req: StrategyWalkForwardRequest) -> dict:
-    """创建并启动 walk-forward 任务。"""
+    """创建并启动 Walk-Forward 滚动验证异步任务。
+
+    任务注册后立即返回，验证在后台线程执行（_run_walkforward）；
+    前端经 /api/alpha/tasks/{id} 轮询结果。
+
+    Args:
+        req: 验证请求体，含信号源、训练/测试窗长 ``train_days``/``test_days`` 等，
+             见 StrategyWalkForwardRequest。
+
+    Returns:
+        dict，含 ``task_id``（轮询用任务 id）与 ``message``（中文提示文案）。
+    """
     task_id = task_manager.create_task(
         TaskType.STRATEGY_WALKFORWARD,
         params={
@@ -306,6 +430,14 @@ async def run_walkforward(req: StrategyWalkForwardRequest) -> dict:
     )
 
     def execute(on_progress: Callable[[float, str], None] | None = None) -> dict:
+        """task_manager 调度的任务体：转发到 _run_walkforward 执行滚动验证。
+
+        Args:
+            on_progress: task_manager 注入的进度回调（进度 0~100，中文描述）。
+
+        Returns:
+            _run_walkforward 的结果 dict（含 ``windows`` 逐窗结果与 ``aggregate`` 聚合统计）。
+        """
         return _run_walkforward(req, on_progress)
 
     task_manager.run_async(task_id, execute, enable_progress=True)
@@ -321,12 +453,24 @@ def _run_strategy_backtest(
     req: StrategyBacktestRequest,
     on_progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """完整一次规则策略回测的任务体。
+    """完整一次规则策略回测的任务体（在后台线程内同步执行）。
 
     流程：
     1. 信号生成（进度 0-40%）
     2. scheme 组装 + 撮合引擎（进度 40-95%）
-    3. 返回结果（进度 100%）
+    3. 拼装宇宙覆盖率统计与前端契约字段（进度 100%）
+
+    Args:
+        req: 回测请求体，提供信号源/策略/参数/区间/成本等配置。
+        on_progress: 进度回调（进度 0~100 浮点 + 中文描述）；为 None 时不上报。
+
+    Returns:
+        回测结果 dict：除 run_scheme_backtest 原有字段（statistics/trades/equity_curve 等）外，
+        额外附加 ``signal_source`` / ``strategy_name`` / ``vt_symbols`` /
+        ``universe_coverage``（宇宙覆盖率明细）。
+
+    Raises:
+        RuntimeError: 区间内未产生任何信号（数据未下载或参数不当）时抛出。
     """
     lab = _get_lab()
 
@@ -335,6 +479,12 @@ def _run_strategy_backtest(
     provider = build_signal_source(req.signal_source, signal_params)
 
     def _sig_progress(p: float, msg: str = "") -> None:
+        """把信号生成阶段的进度（0~100）压缩映射到整体进度的前 40% 区间后上报。
+
+        Args:
+            p: 信号生成阶段自身进度（0~100）。
+            msg: 中文进度描述，原样透传给外层回调。
+        """
         if on_progress:
             on_progress(p * 0.40, msg)
 
@@ -416,10 +566,18 @@ def _run_sweep(
     req: StrategySweepRequest,
     on_progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Grid sweep 任务体。
+    """参数网格扫描（grid sweep）任务体（在后台线程内同步执行）。
 
     优化：只有当某 grid 项改变了 signal_params 时才重新生成信号；
-    仅动 strategy_params 的项复用同一 signal_df（节省 I/O 与计算）。
+    仅动 strategy_params 的项复用基准 signal_df（节省 I/O 与计算）。
+
+    Args:
+        req: 扫参请求体，提供信号源、基准参数与待扫描网格 ``grid``。
+        on_progress: 进度回调（进度 0~100 浮点 + 中文描述）；为 None 时不上报。
+
+    Returns:
+        dict，含 ``rows``（param_sweep_table 产出的逐网格点结果行）与
+        ``base_params``（基准 signal_params / strategy_params，供前端展示）。
     """
     lab = _get_lab()
     base_signal_params = {**req.signal_params, "_lab": lab}
@@ -431,7 +589,19 @@ def _run_sweep(
     total = len(req.grid)
 
     def _run_one(override: dict) -> dict[str, Any]:
-        """对单个参数覆盖项跑完整回测，返回结果 dict。"""
+        """对单个网格覆盖项跑完整回测。
+
+        按需重建信号源：仅当 ``override`` 含非空 ``signal_params`` 时才重新生成信号，
+        否则复用闭包内的基准 ``base_signal_df`` 以省去重复 I/O。
+
+        Args:
+            override: 单个网格点的参数覆盖，形如
+                ``{"signal_params": {...}, "strategy_params": {...}}``，两键均可缺省。
+
+        Returns:
+            该网格点的回测结果 dict；信号为空时返回零成交占位结果
+            （statistics={}、trades=[]、equity_curve=[]、trade_count=0），不抛错。
+        """
         sp_override: dict = override.get("signal_params", {})
         str_override: dict = override.get("strategy_params", {})
 
@@ -479,7 +649,17 @@ def _run_sweep(
         return run_scheme_backtest(scheme, data_loader=lab, signal_df=signal_df, start=start_dt, end=end_dt)
 
     def _run_with_progress(override: dict) -> dict[str, Any]:
-        """包装 _run_one，在每次完成后上报进度（通过闭包访问计数器）。"""
+        """包装 _run_one，在每次完成后递增计数器并上报进度。
+
+        完成数记在函数属性 ``_run_with_progress._done`` 上（闭包外初始化为 0），
+        进度按 已完成数/总网格数 线性映射到 0~95% 区间。
+
+        Args:
+            override: 透传给 _run_one 的单个网格点参数覆盖。
+
+        Returns:
+            _run_one 的回测结果 dict。
+        """
         result = _run_one(override)
         _run_with_progress._done += 1  # type: ignore[attr-defined]
         if on_progress:
@@ -506,7 +686,20 @@ def _run_walkforward(
     req: StrategyWalkForwardRequest,
     on_progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
-    """Walk-Forward 验证任务体：逐 test 窗跑完整回测（信号也按窗生成）。"""
+    """Walk-Forward 滚动验证任务体：逐 test 窗跑完整回测（信号也按窗生成）。
+
+    用 walk_forward_windows 切出训练/测试窗后，仅在各测试窗上生成信号并回测；
+    单窗信号生成失败或为空时记空结果继续（不中断整体），最后聚合各窗收益与夏普。
+
+    Args:
+        req: 验证请求体，提供信号源/策略/参数/区间，以及窗长 ``train_days``/``test_days``。
+        on_progress: 进度回调（进度 0~100 浮点 + 中文描述）；为 None 时不上报。
+
+    Returns:
+        dict，含 ``windows``（逐窗结果：训练/测试起止日期、statistics、trade_count）与
+        ``aggregate``（聚合统计：avg_return / avg_sharpe / positive_window_ratio /
+        total_windows，无有效窗时各均值字段为 None）。
+    """
     lab = _get_lab()
 
     windows = walk_forward_windows(
@@ -766,7 +959,16 @@ def _refresh_cb_terms(
     # ---- 步骤 2：确定待处理子集 ----
     # 从快照提取 symbol 列（字段名 "债券代码"），拼接 vt_symbol（.SSE/.SZSE）
     def _to_vt_symbol(code: str) -> str:
-        """根据代码前缀推断 vt_symbol（上交所/深交所）。"""
+        """根据转债代码前 3 位推断所属交易所，拼成带后缀的 vt_symbol。
+
+        110/111/113/118 归上交所（.SSE），123/127/128 归深交所（.SZSE）。
+
+        Args:
+            code: 6 位纯数字转债代码（如 "113050"）。
+
+        Returns:
+            形如 "113050.SSE" 的 vt_symbol；前缀无法判断（含长度不足）时返回空串。
+        """
         prefix3 = code[:3] if len(code) >= 3 else ""
         if prefix3 in ("110", "111", "113", "118"):
             return f"{code}.SSE"

@@ -48,7 +48,14 @@ _DECISION_WINDOW_DAYS = 16
 
 
 def _decision_to_dict(decision: Decision) -> dict[str, Any]:
-    """把 Decision 数据对象转为可序列化 dict（用于任务结果 / API 响应）。"""
+    """把 Decision 数据对象转为可序列化 dict（用于任务结果 / API 响应）。
+
+    Args:
+        decision: 已落盘 / 待返回的决策对象。
+
+    Returns:
+        decision 全字段的浅拷贝 dict（dataclasses.asdict 结果），可直接 JSON 序列化。
+    """
     return asdict(decision)
 
 
@@ -59,8 +66,18 @@ def _load_close_price(vt_symbol: str, instant: DecisionInstant) -> tuple[float, 
     因此价位需单独从本地 bar 行情读取：取 `close_time <= as_of` 的最后一根已收盘 bar 的 `close`。
     首选周期与决策同频（`interval_of_bar_freq(bar_freq)`），无则回退到该标的其它可用周期。
 
-    返回 `(close, interval_used)`（实际命中的周期供 trace 记录）。
-    Decision_Bar 行情缺失（如 as_of 早于当日收盘）则抛 `ValueError`，由 API 译为错误响应。
+    Args:
+        vt_symbol: 目标标的合约代码，如 "000001.SZSE"；内部经 normalize_vt_symbol 规整。
+        instant: 决策时刻，提供 as_of（价位截断上界，只取 close_time <= as_of 的 bar）
+            与 bar_freq（决定首选取价周期 interval_of_bar_freq(bar_freq)）。
+
+    Returns:
+        `(close, interval_used)`：close 为命中 bar 的收盘价（元/股），interval_used 为
+        实际命中的取价周期（首选同频，否则为回退命中的周期）供 trace 记录。
+
+    Raises:
+        ValueError: as_of 之前无可用的已收盘 Decision_Bar 行情（如 as_of 早于当日收盘、
+            或该标的所有候选周期均无数据）时抛出，由 API 译为错误响应。
     """
     from ..alpha import AlphaLab
     from ..alpha.lab import normalize_vt_symbol
@@ -104,9 +121,25 @@ def _select_signal_bar(
     """取目标标的的 Decision_Bar（`close_time <= as_of` 的最后一根）的 signal 与 bar 时刻。
 
     - signal/decision_bar_dt：过滤目标标的后经 `select_decision_bar` 取最后一根已收盘 bar。
-      缺失（as_of 之前无已收盘 bar）抛 `ValueError`。
     - price/pricing_interval：委托 `_load_close_price` 读同一 as-of 口径下的收盘价
       （首选与决策同频的周期，记录实际命中周期）。
+
+    Args:
+        signal_df: CNN 推理输出帧，至少含 `[datetime, vt_symbol, signal]` 三列，
+            可含多只标的多根 bar；本函数先按 vt_symbol 过滤。
+        vt_symbol: 目标标的合约代码，如 "000001.SZSE"。
+        instant: 决策时刻，提供 as_of（选 bar 的截断上界）与 bar_freq（取价周期）。
+
+    Returns:
+        dict，含四个键：
+        - `decision_bar_dt`（datetime）：命中 Decision_Bar 的收盘时刻；
+        - `signal`（float）：该 bar 的模型信号值（概率/得分）；
+        - `price`（float）：同一 as-of 口径下的收盘价（元/股）；
+        - `pricing_interval`（str）：实际命中的取价周期。
+
+    Raises:
+        ValueError: as_of 之前无该标的的已收盘 bar（信号缺失）；或取价阶段
+            `_load_close_price` 因行情缺失而抛出时向上传播。
     """
     rows = signal_df.filter(pl.col("vt_symbol") == vt_symbol)
     bar = select_decision_bar(rows, instant)
@@ -152,13 +185,41 @@ def run_live_decision(
 
     进度透传：推理段映射到 10~70%，风控/编排 80%，完成 100%。
 
-    返回 `{decision, risk_detail, idempotent_hit}`：
-    - `decision`：决策 dict（action ∈ buy/sell/hold，含 volume/price/signal/reason）。
-    - `risk_detail`：风控逐项明细 `list[{check, passed, detail}]`；幂等命中或未走买入
-      风控的路径（如概率未达阈值的 hold、出场 sell）为空。
-    - `idempotent_hit`：是否幂等命中（运行前同 signal_id 决策已落盘，未重新走风控/提醒）。
-
     不调用任何券商网关 / 下单接口（Property 7）。
+
+    Args:
+        model_name: CNN 模型名，传给 predict_cnn_signals（或注入的 signal_fn）。
+        vt_symbol: 目标标的合约代码，如 "000001.SZSE"。
+        scheme_name: 方案名，参与 signal_id 生成与提醒标题。
+        instant: 决策时刻（含 as_of 与 bar_freq），决定回看窗口与 Decision_Bar 选取。
+        portfolio: 组合快照（总市值 / 持仓 / 单票市值），供风控与仓位规模计算。
+        buy_threshold: 买入信号阈值（概率 / 得分），超过即触发买入风控检查。
+        risk_config: 风控配置（仓位上限 / 黑名单 / 停牌放行），用于构造 RiskManager。
+        store: DecisionStore，用于幂等查询与决策落盘。
+        notifier: 通知器，买入 / 卖出决策时发送提醒。
+        position_ratio: 目标仓位占组合市值的比例（0~1），默认 0.95。
+        min_volume: 最小交易手数（股数），不足一手不买入，默认 100。
+        model_version: 模型版本标签，参与 signal_id 生成（空串则不含版本）。
+        should_exit: 是否到出场条件（由调用方依持有期 / 出场规则给出），默认 False。
+        halted: 标的是否停牌 / 封死，默认 False。
+        on_progress: 进度回调 ``(percent, message)``；为 None 时不上报进度。
+        trace_store: Decision_Trace 持久化存储；为 None 时仅在内存累积、不落盘（trace 落盘
+            为 best-effort，失败不影响决策返回）。
+        data_source_type: 数据源类型标签（"upload" | "pull"），仅记入 trace，绝不含 token。
+        signal_fn: 可选注入的推理函数，取代模块全局 predict_cnn_signals（见下方契约）。
+        trigger_source: 触发来源标签（如 "manual" / "schedule"），写入 Decision 落盘。
+
+    Returns:
+        `{decision, risk_detail, idempotent_hit}`：
+        - `decision`：决策 dict（action ∈ buy/sell/hold，含 volume/price/signal/reason）。
+        - `risk_detail`：风控逐项明细 `list[{check, passed, detail}]`；幂等命中或未走买入
+          风控的路径（如概率未达阈值的 hold、出场 sell）为空 list。
+        - `idempotent_hit`：是否幂等命中（运行前同 signal_id 决策已落盘，未重新走风控/提醒）。
+
+    Raises:
+        ValueError: as_of 之前无已收盘 bar（信号或 Decision_Bar 行情缺失）时抛出；
+            推理 / 取价阶段的其它异常亦原样向上传播（中止前先记 abort_reason 与 best-effort
+            trace，再重新抛出，以保持既有错误响应行为）。
 
     signal_fn 契约（可选注入，用于测试或 Phase 3 组合调仓路径）：
     - 若传入非 None，调用该函数取代模块全局 `predict_cnn_signals`。
@@ -226,6 +287,12 @@ def run_live_decision(
             on_progress(10, f"对 as_of={instant.as_of.isoformat()} 进行 CNN 推理...")
 
         def _infer_progress(p: float, m: str) -> None:
+            """把 CNN 推理内部进度转发到整体进度回调，并映射到 10~70 进度段。
+
+            Args:
+                p: 推理子任务进度，取值 0~100。
+                m: 推理子任务的进度描述文案，转发时会加上 "[推理] " 前缀。
+            """
             if on_progress:
                 on_progress(10 + p * 0.6, f"[推理] {m}")  # 推理段 0~100 -> 10~70
 
