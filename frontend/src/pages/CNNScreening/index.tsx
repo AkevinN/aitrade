@@ -18,15 +18,43 @@ import {
   Typography,
   message,
 } from 'antd'
-import { FilterOutlined } from '@ant-design/icons'
+import { FilterOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 
 import { cnnService } from '../../api/cnn'
 import { useTask } from '../../hooks/useTask'
 import type { CNNScreeningRequest, LeaderboardRow, ScreeningResult } from '../../types/screening'
+import { metricMeta } from '../../utils/screening'
 
 const { Text } = Typography
+
+/**
+ * 带 Tooltip 解释的指标列头标签。
+ *
+ * 复用 `metricMeta` 注册表，用 InfoCircleOutlined 图标作为可悬浮的视觉提示，
+ * 与 ProfilingPanel 的 tooltip 呈现风格保持一致。
+ *
+ * @param metricKey - 指标键名，需在 `METRIC_META` 中注册
+ * @returns 带标签文字和 Tooltip 图标的行内节点
+ *
+ * @example
+ * ```tsx
+ * <MetricLabel metricKey="fitness_score" />
+ * // → "CNN 适配度 (Fitness Score)" + InfoCircle tooltip
+ * ```
+ */
+function MetricLabel({ metricKey }: { metricKey: string }) {
+  const meta = metricMeta(metricKey)
+  return (
+    <Space size={4}>
+      <span>{meta.label}</span>
+      <Tooltip title={meta.tooltip}>
+        <InfoCircleOutlined style={{ color: '#8c8c8c', cursor: 'help' }} />
+      </Tooltip>
+    </Space>
+  )
+}
 
 /** 综合置信度等级到 antd Tag 颜色的映射；insufficient 用 default（灰色）。 */
 const confidenceColor: Record<string, string> = {
@@ -170,15 +198,15 @@ const CNNScreening: React.FC = () => {
   /** 榜单表格列定义，numeric 列附带 sorter 以支持客户端排序。 */
   const leaderboardColumns = [
     {
-      title: '排名',
+      title: <MetricLabel metricKey="rank" />,
       dataIndex: 'rank',
-      width: 60,
+      width: 70,
       sorter: (a: LeaderboardRow, b: LeaderboardRow) => a.rank - b.rank,
     },
     {
-      title: '标的',
+      title: <MetricLabel metricKey="vt_symbol" />,
       key: 'vt_symbol',
-      width: 130,
+      width: 140,
       render: (_: unknown, row: LeaderboardRow) => (
         <Space direction="vertical" size={2}>
           <Text strong>{row.tier1.vt_symbol}</Text>
@@ -187,9 +215,9 @@ const CNNScreening: React.FC = () => {
       ),
     },
     {
-      title: 'Fitness Score',
+      title: <MetricLabel metricKey="fitness_score" />,
       key: 'fitness_score',
-      width: 130,
+      width: 180,
       defaultSortOrder: 'descend' as const,
       sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
         const sa = a.tier1.fitness_score ?? -1
@@ -200,9 +228,9 @@ const CNNScreening: React.FC = () => {
         row.tier1.fitness_score != null ? row.tier1.fitness_score.toFixed(4) : '-',
     },
     {
-      title: '综合置信度',
+      title: <MetricLabel metricKey="overall_confidence" />,
       key: 'overall_confidence',
-      width: 120,
+      width: 180,
       render: (_: unknown, row: LeaderboardRow) => {
         const level = row.tier1.overall_confidence
         const warn = warningLabel(row)
@@ -217,9 +245,9 @@ const CNNScreening: React.FC = () => {
       },
     },
     {
-      title: '入围 Tier-2',
+      title: <MetricLabel metricKey="promoted_to_tier2" />,
       key: 'promoted_to_tier2',
-      width: 100,
+      width: 160,
       render: (_: unknown, row: LeaderboardRow) =>
         row.promoted_to_tier2 ? (
           <Tag color="blue">已入围</Tag>
@@ -228,9 +256,9 @@ const CNNScreening: React.FC = () => {
         ),
     },
     {
-      title: 'Edge OK',
+      title: <MetricLabel metricKey="edge_ok" />,
       key: 'edge_ok',
-      width: 90,
+      width: 140,
       render: (_: unknown, row: LeaderboardRow) => {
         if (!row.tier2) return <Text type="secondary">-</Text>
         if (!row.tier2.evaluable) return <Tag color="default">不可评估</Tag>
@@ -242,9 +270,9 @@ const CNNScreening: React.FC = () => {
       },
     },
     {
-      title: 'Avg Score',
+      title: <MetricLabel metricKey="avg_score" />,
       key: 'avg_score',
-      width: 110,
+      width: 160,
       sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
         const sa = a.tier2?.avg_score ?? -Infinity
         const sb = b.tier2?.avg_score ?? -Infinity
@@ -254,9 +282,9 @@ const CNNScreening: React.FC = () => {
         row.tier2?.avg_score != null ? row.tier2.avg_score.toFixed(4) : '-',
     },
     {
-      title: '正折占比',
+      title: <MetricLabel metricKey="pos_fold_ratio" />,
       key: 'pos_fold_ratio',
-      width: 100,
+      width: 165,
       sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
         const sa = a.tier2?.pos_fold_ratio ?? -Infinity
         const sb = b.tier2?.pos_fold_ratio ?? -Infinity
@@ -527,29 +555,55 @@ function ScreeningForm({
   )
 }
 
+/**
+ * 将贡献维度名渲染为带 Tooltip 的标签节点。
+ *
+ * 优先从 `METRIC_META` 读取标准标签；未注册的维度名原样显示加 InfoCircle 兜底说明。
+ *
+ * @param dimension - `ScoreContribution.dimension` 的值
+ * @returns 带中英标签 + Tooltip 图标的 Space 节点
+ */
+function DimensionLabel({ dimension }: { dimension: string }) {
+  return <MetricLabel metricKey={dimension} />
+}
+
 /** 置信度贡献明细表列，供展开行渲染。 */
 const contributionColumns = [
-  { title: '维度', dataIndex: 'dimension', width: 150 },
   {
-    title: '原始值',
+    title: <MetricLabel metricKey="dimension" />,
+    dataIndex: 'dimension',
+    width: 200,
+    render: (dim: string) => <DimensionLabel dimension={dim} />,
+  },
+  {
+    title: <MetricLabel metricKey="raw_value" />,
     dataIndex: 'raw_value',
-    width: 90,
+    width: 110,
     render: (v: number | null) => (v != null ? v.toFixed(4) : '-'),
   },
-  { title: '等级', dataIndex: 'level', width: 80, render: (v: string | null) => v ?? '-' },
   {
-    title: '权重',
+    title: <MetricLabel metricKey="level" />,
+    dataIndex: 'level',
+    width: 100,
+    render: (v: string | null) => v ?? '-',
+  },
+  {
+    title: <MetricLabel metricKey="weight" />,
     dataIndex: 'weight',
-    width: 70,
+    width: 90,
     render: (v: number) => v.toFixed(2),
   },
   {
-    title: '贡献量',
+    title: <MetricLabel metricKey="contribution" />,
     dataIndex: 'contribution',
-    width: 80,
+    width: 120,
     render: (v: number) => v.toFixed(4),
   },
-  { title: '置信度', dataIndex: 'confidence', width: 90 },
+  {
+    title: <MetricLabel metricKey="confidence" />,
+    dataIndex: 'confidence',
+    width: 120,
+  },
 ]
 
 /**
