@@ -54,17 +54,27 @@ def test_cnn_screening_request_rejects_negative_lookback() -> None:
 
 
 def test_cnn_screening_request_valid_defaults() -> None:
-    """合法的最小请求（只传 name/as_of/lookback_days）应可构造，并采用文档默认值。"""
+    """合法的最小请求（只传 name/as_of/lookback_days）应可构造，并采用全部文档默认值。"""
     req = CNNScreeningRequest(
         name="sanity",
         as_of=datetime(2025, 6, 1),
         lookback_days=250,
     )
+    # ---- 基础参数 ----
     assert req.interval == "d"
+    # ---- 漏斗参数 ----
     assert req.top_k == 15
     assert req.run_tier2 is True
-    assert req.persist is False
     assert req.min_confidence == "low"
+    # ---- Tier-2 超参 ----
+    assert req.objective == "classification"
+    assert req.eval_start is None
+    # ---- Universe 过滤 ----
+    assert req.exchange is None
+    assert req.include_symbols == []
+    assert req.exclude_symbols == []
+    # ---- 持久化 ----
+    assert req.persist is False
 
 
 # ---- Task 1.5: DEFAULT_SCREENING_RULES 权重与版本 ----

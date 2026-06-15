@@ -92,7 +92,12 @@ class ScreeningResult(BaseModel):
     run_id: str  # 唯一运行 ID，如 UUID4 字符串
     status: Literal["draft"] = "draft"  # 恒为草稿；前端应以视觉标注提示（Requirement 11.1）
     created_at: datetime  # 运行完成时间戳（UTC 或本机时区）
-    # 输入回显：universe 来源/过滤条件/as_of/interval/漏斗参数/Tier-2 超参
+    # 输入回显，供复现与审计使用，预期键：
+    #   - "name"/"interval"/"as_of"/"lookback_days"：请求基础参数
+    #   - "exchange"/"min_bar_count"/"include_symbols"/"exclude_symbols"：universe 来源/过滤条件
+    #   - "top_k"/"run_tier2"/"min_confidence"/"persist"：Tier-1/Tier-2 漏斗参数
+    #   - "objective"/"eval_start"：Tier-2 超参
+    #   - "rules_id"：本次所用 ScreeningRules 版本（与下方字段冗余，便于序列化自包含）
     input: dict = Field(default_factory=dict)
     rules_id: str  # 本次所用 ScreeningRules 的标识/版本，用于复现（Requirement 6.2, 12.4）
     universe_size: int  # 过滤后进入 Tier-1 的候选标的数（不含已被排除的）
@@ -100,5 +105,8 @@ class ScreeningResult(BaseModel):
     leaderboard: list[LeaderboardRow] = Field(default_factory=list)  # 选股榜单
     # Tier-1 实际数据右边界（最大的 effective_right_bound，用于审计无前视）；无数据时为 None
     effective_right_bound: datetime | None = None
-    # Tier-2 评估区间 {"start": ..., "end": ..., "objective": ...}；未跑 Tier-2 时为 None
+    # Tier-2 评估区间；未跑 Tier-2 时为 None。预期键：
+    #   - "start": date — 评估窗口起点（含）
+    #   - "end": date — 评估窗口终点（含，强制 <= as_of）
+    #   - "objective": str — 训练目标，如 "classification"
     eval_window: dict | None = None

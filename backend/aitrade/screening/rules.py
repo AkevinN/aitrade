@@ -14,7 +14,19 @@ CNN 选股（CNN Stock Screening）规则与配置。
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
+
+# ---------------------------------------------------------------------------
+# 共享字面量类型别名（与 aitrade/models/screening.py 保持一致）
+# ---------------------------------------------------------------------------
+
+#: Tier-2 入围所需综合置信度等级，从"不足"到"高"排列。
+ConfidenceLevel = Literal["insufficient", "low", "medium", "high"]
+
+#: CNN 训练目标，与 CNNWalkForwardRequest.objective 同值域。
+ObjectiveType = Literal["classification", "regression", "path_class"]
 
 
 class ScreeningRules(BaseModel):
@@ -66,14 +78,14 @@ class ScreeningRules(BaseModel):
     # ---- 漏斗配置 ----
     top_k: int = Field(default=15, ge=1)  # Tier-1 后入围 Tier-2 的最大标的数（Requirement 4）
     # Tier-2 入围所需最低综合置信度；"insufficient" 实质上不过滤（Requirement 2.5）
-    min_confidence: str = "low"
+    min_confidence: ConfidenceLevel = "low"
 
     # ---- 绝对 edge 门禁阈值 ----
     # candidate_score > 0 的折数占比需 >= 此值才判 edge_ok=True（Requirement 5.2）
     min_positive_fold_ratio: float = Field(default=0.5, ge=0.0, le=1.0)
 
     # ---- Tier-2 默认超参（偏保守快速，design.md 3.3）----
-    objective: str = "classification"  # CNN 训练目标，传给 CNNWalkForwardRequest
+    objective: ObjectiveType = "classification"  # CNN 训练目标，传给 CNNWalkForwardRequest
     n_seeds: int = Field(default=1, ge=1)  # 每折训练种子数；偏少以控制算力
     epochs: int = Field(default=30, ge=1)  # 每次训练最大 epoch 数；偏小以加快速度
     # Tier-2 评估窗口长度（天数）：若 eval_start 未显式指定，则从 as_of 向前推此天数
@@ -88,6 +100,8 @@ class ScreeningRules(BaseModel):
 # 内置默认规则（Requirement 12.2）：未自定义时开箱即用。
 # ---------------------------------------------------------------------------
 
+# 所有字段显式列出（而非 ScreeningRules()），是为了让"开箱默认值"在这里一目了然、
+# 可快速对照 design.md 3.3，与 profiling/rules.py 的 DEFAULT_RULES 构造惯例保持一致。
 DEFAULT_SCREENING_RULES = ScreeningRules(
     rules_id="screening-builtin-v1",
     # 权重使用 ScreeningRules 字段默认值（见 Field default_factory）

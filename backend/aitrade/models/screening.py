@@ -1,13 +1,22 @@
 """
 CNN 选股（CNN Stock Screening）API 请求模型。
+
+本文件定义 ``CNNScreeningRequest``——启动一次跨标的分层漏斗选股的入口契约。
+请求经 ``POST /api/cnn/screening/batch`` 接收后由 task_manager 异步调度
+``ScreeningRunner.run``，最终产出 ``ScreeningResult``（见 screening/types.py）。
+
+时间窗口隔离（红线）：``as_of`` 为必填字段，无任何隐式"全量"默认。
+Tier-1 画像窗口与 Tier-2 评估区间均严格不越过 ``as_of``（Requirement 9.1）。
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
+
+from aitrade.screening.rules import ConfidenceLevel, ObjectiveType
 
 
 class CNNScreeningRequest(BaseModel):
@@ -42,11 +51,11 @@ class CNNScreeningRequest(BaseModel):
     # 是否执行 Tier-2 WF/OOS 实证；False 时只产出 Tier-1 排名榜单（Requirement 4.3）
     run_tier2: bool = True
     # 入围 Tier-2 的最低综合置信度门槛；低于此等级的标的不入围（Requirement 2.5）
-    min_confidence: Literal["insufficient", "low", "medium", "high"] = "low"
+    min_confidence: ConfidenceLevel = "low"
 
     # ---- Tier-2 默认超参（偏快，可由 ScreeningRules 覆盖）----
     # CNN 训练目标（分类 / 回归 / 路径分类），供 Tier-2 构造 CNNWalkForwardRequest 使用
-    objective: Literal["classification", "regression", "path_class"] = "classification"
+    objective: ObjectiveType = "classification"
     # Tier-2 评估区间起点（可选）；缺省时由 as_of 与 ScreeningRules 推导，强制 end <= as_of
     eval_start: Optional[date] = None
 
