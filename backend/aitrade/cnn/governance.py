@@ -343,6 +343,9 @@ class CNNGovernanceStore:
 
 
 store = CNNGovernanceStore()
+# 全局生产治理 store 的稳定别名：供函数内部在形参也叫 ``store`` 时仍能干净地
+# 引用到模块级生产 store（避免形参遮蔽全局名），二者始终指向同一对象。
+_GLOBAL_STORE = store
 
 
 def _serialize_groups(groups: list[Any]) -> list[dict[str, Any]]:
@@ -712,6 +715,7 @@ def _cross_seed_dispersion(scores: list[float]) -> dict[str, Any]:
 def run_walk_forward_evaluate(
     req: CNNWalkForwardRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
+    store: Optional["CNNGovernanceStore"] = None,
 ) -> dict[str, Any]:
     """执行 Walk-Forward/OOS 多折评估并持久化评估报告（支持折内多种子）。
 
@@ -726,21 +730,31 @@ def run_walk_forward_evaluate(
         req: WF/OOS 评估请求，含时间区间、训练参数、回测参数、晋级门禁与
             ``n_seeds``（每折种子数，<1 时按 1 兜底）。
         on_progress: 进度回调 ``(percent, message)``，可为 None。
+        store: 治理产物存储。默认 None，表示沿用模块级全局生产 store
+            （写入 ``CNN_GOVERNANCE_PATH``）——既有调用方不传此参数时行为
+            与改动前逐字节一致。选股 Tier-2 传入一个指向
+            ``SCREENING_GOVERNANCE_PATH`` 的隔离 ``CNNGovernanceStore``，
+            使 WF 报告与历史落到选股专用治理区，绝不污染生产治理产物。
+            注意：仅评估报告/历史/生产模型读取经此 store 路由；折内临时
+            训练模型（``.pt``）仍由 ``CNN_MODEL_DIR`` 接管，与本参数无关。
 
     Returns:
         评估报告字典，含 report_id/type/folds/summary 等字段；每折附
         ``cross_seed`` ``{mean,std,n}`` 与 ``candidate_seed_scores``，summary 附
-        ``n_seeds`` 与 ``avg_cross_seed_std``；已持久化到 store。
+        ``n_seeds`` 与 ``avg_cross_seed_std``；已持久化到所用 store。
 
     Raises:
         ValueError: 无法生成 walk-forward 窗口（日期范围或窗口参数不合理）时抛出。
     """
+    # 形参 ``store`` 与模块级全局生产 store 同名；未注入时回落到 _GLOBAL_STORE，
+    # 函数体内一律改用 active_store，避免名字遮蔽并保证默认路径零行为变化。
+    active_store = store if store is not None else _GLOBAL_STORE
     report_id = _now_id("wf")
     windows = walk_forward_windows(req.start, req.end, req.train_days, req.test_days, req.step_days)
     if not windows:
         raise ValueError("无法生成 walk-forward 窗口，请扩大日期范围或缩短 train/test days")
 
-    production = store.get_production()
+    production = active_store.get_production()
     production_model = req.production_model or production.get("model_name") or ""
     n_seeds = max(1, req.n_seeds)
     folds: list[dict[str, Any]] = []
@@ -848,8 +862,8 @@ def run_walk_forward_evaluate(
             "reasons": pass_result["reasons"],
         },
     }
-    store.save_report(report)
-    store.append_history("wf_evaluate_completed", {"report_id": report_id, "passed": pass_result["passed"]})
+    active_store.save_report(report)
+    active_store.append_history("wf_evaluate_completed", {"report_id": report_id, "passed": pass_result["passed"]})
     if on_progress:
         on_progress(100, "WF/OOS 评估完成")
     return report
