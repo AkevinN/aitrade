@@ -320,15 +320,23 @@ class ScreeningRunner:
         评估区间右边界 ``end`` 取 ``min(as_of.date(), 本地最新数据日期)``，杜绝越过
         截止时间或本地可用范围（Requirement 9.3 / 9.5）。左边界 ``start`` 取
         ``req.eval_start``（若显式提供）否则 ``end - rules.eval_window_days``。
-        Tier-2 超参（``objective``/``n_seeds``/``epochs``/``test_days``）取自
-        ``ScreeningRules`` 的选股默认，``label_spec``/``backtest_params`` 用默认值。
+
+        WF 窗口超参（``train_days``/``fold_test_days``/``step_days``）全部取自
+        ``ScreeningRules``，保证 ``eval_window_days >= train_days + fold_test_days``
+        这一不变量由规则层维护（违反时 ``walk_forward_windows`` 返回空列表，
+        ``run_walk_forward_evaluate`` 随即抛 ``ValueError``）。
+
+        注意：``eval_window`` 在 ``ScreeningResult`` 中作联合包络回显，
+        取所有入围标的 ``start``（最小）/ ``end``（最大）的并集——各标的因本地
+        范围差异可能有轻微偏移，包络覆盖其余标的 ``end <= as_of`` 红线仍成立。
 
         Args:
             vt_symbol: 入围标的代码，作为 ``target_symbol``。
             req: 选股请求，提供 ``as_of``/``interval``/``objective``/``eval_start``。
 
         Returns:
-            构造好的 ``CNNWalkForwardRequest``，``end`` 必然 ``<= as_of``。
+            构造好的 ``CNNWalkForwardRequest``，``end`` 必然 ``<= as_of``；
+            ``train_days``/``test_days``/``step_days`` 均来自 ``self.rules``。
         """
         as_of_date: date = req.as_of.date()
 
@@ -350,7 +358,9 @@ class ScreeningRunner:
             input_interval=req.interval,
             start=start,
             end=end,
+            train_days=self.rules.train_days,
             test_days=self.rules.fold_test_days,
+            step_days=self.rules.step_days,
             n_seeds=self.rules.n_seeds,
             objective=req.objective,
             training_params=CNNTrainingParams(epochs=self.rules.epochs),

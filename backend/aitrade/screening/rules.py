@@ -88,10 +88,24 @@ class ScreeningRules(BaseModel):
     objective: ObjectiveType = "classification"  # CNN 训练目标，传给 CNNWalkForwardRequest
     n_seeds: int = Field(default=1, ge=1)  # 每折训练种子数；偏少以控制算力
     epochs: int = Field(default=30, ge=1)  # 每次训练最大 epoch 数；偏小以加快速度
-    # Tier-2 评估窗口长度（天数）：若 eval_start 未显式指定，则从 as_of 向前推此天数
-    eval_window_days: int = Field(default=365, ge=30)
+
+    # ---- Tier-2 WF 窗口参数（三者共同决定可生成的折数）----
+    # 不变量（必须满足，否则生成 0 折并在运行时抛 ValueError）：
+    #   eval_window_days >= train_days + test_days
+    # 折数公式（近似）：n_folds ≈ (eval_window_days - train_days - test_days) / step_days + 1
+    #
+    # 默认值设计（保证 ≥ 3 折）：
+    #   train_days=480, test_days=90（=step_days），eval_window_days=900
+    #   n_folds ≈ (900 - 480 - 90) / 90 + 1 = 330/90 + 1 ≈ 4.7 → 4 折
+    #   验证：min = train_days + test_days = 570 << 900  ✓
+    train_days: int = Field(default=480, ge=30)  # 每折训练窗口（天数）
     # Tier-2 单折测试集长度（天数）；controls WF 切分粒度
     fold_test_days: int = Field(default=90, ge=7)
+    step_days: int = Field(default=90, ge=1)  # WF 游标每轮步进天数；等于 fold_test_days → 无重叠滚动
+    # Tier-2 评估窗口长度（天数）：若 eval_start 未显式指定，则从 as_of 向前推此天数。
+    # 必须满足 eval_window_days >= train_days + fold_test_days（否则生成 0 折）。
+    eval_window_days: int = Field(default=900, ge=30)
+
     # Tier-2 入围标的数上限保护：实际入围数超过此值时按 fitness_score 截断并 log（Requirement 4.5）
     tier2_cap: int = Field(default=30, ge=1)
 
@@ -111,7 +125,12 @@ DEFAULT_SCREENING_RULES = ScreeningRules(
     objective="classification",
     n_seeds=1,
     epochs=30,
-    eval_window_days=365,
+    # WF 窗口参数：保证默认即可生成 ≥3 折（约 4 折）。
+    # 不变量：eval_window_days(900) >= train_days(480) + fold_test_days(90) = 570  ✓
+    # 折数 ≈ (900 - 480 - 90) / 90 + 1 = 4.7 → 4 折
+    train_days=480,
     fold_test_days=90,
+    step_days=90,
+    eval_window_days=900,
     tier2_cap=30,
 )

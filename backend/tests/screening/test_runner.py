@@ -538,6 +538,55 @@ def test_end_to_end_with_stubs(monkeypatch) -> None:
     assert progress and progress[-1] == 100
 
 
+# ===========================================================================
+# Property 2/5 guard: 默认规则下 Tier-2 窗口可生成 ≥2 折（真实窗口生成，不桩化）
+# Feature: cnn-stock-screening, Property 2/5 guard: 默认规则下 Tier-2 窗口可生成 ≥2 折
+# ===========================================================================
+
+
+def test_default_rules_wf_windows_at_least_two_folds() -> None:
+    # Feature: cnn-stock-screening, Property 2/5 guard: 默认规则下 Tier-2 窗口可生成 ≥2 折
+    """默认 ScreeningRules 构造出的 WF 请求参数送入真实 walk_forward_windows 可生成 ≥2 折。
+
+    本测试是对"eval_window_days 过小导致 0 折 → 所有 Tier-2 评估失败"缺陷的回归防守：
+    直接从 DEFAULT_SCREENING_RULES 读取 train_days / fold_test_days / step_days，
+    并用 _build_wf_request 产生的 start/end 驱动真实 walk_forward_windows，
+    断言至少生成 2 个窗口（Property 2/5 guard）。
+
+    注意：本测试**不**桩化 walk_forward_windows，这是回归价值所在——
+    只要 rules 参数不满足 eval_window_days >= train_days + test_days，此测试即失败。
+
+    Args:
+        无（纯逻辑，无外部 I/O）。
+    """
+    from datetime import date, timedelta
+
+    from aitrade.backtest.validation import walk_forward_windows
+    from aitrade.screening.rules import DEFAULT_SCREENING_RULES
+
+    rules = DEFAULT_SCREENING_RULES
+    as_of = date(2025, 6, 1)
+
+    # 复现 _build_wf_request 的窗口计算逻辑（eval_start 未显式提供时的路径）
+    end = as_of
+    start = end - timedelta(days=rules.eval_window_days)
+
+    windows = walk_forward_windows(
+        start=start,
+        end=end,
+        train_days=rules.train_days,
+        test_days=rules.fold_test_days,
+        step_days=rules.step_days,
+    )
+
+    assert len(windows) >= 2, (
+        f"默认规则下 walk_forward_windows 仅生成 {len(windows)} 折（期望 >= 2）。"
+        f" eval_window_days={rules.eval_window_days}, train_days={rules.train_days},"
+        f" fold_test_days={rules.fold_test_days}, step_days={rules.step_days}。"
+        f" 需确保 eval_window_days >= train_days + fold_test_days 且有足够空间生成多折。"
+    )
+
+
 def test_persist_writes_only_when_requested(monkeypatch, tmp_path) -> None:
     """persist=True 时写 SCREENING_PATH；persist=False 时不写。"""
     from aitrade.screening.store import ScreeningStore
