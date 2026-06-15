@@ -159,4 +159,26 @@ export interface CNNScreeningRequest {
   objective: ObjectiveType
   /** 是否将 ScreeningResult 写入磁盘；false 时仅内存返回 */
   persist?: boolean
+
+  // ── Tier-2 高级覆盖参数（全部可选；不填则后端使用 ScreeningRules 默认值）──
+  /**
+   * Tier-2 评估窗口总长（天数）；覆盖 ScreeningRules.eval_window_days（默认 900）。
+   * 须满足 eval_window_days >= train_days + fold_test_days，否则无法生成折。
+   */
+  eval_window_days?: number
+  /**
+   * 每折训练窗口（天数）；覆盖 ScreeningRules.train_days（默认 480）。
+   * 历史不足 train_days + fold_test_days 的标的会自动跳过 Tier-2。
+   */
+  train_days?: number
+  /**
+   * 单折测试集长度（天数）；覆盖 ScreeningRules.fold_test_days（默认 90）。
+   * 同时影响步进粒度（step_days ≈ fold_test_days）。
+   */
+  fold_test_days?: number
+  /**
+   * 每折训练随机种子数；覆盖 ScreeningRules.n_seeds（默认 1）。
+   * 取多个种子并求均值可降低偶然性，但线性增加算力消耗。
+   */
+  n_seeds?: number
 }

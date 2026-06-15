@@ -105,6 +105,26 @@ export const METRIC_META: Record<string, MetricMeta> = {
     tooltip: '标的合约代码，如 "600030.SSE"。',
   },
 
+  // ── Tier-2 高级覆盖参数（表单 Tier-2 高级设置面板）────────────────────────
+  eval_window_days: {
+    label: '评估窗总长 (Eval Window Days)',
+    tooltip:
+      'Tier-2 回测的总历史跨度（天）。越长能切越多折、结论越稳，但需要越多本地历史数据。默认 900。',
+  },
+  train_days: {
+    label: '每折训练 (Train Days)',
+    tooltip: '每折用多少天历史训练 CNN。默认 480。',
+  },
+  fold_test_days: {
+    label: '每折测试 (Test Days)',
+    tooltip: '每折训练后，在紧随其后的多少天做样本外（OOS）测试。默认 90。',
+  },
+  n_seeds: {
+    label: '随机种子数 (Seeds)',
+    tooltip:
+      '每折重复训练的随机种子数，取均值降低偶然性；越多越稳但越慢。默认 1。',
+  },
+
   // ── 贡献明细子列 ─────────────────────────────────────────────────────────
   dimension: {
     label: '维度 (Dimension)',

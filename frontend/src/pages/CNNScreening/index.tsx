@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Col,
+  Collapse,
   DatePicker,
   Empty,
   Form,
@@ -160,6 +161,11 @@ const CNNScreening: React.FC = () => {
         run_tier2: values.run_tier2 ?? true,
         objective: values.objective,
         persist: false,
+        // Tier-2 高级覆盖参数：仅在用户填写时传入，空（undefined/null）则后端使用规则默认值
+        ...(values.eval_window_days != null ? { eval_window_days: values.eval_window_days } : {}),
+        ...(values.train_days != null ? { train_days: values.train_days } : {}),
+        ...(values.fold_test_days != null ? { fold_test_days: values.fold_test_days } : {}),
+        ...(values.n_seeds != null ? { n_seeds: values.n_seeds } : {}),
       }
 
       const res = await cnnService.runScreening(req)
@@ -261,7 +267,16 @@ const CNNScreening: React.FC = () => {
       width: 140,
       render: (_: unknown, row: LeaderboardRow) => {
         if (!row.tier2) return <Text type="secondary">-</Text>
-        if (!row.tier2.evaluable) return <Tag color="default">不可评估</Tag>
+        if (!row.tier2.evaluable) {
+          // 已入围 Tier-2 但无法评估（通常是数据不足导致跳过）
+          const skipLabel =
+            row.tier2.note && row.tier2.note.includes('数据不足') ? '数据不足' : '跳过'
+          return (
+            <Tooltip title={row.tier2.note ?? '该标的 Tier-2 评估未能完成'}>
+              <Tag color="orange">{skipLabel}</Tag>
+            </Tooltip>
+          )
+        }
         return row.tier2.edge_ok ? (
           <Tag color="green">通过</Tag>
         ) : (
@@ -356,9 +371,42 @@ const CNNScreening: React.FC = () => {
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Tier-2 默认超参（与后端 ScreeningRules 默认值对齐，用于 derived history hint 回落）
+const TIER2_DEFAULTS = {
+  eval_window_days: 900,
+  train_days: 480,
+  fold_test_days: 90,
+} as const
+
+/**
+ * 根据 Tier-2 窗口参数推算所需历史天数与估计折数。
+ *
+ * 折数公式（近似，step ≈ fold_test_days）：
+ *   folds ≈ floor((evalWindow - train - test) / test) + 1
+ *
+ * @param evalWindow - 评估窗总长（天），缺省 900
+ * @param train - 每折训练天数，缺省 480
+ * @param test - 每折测试天数，缺省 90
+ * @returns `{ evalWindow, neededMin, folds }`
+ */
+function calcHistoryHint(
+  evalWindow: number | undefined,
+  train: number | undefined,
+  test: number | undefined,
+): { evalWindow: number; neededMin: number; folds: number } {
+  const ew = evalWindow ?? TIER2_DEFAULTS.eval_window_days
+  const tr = train ?? TIER2_DEFAULTS.train_days
+  const te = test ?? TIER2_DEFAULTS.fold_test_days
+  const neededMin = tr + te
+  const folds = Math.max(1, Math.floor((ew - tr - te) / te) + 1)
+  return { evalWindow: ew, neededMin, folds }
+}
+
 /**
  * 选股配置表单：K 线周期、截止日期、回看天数、交易所/数量过滤、
- * 显式候选池与排除清单、漏斗参数（top_k、run_tier2）以及 Tier-2 目标函数。
+ * 显式候选池与排除清单、漏斗参数（top_k、run_tier2）、Tier-2 目标函数，
+ * 以及可折叠的「Tier-2 高级设置」面板（eval_window_days / train_days /
+ * fold_test_days / n_seeds），含实时历史需求提示。
  *
  * 提交后展示任务运行进度条（来自 `useTask` 轮询）。
  */
@@ -386,6 +434,14 @@ function ScreeningForm({
   /** 当前任务进度百分比（0-100，来自 Task.progress） */
   taskProgress?: number
 }) {
+  // 监听 run_tier2 开关与 Tier-2 高级字段，用于条件渲染和历史需求实时计算
+  const runTier2 = Form.useWatch('run_tier2', form)
+  const evalWindowDays = Form.useWatch('eval_window_days', form)
+  const trainDays = Form.useWatch('train_days', form)
+  const foldTestDays = Form.useWatch('fold_test_days', form)
+
+  const hint = calcHistoryHint(evalWindowDays, trainDays, foldTestDays)
+
   return (
     <section className="panel">
       <Form
@@ -519,6 +575,93 @@ function ScreeningForm({
             ]}
           />
         </Form.Item>
+
+        {/* Tier-2 高级设置：仅在 run_tier2 开启时显示，默认折叠 */}
+        {runTier2 && (
+          <Collapse
+            size="small"
+            style={{ marginBottom: 16 }}
+            items={[
+              {
+                key: 'tier2-advanced',
+                label: 'Tier-2 高级设置（不填用默认）',
+                children: (
+                  <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                    <Row gutter={8}>
+                      <Col span={12}>
+                        <Form.Item
+                          label={<MetricLabel metricKey="eval_window_days" />}
+                          name="eval_window_days"
+                          tooltip={null}
+                        >
+                          <InputNumber
+                            min={30}
+                            style={{ width: '100%' }}
+                            placeholder="默认 900"
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          label={<MetricLabel metricKey="train_days" />}
+                          name="train_days"
+                          tooltip={null}
+                        >
+                          <InputNumber
+                            min={30}
+                            style={{ width: '100%' }}
+                            placeholder="默认 480"
+                          />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={8}>
+                      <Col span={12}>
+                        <Form.Item
+                          label={<MetricLabel metricKey="fold_test_days" />}
+                          name="fold_test_days"
+                          tooltip={null}
+                        >
+                          <InputNumber
+                            min={7}
+                            style={{ width: '100%' }}
+                            placeholder="默认 90"
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item
+                          label={<MetricLabel metricKey="n_seeds" />}
+                          name="n_seeds"
+                          tooltip={null}
+                        >
+                          <InputNumber
+                            min={1}
+                            max={10}
+                            style={{ width: '100%' }}
+                            placeholder="默认 1"
+                          />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    {/* 实时历史需求提示 */}
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginTop: 4, fontSize: 12 }}
+                      message={
+                        `本配置约需 ${hint.evalWindow} 天历史` +
+                        `（≥${hint.neededMin} 天才能跑 1 折）` +
+                        ` → 约 ${hint.folds} 折。` +
+                        `历史不足的标的会自动跳过 Tier-2。`
+                      }
+                    />
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        )}
 
         <Button
           type="primary"

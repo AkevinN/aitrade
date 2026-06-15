@@ -425,4 +425,154 @@ describe('CNNScreening 页面', () => {
     }
     // 如无可展开按钮（JSDOM 下 antd Table expandable 有时不渲染），仅检查前面的标签测试即可
   })
+
+  // ── 10. Tier-2 高级设置面板：run_tier2 开启时显示，关闭时隐藏 ───────────────
+  it('run_tier2 开启时「Tier-2 高级设置」区块可见，关闭时隐藏', async () => {
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    // 默认 run_tier2=true → 高级设置面板应存在
+    expect(await screen.findByText(/Tier-2 高级设置/)).toBeInTheDocument()
+
+    // 点击 run_tier2 Switch 关闭
+    const switchEl = screen.getByRole('switch')
+    await user.click(switchEl)
+
+    // run_tier2=false → 高级设置面板消失
+    expect(screen.queryByText(/Tier-2 高级设置/)).not.toBeInTheDocument()
+  })
+
+  // ── 11. Tier-2 高级设置：字段显示中英标签 ─────────────────────────────────
+  it('Tier-2 高级设置面板中字段使用中英结合标签', async () => {
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    // 展开 Collapse
+    const collapseHeader = await screen.findByText(/Tier-2 高级设置/)
+    await user.click(collapseHeader)
+
+    // 四个高级字段的中英标签
+    expect(await screen.findByText('评估窗总长 (Eval Window Days)')).toBeInTheDocument()
+    expect(screen.getByText('每折训练 (Train Days)')).toBeInTheDocument()
+    expect(screen.getByText('每折测试 (Test Days)')).toBeInTheDocument()
+    expect(screen.getByText('随机种子数 (Seeds)')).toBeInTheDocument()
+  })
+
+  // ── 12. Tier-2 高级字段填写 → 包含于请求；留空 → 请求中不含该字段 ──────────
+  it('填写 eval_window_days 后包含在 runScreening 请求中；留空时不含', async () => {
+    mockRunScreening.mockResolvedValueOnce({ task_id: 'tid-2', name: 'test' })
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    // 展开高级设置
+    const collapseHeader = await screen.findByText(/Tier-2 高级设置/)
+    await user.click(collapseHeader)
+
+    // 找到 eval_window_days 输入框（placeholder="默认 900"）并填写
+    const evalInput = await screen.findByPlaceholderText('默认 900')
+    await user.clear(evalInput)
+    await user.type(evalInput, '600')
+
+    // 提交
+    const nameInput = screen.getByPlaceholderText('cnn_screen_YYYYMMDD')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'adv_screen')
+    await user.click(screen.getByRole('button', { name: /启动选股/ }))
+
+    await waitFor(() => {
+      expect(mockRunScreening).toHaveBeenCalledTimes(1)
+    })
+
+    const req = mockRunScreening.mock.calls[0][0]
+    // eval_window_days 已填 → 包含在请求中
+    expect(req.eval_window_days).toBe(600)
+    // train_days / fold_test_days / n_seeds 未填 → 不包含（undefined/omitted）
+    expect(req.train_days).toBeUndefined()
+    expect(req.fold_test_days).toBeUndefined()
+    expect(req.n_seeds).toBeUndefined()
+  })
+
+  // ── 13. 历史需求提示渲染（默认值回落场景）────────────────────────────────────
+  it('展开高级设置后显示历史需求提示，包含天数与折数', async () => {
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    // 展开 Collapse
+    const collapseHeader = await screen.findByText(/Tier-2 高级设置/)
+    await user.click(collapseHeader)
+
+    // 默认值（900/480/90）→ 提示应含"900 天"或"570 天"或"折"
+    const hint = await screen.findByText(/约.*折/)
+    expect(hint).toBeInTheDocument()
+    // 提示中含"历史不足的标的会自动跳过"
+    expect(hint.textContent).toContain('历史不足的标的会自动跳过')
+  })
+
+  // ── 14. promoted_to_tier2 + evaluable=false → 跳过/数据不足 Tag ─────────────
+  it('入围 Tier-2 但 evaluable=false 时显示橙色"跳过"或"数据不足"Tag，note 绑 Tooltip', async () => {
+    const resultWithSkip: ScreeningResult = {
+      ...syntheticResult,
+      leaderboard: [
+        {
+          rank: 1,
+          tier1: {
+            vt_symbol: '600030.SSE',
+            fitness_score: 0.82,
+            contributions: [],
+            overall_confidence: 'high',
+            available: true,
+            note: null,
+          },
+          promoted_to_tier2: true,
+          tier2: {
+            vt_symbol: '600030.SSE',
+            evaluable: false,
+            edge_ok: false,
+            avg_score: null,
+            pos_fold_ratio: null,
+            avg_cross_seed_std: null,
+            report_id: null,
+            note: '数据不足：本地历史仅 200 天，低于评估所需最小值 570 天',
+          },
+        },
+        {
+          rank: 2,
+          tier1: {
+            vt_symbol: '000001.SZSE',
+            fitness_score: 0.55,
+            contributions: [],
+            overall_confidence: 'medium',
+            available: true,
+            note: null,
+          },
+          promoted_to_tier2: true,
+          tier2: {
+            vt_symbol: '000001.SZSE',
+            evaluable: false,
+            edge_ok: false,
+            avg_score: null,
+            pos_fold_ratio: null,
+            avg_cross_seed_std: null,
+            report_id: null,
+            note: 'WF 评估异常，已跳过',
+          },
+        },
+      ],
+    }
+
+    mockUseTask.mockReturnValue(completedTask(resultWithSkip))
+    renderPage()
+
+    await screen.findByText('600030.SSE')
+
+    // note 含"数据不足" → Tag 文案为"数据不足"
+    expect(screen.getByText('数据不足')).toBeInTheDocument()
+
+    // note 不含"数据不足" → Tag 文案为"跳过"
+    expect(screen.getByText('跳过')).toBeInTheDocument()
+  })
 })
