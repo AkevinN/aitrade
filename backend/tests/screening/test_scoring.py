@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from aitrade.profiling.types import MetricBlock, MetricValue, ProfileInput, SymbolProfile
@@ -208,13 +208,12 @@ def test_property3_weighted_average_bounded_and_self_consistent(
 
     Feature: cnn-stock-screening, Property 3: CNN_Fitness_Score 有界且贡献自洽
 
-    对任意 value ∈ [0,1] 与 weight >= 0 的维度集合（不全为零权重），
-    _weighted_average 的 score ∈ [0,1] 且贡献之和等于 score。
+    对任意 value ∈ [0,1] 与 weight >= 0 的维度集合（至少一个正权重），
+    _weighted_average 的 score ∈ [0,1] 且贡献之和精确等于 score。
+    使用 assume 而非补丁策略，以便 Hypothesis 能在反例基础上正常收缩。
     """
-    # 确保至少一个维度有正权重（all-zero 权重会返回 score=0，贡献为空）
-    has_positive_weight = any(w > 0 for _, _, w in items)
-    if not has_positive_weight:
-        items = [(items[0][0], items[0][1], 1.0)] + list(items[1:])
+    # 确保至少一个维度有正权重（all-zero 权重返回 score=0/空贡献，属退化情况）
+    assume(any(w > 0 for _, _, w in items))
 
     normalized = {d: v for d, v, _ in items}
     weights = {d: w for d, _, w in items}
@@ -261,11 +260,10 @@ def test_property4_weighted_average_monotonic(
     Feature: cnn-stock-screening, Property 4: 综合分关于单维单调
 
     固定其余维度，把选定维度的 value 增加 delta（截断到 1.0），
-    score 不应下降。
+    score 不应下降。使用 assume 而非补丁策略，以便 Hypothesis 能正常收缩。
     """
-    # 确保有正权重
-    if all(w == 0 for _, _, w in items):
-        items = [(items[0][0], items[0][1], 1.0)] + list(items[1:])
+    # 确保有正权重，否则 score 恒为 0，单调性测试无意义
+    assume(any(w > 0 for _, _, w in items))
 
     idx = idx % len(items)
     dim_name, val_orig, w = items[idx]

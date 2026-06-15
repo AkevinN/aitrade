@@ -96,30 +96,41 @@ class _WeightedAverageResult(NamedTuple):
     """``_weighted_average`` 的返回结构。
 
     Attributes:
-        score: 归一化综合分 ∈ [0,1]，等于 Σ(w_i·v_i) / Σ(w_i)。
+        score: 归一化综合分 ∈ [0,1]，由 ``sum(renorm_contributions.values())``
+            直接派生，与贡献之和**精确相等**（而非独立的 Σ(w_i·v_i)/Σ(w_i)，
+            避免极小权重时分子下溢导致 Σcontributions ≠ score 的不一致）。
         renorm_contributions: 每维度的归一化贡献 ``{dim: (w_i/Σw) * v_i}``；
-            各项之和在浮点精度内等于 ``score``（Property 3 自洽性）。
+            各项之和**精确等于** ``score``（Property 3 自洽性，由构造保证）。
+        renorm_weights: 每维度的归一化权重份额 ``{dim: w_i/Σw}``；
+            供调用方填写 ``ScoreContribution.weight`` 字段，避免重复计算。
     """
 
     score: float
     renorm_contributions: dict[str, float]
+    renorm_weights: dict[str, float]
 
 
 def _weighted_average(
     normalized: dict[str, float],
     weights: dict[str, float],
 ) -> _WeightedAverageResult:
-    """对有效维度做权重归一后的加权平均，并返回逐维贡献。
+    """对有效维度做权重归一后的加权平均，并返回逐维贡献与归一化权重。
 
     取 ``normalized`` 与 ``weights`` 共同存在的键作为有效维度，
-    计算归一化权重加权均值。
+    先计算各维度的归一化权重 ``renorm_w_i = w_i / Σw``，
+    再计算各维度贡献 ``contribution_i = renorm_w_i * v_i``，
+    最后令 ``score = sum(contribution_i)``。
+
+    ``score`` 由贡献求和直接派生，而非独立地计算 ``Σ(w_i*v_i)/Σw``。
+    这保证了即使 ``w_i`` 极小（如最小非规格化浮点数 5e-324），
+    ``Σcontributions == score`` 仍**精确成立**（由构造保证，而非浮点近似）。
 
     结果满足以下属性（供 Hypothesis 直接验证）：
 
     - **有界**（Property 3）：当所有 ``value ∈ [0,1]`` 且所有 ``weight >= 0``
-      时，``score ∈ [0,1]``。
-    - **贡献自洽**（Property 3）：``sum(renorm_contributions.values()) ≈ score``
-      在浮点精度内成立。
+      时，``score ∈ [0,1]``（因 renorm_w 之和 ≤ 1，且 v ∈ [0,1]）。
+    - **贡献自洽**（Property 3）：``sum(renorm_contributions.values()) == score``
+      **精确**成立（由构造保证，非浮点容差）。
     - **单调性**（Property 4）：加大任意单维 value 不会降低 score。
 
     Args:
@@ -129,15 +140,16 @@ def _weighted_average(
             不在 ``normalized`` 中的键会被忽略。
 
     Returns:
-        ``_WeightedAverageResult(score, renorm_contributions)``。
+        ``_WeightedAverageResult(score, renorm_contributions, renorm_weights)``。
         若 ``normalized`` 为空或所有有效维度的权重之和为 0，则返回
-        ``score=0.0``、``renorm_contributions={}``（调用方应据此输出 None）。
+        ``score=0.0``、``renorm_contributions={}``、``renorm_weights={}``
+        （调用方应据此输出 None）。
 
     Example:
         >>> result = _weighted_average({"a": 0.8, "b": 0.2}, {"a": 1.0, "b": 1.0})
         >>> abs(result.score - 0.5) < 1e-9
         True
-        >>> abs(sum(result.renorm_contributions.values()) - result.score) < 1e-9
+        >>> sum(result.renorm_contributions.values()) == result.score
         True
     """
     # 取两字典的交集维度（维度必须同时出现在 normalized 和 weights 中）
@@ -145,14 +157,22 @@ def _weighted_average(
     total_w = sum(weights[d] for d in dims)
 
     if total_w <= 0.0:
-        return _WeightedAverageResult(score=0.0, renorm_contributions={})
+        return _WeightedAverageResult(
+            score=0.0,
+            renorm_contributions={},
+            renorm_weights={},
+        )
 
-    score = sum(weights[d] * normalized[d] for d in dims) / total_w
     # renorm_weight_i = w_i / Σw；contribution_i = renorm_weight_i * v_i
-    renorm_contributions = {
-        d: (weights[d] / total_w) * normalized[d] for d in dims
-    }
-    return _WeightedAverageResult(score=score, renorm_contributions=renorm_contributions)
+    # score 由 Σcontribution 派生（而非独立的 Σ(w*v)/Σw），保证自洽性由构造保证。
+    renorm_weights = {d: weights[d] / total_w for d in dims}
+    renorm_contributions = {d: renorm_weights[d] * normalized[d] for d in dims}
+    score = sum(renorm_contributions.values())
+    return _WeightedAverageResult(
+        score=score,
+        renorm_contributions=renorm_contributions,
+        renorm_weights=renorm_weights,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +430,9 @@ def compute_fitness_score(
             continue
 
         if dim in wa.renorm_contributions:
-            # 有效维度：renorm_weight = w_i / Σw，contribution = renorm_weight * v_i
-            total_w_eff = sum(rules.weights[d] for d in included_normalized if d in rules.weights)
-            renorm_w = rules.weights[dim] / total_w_eff if total_w_eff > 0 else 0.0
+            # 有效维度：直接取 _weighted_average 已计算好的归一化权重与贡献，
+            # 避免重复计算 Σw 并确保与 fitness_score 的自洽性一致。
+            renorm_w = wa.renorm_weights[dim]
             contrib_val = wa.renorm_contributions[dim]
         else:
             # 排除维度：weight=0，contribution=0
