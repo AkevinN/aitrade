@@ -127,11 +127,25 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
     [localRange],
   )
 
+  /**
+   * 应用一个快捷预设区间：按预设规则算出起止日期，约束到本地范围后回调出去。
+   *
+   * 以 `anchorEnd`（本地数据末尾或今天）为锚点调用 `preset.build` 生成区间，
+   * 再经 {@link clampRange} 夹到 `localRange` 内，最后通过 `onChange` 通知父组件更新选中值。
+   *
+   * @param preset - 被点击的预设项，含 `build` 函数与展示标签（如「近1月」）
+   */
   const applyPreset = (preset: DateRangePreset) => {
     const nextRange = clampRange(preset.build(anchorEnd, localRange), localRange)
     onChange?.(nextRange)
   }
 
+  /**
+   * 一键把选中区间设为本地数据的完整可用区间。
+   *
+   * 取 `localRange` 的起止日期（截取到日，去掉时间部分）作为新区间并通过 `onChange` 回调；
+   * 若未传入 `localRange` 则直接返回、不做任何操作。
+   */
   const applyLocalRange = () => {
     if (!localRange) {
       return

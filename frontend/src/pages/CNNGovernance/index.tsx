@@ -179,6 +179,11 @@ const CNNGovernance: React.FC = () => {
     enabled: Boolean(selectedReplayId),
   })
 
+  /**
+   * 失效治理相关的查询缓存，触发生产模型、候选、历史、回放四个列表重新拉取。
+   *
+   * 用于晋级/拒绝/回滚等操作成功后刷新页面数据，使各面板同步到最新治理状态。
+   */
   const refreshGovernance = () => {
     void queryClient.invalidateQueries({ queryKey: ['cnn-governance-production'] })
     void queryClient.invalidateQueries({ queryKey: ['cnn-governance-candidates'] })
@@ -226,6 +231,12 @@ const CNNGovernance: React.FC = () => {
     return report
   }, [currentResult, report])
 
+  /**
+   * 校验主表单并发起 WF/OOS（Walk-Forward / 样本外）评估任务。
+   *
+   * 校验失败会抛出 form.validateFields 的 reject，提交成功后把返回的
+   * task_id 写入状态以驱动任务轮询，并弹出启动成功提示。
+   */
   const startEvaluate = async () => {
     const values = await form.validateFields()
     const req = baseRequest(values)
@@ -234,6 +245,12 @@ const CNNGovernance: React.FC = () => {
     message.success('WF/OOS 评估已启动')
   }
 
+  /**
+   * 校验主表单并发起候选模型训练任务（训练出待人工晋级的候选模型）。
+   *
+   * 校验失败会抛出 form.validateFields 的 reject，提交成功后把返回的
+   * task_id 写入状态以驱动任务轮询，并弹出启动成功提示。
+   */
   const startCandidate = async () => {
     const values = await form.validateFields()
     const req = baseRequest(values)
@@ -242,6 +259,14 @@ const CNNGovernance: React.FC = () => {
     message.success('候选模型训练已启动')
   }
 
+  /**
+   * 校验回放表单并发起治理回放回测任务（在历史区间上滚动模拟治理决策）。
+   *
+   * 从 replayForm 取值，把日期区间 range 拆成 start/end 并格式化为
+   * YYYY-MM-DD，连同滚动窗口参数（初始训练天数、评估期、测试期）、资金与
+   * 基准一起组装为 CNNGovernanceReplayRequest 提交。校验失败会抛出
+   * validateFields 的 reject，成功后写入 task_id 以驱动任务轮询并提示启动。
+   */
   const startReplay = async () => {
     const values = await replayForm.validateFields()
     const [start, end] = values.range

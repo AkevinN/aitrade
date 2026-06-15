@@ -522,6 +522,7 @@ const DataPrepare: React.FC = () => {
     const providers = (systemStatus?.providers || [])
       .filter((p) => p.name !== 'mock')
       .sort((a, b) => a.priority - b.priority)
+    /** 把数据源状态码转成中文标注：'available' 显示「可用」，其余一律「不可用」。 */
     const statusLabel = (status: string) => (status === 'available' ? '可用' : '不可用')
     return [
       { label: '自动（按优先级）', value: 'auto' },

@@ -111,6 +111,7 @@ const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const meta = pageMeta[location.pathname] || pageMeta['/']
 
   React.useEffect(() => {
+    /** 监听窗口宽度，<768px 时把 isNarrow 置为 true 以折叠侧边导航。 */
     const handleResize = () => setIsNarrow(window.innerWidth < 768)
     handleResize()
     window.addEventListener('resize', handleResize)

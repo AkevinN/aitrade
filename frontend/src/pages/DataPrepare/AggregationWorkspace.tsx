@@ -160,6 +160,11 @@ const AggregationWorkspace: React.FC<AggregationWorkspaceProps> = ({
   const hasError = Boolean(error)
   const symbolCount = availability.size
   const workspaceState = selectWorkspaceState(isLoading, hasError, symbolCount)
+  /**
+   * 统一包裹工作区内容的外壳：嵌入模式直接透传，独立模式套一层带标题的 Card。
+   *
+   * @param children - 当前渲染态（loading/error/empty/ready）下要展示的内容
+   */
   const renderShell = (children: React.ReactNode) => (
     embedded ? <>{children}</> : <Card title="本地聚合工作区">{children}</Card>
   )
@@ -257,6 +262,15 @@ const AggregationWorkspace: React.FC<AggregationWorkspaceProps> = ({
     })
   }, [commonRange])
 
+  /**
+   * 提交聚合配置并启动派生周期聚合任务。
+   *
+   * 先用 {@link validateAggregation} 校验当前配置与本地数据可用性：无效组合不发请求，
+   * 仅按 reason 弹出定向 warning 并保留配置；校验通过后由 {@link buildAggregateRequest}
+   * 组装请求并调用 `alphaService.aggregateData`。成功时把返回的 taskId 经
+   * {@link AggregationWorkspaceProps.onTaskStarted} 回传给页面并提示成功，失败时弹出错误信息。
+   * 全程用 `submitting` 标记请求中状态（按钮 loading）。
+   */
   const handleSubmit = async () => {
     const validation = validateAggregation(config, availability)
     if (!validation.valid) {

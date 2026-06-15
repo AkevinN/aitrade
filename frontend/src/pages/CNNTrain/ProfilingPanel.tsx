@@ -188,6 +188,11 @@ export const SuggestionView: React.FC<{
   const mapped = mapSuggestionToFormValues(suggestion)
   const mappedCount = Object.keys(mapped.values).length
 
+  /**
+   * 点击「填充到训练表单」按钮时的处理器。
+   *
+   * 把已映射的建议字段值和未映射条目数透传给 `onApply` 回调，由父组件决定如何回填表单。
+   */
   const handleApply = () => {
     onApply(mapped.values, mapped.unmapped.length)
   }
@@ -417,6 +422,12 @@ const ProfilingPanel: React.FC<ProfilingPanelProps> = ({
     }
   }, [artifactId, artifactOptions, open])
 
+  /**
+   * 触发「按标的现算」的画像评估。
+   *
+   * 缺少 `targetSymbol` 时直接清空结果并退出；否则先重置两条 mutation 与已有结果，
+   * 再发起 `runMutation` 重新计算当前标的的画像。
+   */
   const triggerRun = () => {
     if (!targetSymbol) {
       setResult(null)
@@ -428,6 +439,12 @@ const ProfilingPanel: React.FC<ProfilingPanelProps> = ({
     runMutation.mutate()
   }
 
+  /**
+   * 触发「从已有产物回放」的画像评估。
+   *
+   * 读取并去空白后的 `artifactId`，为空则不做任何动作；否则先重置两条 mutation 与已有结果，
+   * 再以该产物 id 发起 `artifactMutation`，复现历史画像而不重新现算。
+   */
   const triggerArtifact = () => {
     const id = artifactId.trim()
     if (!id) {

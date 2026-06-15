@@ -31,6 +31,16 @@ export function useWebSocket(topics: string[] = []) {
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const mountedRef = useRef(true)
 
+  /**
+   * 建立一条 WebSocket 连接并挂载全部事件回调。
+   *
+   * 组件已卸载或已有 OPEN 连接时直接跳过；否则新建连接并写入 `wsRef`。
+   * onopen 阶段按 `topics` 发送订阅消息，并启动 30 秒心跳 ping；onmessage 解析
+   * `task_update` 消息后写入 `taskStore`，解析失败静默忽略；onclose 清理心跳定时器
+   * 并在仍挂载时延迟 3 秒重连；onerror 主动关闭连接以触发 onclose 重连流程。
+   *
+   * 依赖 `topics`，其引用变化会重建该回调进而触发重连。
+   */
   const connect = useCallback(() => {
     if (!mountedRef.current) return
     if (wsRef.current?.readyState === WebSocket.OPEN) return

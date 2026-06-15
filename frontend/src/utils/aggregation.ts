@@ -174,6 +174,14 @@ export function computeAvailableSourceKinds(
     return result
   }
 
+  /**
+   * 判断某合约的周期集合中是否含有 bar（非 tick）周期。
+   *
+   * 只要存在任一不等于 `'tick'` 的周期（如 `'d'`、`'1m'`、`'30m'` 等）即视为命中。
+   *
+   * @param intervals - 该合约可用的周期标识集合
+   * @returns 含至少一个非 tick 周期时为 `true`，否则 `false`（空集亦为 `false`）
+   */
   const hasBar = (intervals: Set<string>): boolean => {
     for (const interval of intervals) {
       if (interval !== 'tick') {
