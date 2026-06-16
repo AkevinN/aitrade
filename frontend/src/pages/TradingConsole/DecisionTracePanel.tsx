@@ -26,6 +26,9 @@ import type {
 
 const { Text } = Typography
 
+/**
+ * {@link DecisionTracePanel} 组件 props。
+ */
 interface DecisionTracePanelProps {
   /** 关联决策的 signal_id；为空时不渲染（无可观测对象）。 */
   signalId?: string | null
@@ -41,13 +44,23 @@ const SECTION_TITLES: { key: string; title: string }[] = [
   { key: 'result', title: '结果段' },
 ]
 
-/** 数字字段安全格式化：null/undefined → 占位符。 */
+/**
+ * 数字字段安全格式化：把可能缺失的数值转成可直接渲染的字符串。
+ *
+ * @param value - 待格式化的数值；null/undefined/NaN 视为缺失
+ * @returns 缺失时返回占位符 "—"，否则返回数值的字符串形式
+ */
 function fmtNumber(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—'
   return String(value)
 }
 
-/** 布尔 → 是/否标签。 */
+/**
+ * 把布尔值渲染为「是/否」彩色标签，缺失值降级为占位符。
+ *
+ * @param value - 布尔字段；null/undefined 视为缺失
+ * @returns 缺失时返回灰色占位符 "—"，true 渲染绿色「是」，false 渲染默认色「否」
+ */
 function boolTag(value: boolean | null | undefined): React.ReactNode {
   if (value === null || value === undefined) return <Text type="secondary">—</Text>
   return value ? <Tag color="green">是</Tag> : <Tag color="default">否</Tag>
@@ -211,7 +224,13 @@ const ResultContent: React.FC<{ data?: TraceResultSection }> = ({ data }) => {
   )
 }
 
-/** 按段名渲染对应内容。 */
+/**
+ * 按段名分发到对应的段内容组件，并从 trace 中取出该段数据交给它。
+ *
+ * @param key - 六段之一的标识（run_header/inference/pricing/decision_logic/risk/result）
+ * @param trace - 完整过程档案；为 undefined 时各段组件自行渲染空态
+ * @returns 对应段的内容节点；key 不在六段内时返回 null
+ */
 function renderSection(key: string, trace?: DecisionTrace): React.ReactNode {
   const sections = trace?.sections
   switch (key) {
@@ -266,7 +285,15 @@ const DecisionTracePanel: React.FC<DecisionTracePanelProps> = ({ signalId }) => 
   const status = (error as { response?: { status?: number } } | undefined)?.response?.status
   const isNotFound = isError && status === 404
 
-  /** 各分组内容的统一状态包装：加载中 / 404 / 其它错误 / 正常内容。 */
+  /**
+   * 各分组内容的统一状态包装：把请求状态映射为对应展示。
+   *
+   * 按优先级判定：加载中显示 Spin；404（无过程档案）显示「暂无过程档案」；
+   * 其它错误显示通用错误提示；正常则委托 {@link renderSection} 渲染该段内容。
+   *
+   * @param key - 当前分组对应的段标识，用于命中正常态时选择段内容
+   * @returns 与当前请求状态匹配的内容节点
+   */
   const wrapContent = (key: string): React.ReactNode => {
     if (isLoading) {
       return (

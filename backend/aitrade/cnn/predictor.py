@@ -23,11 +23,19 @@ _BARS_PER_DAY: dict[str, int] = {
 
 
 def warmup_days(lookback: int, input_interval: str) -> int:
-    """推理 warm-up 回退的日历天数。
+    """计算推理 warm-up 需向前回退的日历天数。
 
     `lookback` 是 **bar 数**：先按周期折算成所需交易日数，再乘 2.5 的日历裕量
     （周末/节假日/停牌），下限 5 天。日频与历史公式 `lookback * 2.5` 等价；
     分钟频不再把 bar 数当天数（消除数百日分钟数据的过度拉取）。
+
+    Args:
+        lookback: 模型滑窗长度，单位为 **bar 数**（非天数）。
+        input_interval: K 线周期，如 "d" 日线、"30m"/"5m" 分钟线；
+            未识别的周期按每日 1 根 bar 处理。
+
+    Returns:
+        向前回退的日历天数（整数），恒 >= 5。
     """
     import math
 
@@ -42,12 +50,46 @@ def predict_cnn_signals(
     on_progress: Optional[Callable[[float, str], None]] = None,
     on_meta: Optional[Callable[[dict], None]] = None,
 ) -> pl.DataFrame:
-    """
-    Load a trained CNN model and generate prediction signals.
+    """加载已训练的 CNN 模型并在指定区间生成预测信号。
+
+    流程：
+    1. 加载 checkpoint，重建模型结构并恢复权重；
+    2. 以 warmup_days 向前扩展 start 日期，加载预热数据；
+    3. 对齐多证券时间轴、计算技术特征、填入分组张量；
+    4. 使用训练时的归一化统计量对特征标准化；
+    5. 滑动窗口批量推理，仅保留 [start, end] 区间内的信号。
+
+    Args:
+        model_name: 模型名称（不含 .pt 后缀），对应 CNN_MODEL_DIR/<name>.pt。
+        start: 信号生成起始日期（含）；实际加载数据会向前扩展 warmup_days 天。
+        end: 信号生成结束日期（含）。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+        on_meta: 推理完成后调用一次的元信息回调 ``(meta_dict) -> None``，可为 None；
+            meta_dict 含 target_symbol/lookback/input_interval/objective 等观测信息，不含凭证。
 
     Returns:
-        DataFrame with columns [datetime, vt_symbol, signal]
-        where signal is 0~1 probability (higher = more bullish).
+        polars DataFrame，输出列因 objective 而异；**末列恒为 ``objective``（字符串常量，
+        值 ∈ {``"classification"``, ``"regression"``, ``"path_class"``}），全行同值等于
+        checkpoint 中记录的训练目标，供消费方自描述消费**。
+
+        - **classification / regression**（四列）：
+          ``[datetime, vt_symbol, signal, objective]``；
+          classification 的 signal 为上涨概率（0~1），regression 为预测收益（无界）。
+
+        - **path_class**（八列）：
+          ``[datetime, vt_symbol, signal, prob_tp, prob_sl, prob_time_up, prob_time_down,
+          objective]``；
+          signal 恒等于 prob_tp（止盈先触发的概率）；
+          四列概率由 softmax 计算，行内和在数值误差内为 1。
+
+        所有 objective 下 datetime 均去除时区信息，与回测引擎的 bar datetime 对齐。
+        不含 objective 列的 legacy 信号帧（规则策略等其他 SignalProvider）经消费方
+        处理行为不变——本函数不修改消费方逻辑，向后兼容由消费方对多余列透传保证。
+
+    Raises:
+        FileNotFoundError: 模型文件不存在时抛出。
+        ValueError: checkpoint 的 num_classes 与 path_class 要求不符（非 4）时抛出；
+            或加载观测证券数据失败、推理后无结果时抛出。
     """
     import torch
 
@@ -60,6 +102,7 @@ def predict_cnn_signals(
         _extract_aligned_bars,
         _build_grouped_tensor,
     )
+    from .features import ALIGN_DROP_WARN_THRESHOLD, alignment_drop_rate
 
     # 1. Load checkpoint
     model_path = CNN_MODEL_DIR / f"{model_name}.pt"
@@ -79,8 +122,19 @@ def predict_cnn_signals(
     input_data_kind: str = train_config.get("input_data_kind", "bar")
     input_interval: str = train_config.get("input_interval", "d")
     dropout: float = model_config.get("dropout", 0.5)
-    # 分类模型 signal 为上涨概率(0~1)；回归模型 signal 为预测收益(无界)
+    # 分类模型 signal 为上涨概率(0~1)；回归模型 signal 为预测收益(无界)；
+    # path_class 模型 signal == prob_tp，另附 prob_sl/prob_time_up/prob_time_down。
     objective: str = train_config.get("objective", "classification")
+
+    # 冗余校验：path_class checkpoint 若存在 num_classes 键，其值必须为 4；
+    # 键缺失（旧 checkpoint 向后兼容）时不报错，仅在值存在且不等于 4 时拒绝。
+    if objective == "path_class":
+        num_classes = model_config.get("num_classes")
+        if num_classes is not None and num_classes != 4:
+            raise ValueError(
+                f"path_class checkpoint 的 num_classes 应为 4，实得 {num_classes}；"
+                "checkpoint 可能被手工篡改。"
+            )
 
     # Rebuild observation groups
     raw_groups = train_config.get("observation_groups", [])
@@ -122,6 +176,12 @@ def predict_cnn_signals(
         on_progress(38, "按公共时间轴对齐...")
 
     symbols, aligned_df = _align_frames_by_datetime(symbol_frames)
+
+    # 对齐丢弃率测量：旁路纯函数，不改变 aligned_df
+    drop_rate = alignment_drop_rate(symbol_frames, aligned_df.height)
+    if on_progress and drop_rate > 0:
+        drop_warn = "⚠️ " if drop_rate > ALIGN_DROP_WARN_THRESHOLD else ""
+        on_progress(40, f"{drop_warn}对齐丢弃率={drop_rate:.1%}，公共时间步={aligned_df.height}")
 
     all_features: dict[str, np.ndarray] = {}
     for vt_symbol in symbols:
@@ -213,15 +273,33 @@ def predict_cnn_signals(
         m_tensor = torch.FloatTensor(np.array(batch_masks)).to(device)
 
         with torch.no_grad():
-            probs = model(x_tensor, m_tensor).cpu().numpy().flatten()
+            out = model(x_tensor, m_tensor)
 
-        for i, anchor in enumerate(batch_indices):
-            dt = aligned_dates[anchor]
-            predictions.append({
-                "datetime": dt.replace(tzinfo=None),
-                "vt_symbol": target_symbol,
-                "signal": float(probs[i]),
-            })
+        if objective == "path_class":
+            # path_class：softmax 得到四类概率矩阵 [B, 4]；
+            # 列顺序与 dataset.PATH_CLASS_NAMES 对应：0=tp,1=sl,2=time_up,3=time_down。
+            probs_mat = torch.softmax(out, dim=1).cpu().numpy()  # [B, 4]
+            for i, anchor in enumerate(batch_indices):
+                dt = aligned_dates[anchor]
+                p = probs_mat[i]
+                predictions.append({
+                    "datetime": dt.replace(tzinfo=None),
+                    "vt_symbol": target_symbol,
+                    "signal": float(p[0]),       # signal 恒等于 prob_tp
+                    "prob_tp": float(p[0]),
+                    "prob_sl": float(p[1]),
+                    "prob_time_up": float(p[2]),
+                    "prob_time_down": float(p[3]),
+                })
+        else:
+            probs = out.cpu().numpy().flatten()
+            for i, anchor in enumerate(batch_indices):
+                dt = aligned_dates[anchor]
+                predictions.append({
+                    "datetime": dt.replace(tzinfo=None),
+                    "vt_symbol": target_symbol,
+                    "signal": float(probs[i]),
+                })
 
         if on_progress:
             pct = 55 + 40 * min(batch_start + batch_size, len(valid_indices)) / max(len(valid_indices), 1)
@@ -231,6 +309,9 @@ def predict_cnn_signals(
         raise ValueError("推理未产生任何预测结果，请检查日期范围")
 
     signal_df = pl.DataFrame(predictions)
+    # 末列追加 objective 标签：消费方无需再从 on_meta 获取目标类型，信号帧自描述。
+    # 字符串常量列；不含该列的 legacy 帧（规则策略等）由消费方对多余列透传兼容。
+    signal_df = signal_df.with_columns(pl.lit(objective).alias("objective"))
 
     if on_progress:
         on_progress(98, f"推理完成: {len(predictions)} 个信号, 均值={signal_df['signal'].mean():.4f}")
@@ -251,6 +332,7 @@ def predict_cnn_signals(
             "per_symbol_bars": {
                 sym: frame.height for sym, frame in symbol_frames.items()
             },
+            "alignment_drop_rate": drop_rate,
         })
 
     return signal_df

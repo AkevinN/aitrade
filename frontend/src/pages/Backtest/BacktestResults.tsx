@@ -3,11 +3,22 @@ import { Card, Row, Col, Statistic, Descriptions, Empty } from 'antd'
 
 import type { BacktestStatistics } from '../../types/alpha'
 
+/**
+ * {@link BacktestResults} 组件 props。
+ */
 interface BacktestResultsProps {
+  /** 回测统计指标；未开始回测时为 `undefined`（渲染占位空状态）。 */
   statistics?: BacktestStatistics
+  /** 初始资金（元），用于在统计数据缺失时展示默认余额。 */
   capital: number
 }
 
+/**
+ * 回测统计指标面板：展示总收益、年化、Sharpe、最大回撤等关键指标卡片，
+ * 以及成本假设、基准对比、持仓配置等详细 Descriptions。
+ *
+ * `statistics` 为 `undefined` 时展示「启动回测查看统计结果」占位。
+ */
 const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }) => {
   if (!statistics) {
     return (
@@ -44,6 +55,15 @@ const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }
     statistics.stamp_duty !== undefined ||
     statistics.slippage !== undefined ||
     statistics.price_add !== undefined
+  /**
+   * 把小数形式的费率换算成基点（bp）展示字符串。
+   *
+   * 1 个基点为万分之一，故将传入的小数乘以 10000 并保留一位小数；
+   * 用于成本假设区展示佣金率、印花税、滑点等。
+   *
+   * @param value - 小数形式的费率（如 0.0003 表示万分之三）；为 undefined 时显示占位符 "-"
+   * @returns 形如 "3.0 bp" 的字符串，未提供时返回 "-"
+   */
   const bps = (value?: number) => (value === undefined ? '-' : `${(value * 10000).toFixed(1)} bp`)
 
   return (
@@ -182,6 +202,11 @@ const BacktestResults: React.FC<BacktestResultsProps> = ({ statistics, capital }
             <Descriptions.Item label="卖出印花税">{bps(statistics.stamp_duty)}</Descriptions.Item>
             <Descriptions.Item label="成交滑点">{bps(statistics.slippage)}</Descriptions.Item>
             <Descriptions.Item label="限价缓冲">{bps(statistics.price_add)}</Descriptions.Item>
+            {statistics.veto_count !== undefined && statistics.veto_count > 0 && (
+              <Descriptions.Item label="否决买入次数" span={2}>
+                {statistics.veto_count}（prob_sl ≥ veto_threshold 而放弃的买入信号数）
+              </Descriptions.Item>
+            )}
           </Descriptions>
         </Card>
       )}

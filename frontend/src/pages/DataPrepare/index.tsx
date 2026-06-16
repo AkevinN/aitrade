@@ -105,8 +105,22 @@ const RESOURCE_COLUMN_LABELS: Record<string, string> = {
   ask_volume_1: '卖一量',
 }
 
+/**
+ * 将原始列名映射为中文可读标签；无映射时返回原始列名。
+ *
+ * @param column - 数据列名，如 "close" / "vt_symbol"
+ * @returns 中文标签，如 "收盘价" / "合约代码"
+ */
 const formatResourceColumnLabel = (column: string) => RESOURCE_COLUMN_LABELS[column] || column
 
+/**
+ * 将多行或逗号分隔的标的代码文本解析为字符串数组。
+ *
+ * 支持换行符与英文逗号两种分隔方式，自动去除首尾空白和空项。
+ *
+ * @param raw - 原始文本，如 "000001.SZSE\n600000.SSE" 或 "000001.SZSE,600000.SSE"
+ * @returns 合约代码数组，如 ["000001.SZSE", "600000.SSE"]
+ */
 const parseSymbols = (raw: string) => (
   raw
     .split(/[\n,]+/)
@@ -114,8 +128,20 @@ const parseSymbols = (raw: string) => (
     .filter(Boolean)
 )
 
+/**
+ * 去除合约代码末尾多余的小数点（如 "000001." → "000001"）。
+ *
+ * @param value - 原始合约代码字符串
+ * @returns 去除末尾点的字符串
+ */
 const formatResourceSymbol = (value: string) => value.replace(/\.$/, '')
 
+/**
+ * 将行情周期代码映射为中文标签；无映射时返回原始值，null/undefined 时返回 "-"。
+ *
+ * @param value - 周期代码，如 "d" / "1m" / "tick"
+ * @returns 中文标签，如 "日线" / "1分钟"
+ */
 const formatIntervalLabel = (value?: string | null) => {
   if (!value) {
     return '-'
@@ -123,6 +149,13 @@ const formatIntervalLabel = (value?: string | null) => {
   return INTERVAL_LABELS[value] || value
 }
 
+/**
+ * 将 ISO 时间字符串格式化为 "YYYY-MM-DD HH:mm:ss"；无效时返回原值或 fallback。
+ *
+ * @param value - ISO 时间字符串；null/undefined 时返回 fallback
+ * @param fallback - 缺省值，默认 "-"
+ * @returns 格式化后的时间字符串
+ */
 const formatDateTime = (value?: string | null, fallback = '-') => {
   if (!value) {
     return fallback
@@ -134,6 +167,13 @@ const formatDateTime = (value?: string | null, fallback = '-') => {
   return parsed.format(value.includes(':') && value.split(':').length >= 3 ? 'YYYY-MM-DD HH:mm:ss' : 'YYYY-MM-DD HH:mm')
 }
 
+/**
+ * 按行情周期粒度格式化时间字符串：日线只到日期，Tick 到秒，其余到分钟。
+ *
+ * @param value - ISO 时间字符串；null/undefined 时返回 "-"，无效时返回原值
+ * @param interval - 周期代码；"d" 输出 "YYYY-MM-DD"，"tick" 输出到秒，其余到分钟
+ * @returns 与周期粒度匹配的时间字符串
+ */
 const formatResourceDate = (value: string | null | undefined, interval?: string | null) => {
   if (!value) {
     return '-'
@@ -151,10 +191,24 @@ const formatResourceDate = (value: string | null | undefined, interval?: string 
   return parsed.format('YYYY-MM-DD HH:mm')
 }
 
+/**
+ * 把起止时间拼成 "起始 ~ 结束" 的区间字符串，两端粒度均随周期变化。
+ *
+ * @param start - 区间起始时间（ISO 字符串）；缺省端显示为 "-"
+ * @param end - 区间结束时间（ISO 字符串）；缺省端显示为 "-"
+ * @param interval - 周期代码，决定两端时间的显示粒度（同 formatResourceDate）
+ * @returns 形如 "2025-01-01 ~ 2025-06-01" 的区间字符串
+ */
 const formatDateRange = (start?: string | null, end?: string | null, interval?: string | null) => (
   `${formatResourceDate(start, interval)} ~ ${formatResourceDate(end, interval)}`
 )
 
+/**
+ * 将时间字符串转为毫秒时间戳，供排序比较使用。
+ *
+ * @param value - ISO 时间字符串；null/undefined 或无效值统一归零，排序时沉底
+ * @returns 毫秒级时间戳；无法解析时返回 0
+ */
 const getTimestamp = (value?: string | null) => {
   if (!value) {
     return 0
@@ -163,6 +217,14 @@ const getTimestamp = (value?: string | null) => {
   return parsed.isValid() ? parsed.valueOf() : 0
 }
 
+/**
+ * 根据资源类型生成一句人类可读的来源说明，用于列表与详情展示。
+ *
+ * 上传批次会附带文件名；派生K线区分由 Tick 还是由其他周期聚合而来。
+ *
+ * @param resource - 数据资源摘要，依据其 kind/source_kind/interval 等字段判定来源
+ * @returns 来源描述，如 "上传批次 · xxx.csv" / "由 Tick 聚合为 5m" / "原始日线数据"
+ */
 const formatResourceSource = (resource: DataResourceSummary) => {
   if (resource.kind === 'raw_bar_batch' || resource.kind === 'raw_tick_batch') {
     const name = resource.file_name ? ` · ${resource.file_name}` : ''
@@ -179,6 +241,12 @@ const formatResourceSource = (resource: DataResourceSummary) => {
   return resource.interval === 'd' ? '原始日线数据' : `原始 ${resource.interval} 数据`
 }
 
+/**
+ * 将资源类型代码映射为标签文案，用于 Tag 展示。
+ *
+ * @param kind - 资源类型；Tick 类（含批次）归为 "Tick"，K线批次单独成类
+ * @returns 中文/英文标签，如 "Tick" / "派生K线" / "K线批次" / "原始K线"
+ */
 const formatResourceKindLabel = (kind: DataResourceSummary['kind']) => {
   if (kind === 'raw_tick' || kind === 'raw_tick_batch') {
     return 'Tick'
@@ -192,6 +260,12 @@ const formatResourceKindLabel = (kind: DataResourceSummary['kind']) => {
   return '原始K线'
 }
 
+/**
+ * 将资源类型代码映射为 antd Tag 的预设色名，使不同类型在视觉上可区分。
+ *
+ * @param kind - 资源类型；与 formatResourceKindLabel 的分类口径一致
+ * @returns antd 颜色名，如 "gold"（Tick）/ "purple"（派生）/ "cyan"（K线批次）/ "blue"（原始K线）
+ */
 const formatResourceKindColor = (kind: DataResourceSummary['kind']) => {
   if (kind === 'raw_tick' || kind === 'raw_tick_batch') {
     return 'gold'
@@ -205,6 +279,16 @@ const formatResourceKindColor = (kind: DataResourceSummary['kind']) => {
   return 'blue'
 }
 
+/**
+ * 对数据资源列表做稳定排序，让最新、最细粒度、数据量最大的资源排在前面。
+ *
+ * 不修改入参，返回排序后的新数组。比较优先级依次为：
+ * 创建时间倒序 → 周期粒度（按 INTERVAL_PRIORITY，越细越靠前）→
+ * 结束时间倒序 → 行数倒序 → 合约代码按中文本地化升序。
+ *
+ * @param items - 待排序的资源摘要数组
+ * @returns 排序后的新数组（原数组不变）
+ */
 const sortResources = (items: DataResourceSummary[]) => (
   [...items].sort((left, right) => {
     const createdDiff = getTimestamp(right.created_at) - getTimestamp(left.created_at)
@@ -231,18 +315,41 @@ const sortResources = (items: DataResourceSummary[]) => (
   })
 )
 
+/**
+ * 从未知异常中提取最贴近用户的错误文案，供 message/Alert 展示。
+ *
+ * 优先级：后端返回的 response.data.detail → Axios/Error 的 message → fallback。
+ *
+ * @param error - 捕获到的异常，按 AxiosError 形态尝试读取后端 detail
+ * @param fallback - 兜底文案，前两级都取不到时使用
+ * @returns 用于展示的错误消息字符串
+ */
 const getErrorMessage = (error: unknown, fallback: string) => {
   const axiosError = error as AxiosError<{ detail?: string }>
   return axiosError.response?.data?.detail || axiosError.message || fallback
 }
 
+/**
+ * 数据资源表格：以紧凑表格展示一类资源（原始K线/Tick/派生/批次）并提供行级操作。
+ *
+ * 每行展示资源信息、时间区间、数据量，并提供预览/训练CNN/删除按钮；其中 Tick 原始数据
+ * 与批次类资源不显示「训练CNN」。传入 onSelectionChange 时启用多选（已合并批次不可勾选），
+ * 用于批次合并场景。
+ */
 const ResourceTable: React.FC<{
+  /** 当前标签页要展示的资源列表，已在外层排序 */
   data: DataResourceSummary[]
+  /** 列表为空时的占位文案，可据错误态切换提示语 */
   emptyText: string
+  /** 点击合约代码或「预览」时触发，入参为该行资源 */
   onPreview: (resource: DataResourceSummary) => void
+  /** 确认删除某行资源时触发，入参为该行资源 */
   onDelete: (resource: DataResourceSummary) => void
+  /** 点击「训练CNN」时触发，入参为该行资源；批次/原始Tick 行不渲染此按钮 */
   onTrain: (resource: DataResourceSummary) => void
+  /** 受控的已选中行 key 列表；仅在传入 onSelectionChange 时生效 */
   selectedRowKeys?: React.Key[]
+  /** 勾选变化回调；传入即开启行多选，不传则表格无选择列 */
   onSelectionChange?: (keys: React.Key[]) => void
 }> = ({ data, emptyText, onPreview, onDelete, onTrain, selectedRowKeys, onSelectionChange }) => (
   <Table<DataResourceSummary>
@@ -337,6 +444,15 @@ const ResourceTable: React.FC<{
   />
 )
 
+/**
+ * 数据准备工作台页面：统一管理行情数据的获取、导入、合并、预览与聚合。
+ *
+ * 左侧「原始数据获取」提供 K线在线下载、K线 CSV、Tick CSV 三种入口，下载/导入结果
+ * 均落为「待合并批次」而非直接写入正式资源；右侧「数据工作区」分标签页展示原始K线、
+ * K线/Tick 批次、派生周期与本地聚合，支持批次多选合并（合并规则由后端 preview 统一校验）、
+ * 单条资源预览、原始K线周期标签更正（仅移动文件不重采样），以及跳转 CNN 训练页并带上预设。
+ * 长耗时操作（下载、聚合）以任务形式异步执行，启动后顶部任务面板会自动滚入视野。
+ */
 const DataPrepare: React.FC = () => {
   const { message, modal } = App.useApp()
   const navigate = useNavigate()
@@ -369,6 +485,11 @@ const DataPrepare: React.FC = () => {
   // 任务面板在页面顶部，而聚合按钮在页面底部；提交后将面板滚动进视野，
   // 避免“提示已启动却看不到任何反应”的体验问题。
   const taskPanelRef = useRef<HTMLDivElement>(null)
+  /**
+   * 记录新启动的任务并把顶部任务面板平滑滚入视野。
+   *
+   * @param id - 新任务 id，写入 state 后驱动任务面板订阅其进度
+   */
   const handleTaskStarted = (id: string) => {
     setTaskId(id)
     requestAnimationFrame(() => {
@@ -401,6 +522,7 @@ const DataPrepare: React.FC = () => {
     const providers = (systemStatus?.providers || [])
       .filter((p) => p.name !== 'mock')
       .sort((a, b) => a.priority - b.priority)
+    /** 把数据源状态码转成中文标注：'available' 显示「可用」，其余一律「不可用」。 */
     const statusLabel = (status: string) => (status === 'available' ? '可用' : '不可用')
     return [
       { label: '自动（按优先级）', value: 'auto' },
@@ -417,6 +539,7 @@ const DataPrepare: React.FC = () => {
       range: [dayjs().subtract(1, 'year'), dayjs()],
       source_interval: 'd',
       provider: 'auto',
+      asset_class: 'stock',
     })
     barImportForm.setFieldsValue({
       interval: 'd',
@@ -464,6 +587,12 @@ const DataPrepare: React.FC = () => {
     [rawBarBatches, rawTickBatches],
   )
 
+  /**
+   * 校验下载表单并发起原始K线下载任务，结果落为待合并批次。
+   *
+   * 解析合约文本、按表单参数调用下载接口；provider 为 "auto" 时不下发，交由后端按优先级选源。
+   * 校验失败或接口报错时以 message 提示，不抛出。
+   */
   const handleDownload = async () => {
     try {
       const values = await downloadForm.validateFields()
@@ -475,6 +604,7 @@ const DataPrepare: React.FC = () => {
         start: values.range[0].format('YYYY-MM-DD'),
         end: values.range[1].format('YYYY-MM-DD'),
         provider: values.provider && values.provider !== 'auto' ? values.provider : undefined,
+        asset_class: (values.asset_class as 'stock' | 'etf' | 'cbond') || 'stock',
       })
       setTaskId(result.task_id)
       message.success('原始K线下载任务已启动')
@@ -485,6 +615,12 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 上传 CSV 后调用对应预览接口，把识别结果写入预览态供用户确认。
+   *
+   * @param kind - "bar" 走 K线预览接口，"tick" 走 Tick 预览接口
+   * @param file - 用户选择的本地 CSV 文件
+   */
   const previewCsv = async (kind: 'bar' | 'tick', file: File) => {
     setPreviewLoading(kind)
     try {
@@ -504,6 +640,14 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 生成 antd Dragger 的受控上传配置：仅接受单个 CSV，选中即触发预览而不真正上传。
+   *
+   * beforeUpload 返回 false 阻止默认上传，改由 previewCsv 处理；非 .csv 文件直接拒绝。
+   *
+   * @param kind - "bar" 或 "tick"，决定绑定到哪一套文件列表与预览态
+   * @returns 可直接展开到 Dragger 上的 UploadProps
+   */
   const buildUploadProps = (kind: 'bar' | 'tick'): UploadProps => ({
     beforeUpload: (file) => {
       if (!file.name.toLowerCase().endsWith('.csv')) {
@@ -534,6 +678,15 @@ const DataPrepare: React.FC = () => {
     maxCount: 1,
   })
 
+  /**
+   * 把已预览通过的 CSV 导入为待合并批次（不直接覆盖正式行情）。
+   *
+   * 前置校验：必须已上传并预览、且预览无缺失必填字段，否则仅提示不调用接口。
+   * K线导入会读取导入表单的周期与导入模式，Tick 固定 merge 模式。成功后清空文件与预览态
+   * 并刷新资源列表；失败以 message 提示，不抛出。
+   *
+   * @param kind - "bar" 调 K线导入接口，"tick" 调 Tick 导入接口
+   */
   const handleImport = async (kind: 'bar' | 'tick') => {
     const fileList = kind === 'bar' ? barCsvFile : tickCsvFile
     const preview = kind === 'bar' ? barPreview : tickPreview
@@ -585,6 +738,11 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定数据资源，若删除的正是当前预览资源则同时关闭预览，并刷新列表。
+   *
+   * @param resource - 待删除的资源摘要，按其 kind/key 定位
+   */
   const handleDeleteResource = async (resource: DataResourceSummary) => {
     try {
       await alphaService.deleteDataResource(resource.kind, resource.key)
@@ -598,6 +756,13 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 更正当前预览的原始K线资源的周期「标签」：仅移动文件、不重采样 K 线内容。
+   *
+   * 仅对 raw_bar 资源生效；草稿周期与现周期相同则直接提示返回。改动有破坏性（会移动文件），
+   * 故先弹 Modal 二次确认。成功后用接口返回的新 key/周期更新选中资源并刷新列表与详情缓存；
+   * 失败以 message 提示，不抛出。
+   */
   const handleRelocateInterval = async () => {
     if (!selectedResource || selectedResource.kind !== 'raw_bar' || !resourceDetail) {
       return
@@ -647,6 +812,15 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 把所选批次合并到正式资源：先 preview 校验，可合并再二次确认并执行合并。
+   *
+   * 至少选 1 个批次。先调 preview 接口让后端统一判断重叠/一致/连续等规则，不可合并则展示原因并返回；
+   * 可合并则弹 Modal 展示预计行数与冲突数，确认后调 merge 接口（合并时会重跑同一套校验，
+   * 避免 preview 后批次状态变化导致误合并），成功后清空所选、刷新列表。失败以 message 提示。
+   *
+   * @param kind - "raw_bar" 合并到正式K线，"raw_tick" 合并到正式Tick
+   */
   const handleMergeBatches = async (kind: 'raw_bar' | 'raw_tick') => {
     const selectedKeys = kind === 'raw_bar' ? selectedBarBatchKeys : selectedTickBatchKeys
     const keys = selectedKeys.map(String)
@@ -701,6 +875,12 @@ const DataPrepare: React.FC = () => {
     }
   }
 
+  /**
+   * 跳转到 CNN 训练页，并把该资源的标的、输入数据类型与周期作为预设带过去。
+   *
+   * @param resource - 作为训练输入的数据资源；raw_tick 视为 tick 输入，其余为 bar，
+   *   周期优先取 target_interval（派生资源）否则取 interval
+   */
   const handleTrainWithResource = (resource: DataResourceSummary) => {
     navigate('/cnn-train', {
       state: {
@@ -778,9 +958,21 @@ const DataPrepare: React.FC = () => {
                           <TextArea rows={4} placeholder="000001.SZSE&#10;399300.SZSE" />
                         </Form.Item>
                         <Form.Item
+                          label="品种"
+                          name="asset_class"
+                        >
+                          <Select
+                            options={[
+                              { label: 'A股股票', value: 'stock' },
+                              { label: 'ETF', value: 'etf' },
+                              { label: '可转债', value: 'cbond' },
+                            ]}
+                          />
+                        </Form.Item>
+                        <Form.Item
                           label="数据源"
                           name="provider"
-                          tooltip="选择行情数据源用于下载或补充；自动模式按优先级 tushare → akshare 选择。AKShare 仅支持 A 股，1 分钟数据仅近 5 个交易日。"
+                          tooltip="选择行情数据源用于下载或补充；自动模式按优先级 tushare → akshare 选择。AKShare 仅支持 A 股股票，ETF 请用 Tushare；1 分钟数据仅近 5 个交易日。"
                         >
                           <Select options={providerOptions} />
                         </Form.Item>

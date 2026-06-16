@@ -16,7 +16,11 @@ import {
 } from 'recharts'
 import type { EquityPoint } from './types'
 
+/**
+ * {@link ReturnComparisonChart} 组件 props。
+ */
 export interface ReturnComparisonChartProps {
+  /** 净值曲线数据点（须含 `strategyReturn`/`benchmarkReturn`/`excessReturn` 字段）。 */
   points: EquityPoint[]
   /** 图表高度（px），默认 280 */
   height?: number
@@ -27,10 +31,21 @@ const STRATEGY_COLOR = '#1668dc'
 const BENCHMARK_COLOR = '#8c8c8c'
 const EXCESS_COLOR = '#49aa19'
 
-/** 百分比格式化（保留两位小数）。 */
+/**
+ * 将收益率数值格式化为带百分号的字符串（保留两位小数）。
+ *
+ * @param v - 待格式化的收益率值（%，如 12.34 表示 12.34%）；`null`/`undefined` → `'-'`。
+ * @returns 格式化字符串，如 `"12.34%"` 或 `"-"`。
+ */
 const fmtPct = (v: number | null | undefined) =>
   v === null || v === undefined ? '-' : `${v.toFixed(2)}%`
 
+/**
+ * 策略 vs 基准累计收益对比图（基于 recharts）。
+ *
+ * 左轴展示策略与基准的累计收益率折线，右轴叠加超额收益填充区域。
+ * `points` 为空或无基准数据时渲染「暂无基准对比数据」占位。
+ */
 export default function ReturnComparisonChart({
   points,
   height = 280,

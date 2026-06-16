@@ -109,13 +109,41 @@ const LOSS_WEIGHTING_OPTIONS = [
 const OBJECTIVE_OPTIONS = [
   { label: '方向分类（输出上涨概率）', value: 'classification' },
   { label: '收益回归（直接预测涨跌幅）', value: 'regression' },
+  { label: '路径形态分类（四类剧本概率）', value: 'path_class' },
 ]
 
+/**
+ * 把比率（小数）格式化为保留一位小数的百分比字符串。
+ *
+ * @param value - 比率，单位为小数（0.123 表示 12.3%）；null/undefined 视为缺值
+ * @returns 形如 "12.3%" 的字符串；缺值返回 "-"
+ */
 const pct = (value?: number) => (value === undefined || value === null ? '-' : `${(value * 100).toFixed(1)}%`)
+
+/**
+ * 把数值格式化为保留三位小数的字符串，常用于 IC / AUC / F1 等指标。
+ *
+ * @param value - 待格式化的指标值；null/undefined 视为缺值
+ * @returns 保留三位小数的字符串；缺值返回 "-"
+ */
 const num3 = (value?: number | null) => (value === undefined || value === null ? '-' : value.toFixed(3))
 
+/**
+ * 训练历史 Epoch 明细表。
+ *
+ * 根据 `objective` 自动切换列配置：
+ * - `regression`：IC / RankIC / MAE / 方向准确率
+ * - `path_class`：tp_auc / sl_auc / macro_f1（四分类专属指标）
+ * - 其余（`classification`）：val_acc / AUC / F1
+ *
+ * 空值（null / undefined）统一渲染为 '-'。
+ *
+ * @param history - 后端 history 数组，元素为 {@link CNNHistoryItem}。
+ * @param objective - 训练目标，决定列配置分支。
+ */
 const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = ({ history, objective }) => {
   const isReg = objective === 'regression'
+  const isPathClass = objective === 'path_class'
   const columns = isReg
     ? [
         { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
@@ -126,27 +154,36 @@ const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = (
         { title: '方向准确率', dataIndex: 'val_dir_acc', width: 100, render: (v?: number) => pct(v) },
         { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (v?: number) => pct(v) },
       ]
-    : [
-        { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
-        { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
-        { title: 'Val Acc', dataIndex: 'val_acc', width: 90, render: (value: number) => pct(value) },
-        { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (value?: number) => pct(value) },
-        {
-          title: '超额',
-          dataIndex: 'val_excess_acc',
-          width: 90,
-          render: (value?: number) =>
-            value === undefined || value === null ? (
-              '-'
-            ) : (
-              <span style={{ color: value > 0 ? '#49aa19' : '#dc4446' }}>
-                {value > 0 ? '+' : ''}{(value * 100).toFixed(1)}%
-              </span>
-            ),
-        },
-        { title: 'AUC', dataIndex: 'val_auc', width: 80, render: num3 },
-        { title: 'F1', dataIndex: 'val_f1', width: 80, render: (value?: number) => (value === undefined ? '-' : value.toFixed(3)) },
-      ]
+    : isPathClass
+      ? [
+          { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+          { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+          { title: 'TP AUC', dataIndex: 'val_tp_auc', width: 90, render: num3 },
+          { title: 'SL AUC', dataIndex: 'val_sl_auc', width: 90, render: num3 },
+          { title: 'Macro F1', dataIndex: 'val_macro_f1', width: 100, render: num3 },
+          { title: 'LR', dataIndex: 'lr', width: 80, render: (v?: number) => (v === undefined || v === null ? '—' : v.toExponential(2)) },
+        ]
+      : [
+          { title: 'Epoch', dataIndex: 'epoch', width: 70, fixed: 'left' as const },
+          { title: 'Val Loss', dataIndex: 'val_loss', width: 90 },
+          { title: 'Val Acc', dataIndex: 'val_acc', width: 90, render: (value: number) => pct(value) },
+          { title: '基线', dataIndex: 'val_baseline_acc', width: 80, render: (value?: number) => pct(value) },
+          {
+            title: '超额',
+            dataIndex: 'val_excess_acc',
+            width: 90,
+            render: (value?: number) =>
+              value === undefined || value === null ? (
+                '-'
+              ) : (
+                <span style={{ color: value > 0 ? '#49aa19' : '#dc4446' }}>
+                  {value > 0 ? '+' : ''}{(value * 100).toFixed(1)}%
+                </span>
+              ),
+          },
+          { title: 'AUC', dataIndex: 'val_auc', width: 80, render: num3 },
+          { title: 'F1', dataIndex: 'val_f1', width: 80, render: (value?: number) => (value === undefined ? '-' : value.toFixed(3)) },
+        ]
   return (
     <Table
       size="small"
@@ -159,6 +196,14 @@ const LossTable: React.FC<{ history: CNNHistoryItem[]; objective?: string }> = (
   )
 }
 
+/**
+ * 把用户输入的多证券文本拆成去重前的代码列表。
+ *
+ * 以换行或逗号为分隔符切分，逐项去除首尾空白并丢弃空串。
+ *
+ * @param raw - 原始文本，证券代码以换行或逗号分隔
+ * @returns 非空、已 trim 的证券代码数组；无有效内容时返回空数组
+ */
 const parseSymbols = (raw: string) => (
   raw
     .split(/[\n,]+/)
@@ -166,9 +211,23 @@ const parseSymbols = (raw: string) => (
     .filter(Boolean)
 )
 
+/**
+ * 把张量形状数组渲染成可读字符串。
+ *
+ * @param shape - 各维大小组成的数组；null/undefined 表示形状不可用
+ * @returns 形如 "[6, 30, 4]" 的字符串；非数组时返回 "-"
+ */
 const shapeText = (shape?: number[] | null) =>
   Array.isArray(shape) ? `[${shape.join(', ')}]` : '-'
 
+/**
+ * 把画像置信度等级渲染成带悬浮说明的彩色标签。
+ *
+ * 颜色、文案、描述均取自 {@link confidenceStyle}，描述以 Tooltip 形式悬浮展示。
+ *
+ * @param confidence - 画像整体置信度等级
+ * @returns 渲染好的置信度 Tag（含 Tooltip）
+ */
 function profilingConfidenceTag(confidence: ConfidenceLevel) {
   const style = confidenceStyle(confidence)
   return (
@@ -198,9 +257,19 @@ const profilingSummaryValueStyle: React.CSSProperties = {
   fontWeight: 600,
 }
 
+/**
+ * 最近画像摘要条：在训练表单内联展示最近一次标的画像的关键字段。
+ *
+ * 展示整体置信度、来源（历史画像/本次评估）、可用性、标的与周期、有效 bar
+ * 数及 artifact_id；若画像携带方案建议，提示可在详情中回填训练表单。
+ * 点击「查看详情」回调由父组件打开完整画像面板。
+ */
 const ProfilingResultSummary: React.FC<{
+  /** 最近一次画像评估结果 */
   result: SymbolProfileResponse
+  /** true=展示的是历史缓存画像，false=本次刚评估的画像 */
   historical: boolean
+  /** 点击「查看详情」时触发，用于打开完整画像面板 */
   onOpenDetail: () => void
 }> = ({ result, historical, onOpenDetail }) => {
   return (
@@ -253,8 +322,21 @@ const ProfilingResultSummary: React.FC<{
   )
 }
 
-/** 真实网络结构卡片：模块树 + 逐层形状 + 参数量，数据全部来自后端加载权重后的真实实例 */
-const ArchitectureCard: React.FC<{ arch: CNNArchitecture | null; loading: boolean }> = ({ arch, loading }) => {
+/**
+ * 真实网络结构卡片：模块树 + 逐层形状 + 参数量。
+ *
+ * 数据全部来自后端加载权重后探查到的真实实例：展示输入/输出形状、可训练参数量、
+ * 逐层输出形状与参数量，以及 PyTorch 原生模块树。当结构与权重不完全匹配
+ * （`arch.verified === false`）或逐层形状探查失败（`arch.forward_error`）时给出告警。
+ * `loading` 为 true 时显示加载态；`arch` 为 null 时显示「无法探查」空态
+ * （通常因 PyTorch 未安装或模型读取失败）。
+ */
+const ArchitectureCard: React.FC<{
+  /** 后端探查到的真实网络结构；null 表示探查失败或尚未加载 */
+  arch: CNNArchitecture | null
+  /** 是否正在加载并探查结构，true 时展示 Spin 加载态 */
+  loading: boolean
+}> = ({ arch, loading }) => {
   const layerColumns = [
     { title: '#', width: 48, render: (_: unknown, __: unknown, idx: number) => idx + 1 },
     { title: '层', dataIndex: 'name', width: 150, render: (v: string) => <Text code>{v}</Text> },
@@ -352,6 +434,19 @@ const ArchitectureCard: React.FC<{ arch: CNNArchitecture | null; loading: boolea
   )
 }
 
+/**
+ * CNN 训练工作流页面：从选输入源到启动训练、查看已保存模型详情的完整闭环。
+ *
+ * 左栏四步表单：选输入源（标的/周期/时间范围）、配目标证券与语义观测组、
+ * 定义标签（含 OCO 三重障碍）、设训练参数；支持「按时间窗口」自动换算回看
+ * bar 数 T 并对超上限（{@link LOOKBACK_MAX}）做拦截，path_class 目标会锁定
+ * OCO 标签。右栏展示已保存模型列表与选中模型的真实训练历史、评估指标、
+ * 观测组与网络结构。还集成只读画像评估（{@link ProfilingPanel}），可把
+ * 画像建议回填表单。
+ *
+ * 通过路由 `location.state` 接收预设（preset，预填标的/周期等）和
+ * focusModelName（进入即打开指定模型详情）。
+ */
 const CNNTrain: React.FC = () => {
   const { message } = App.useApp()
   const location = useLocation()
@@ -539,6 +634,14 @@ const CNNTrain: React.FC = () => {
     }
   }, [focusModelName])
 
+  // path_class 目标依赖 OCO 三重障碍标签；选中时自动锁定 label_mode 为 'oco'。
+  // 解除 path_class 时不强制重置，让用户自行选择。
+  useEffect(() => {
+    if (objective === 'path_class') {
+      form.setFieldsValue({ label_mode: 'oco' })
+    }
+  }, [objective, form])
+
   // 当查看的模型变化时，拉取真实网络结构
   useEffect(() => {
     const name = viewDetail?.name
@@ -565,6 +668,14 @@ const CNNTrain: React.FC = () => {
     }
   }, [viewDetail?.name])
 
+  /**
+   * 校验观测组子表单并把一条新的语义观测组追加到列表。
+   *
+   * 证券列表支持数组（tags 模式）或多行/逗号文本，统一 trim 去空后入组。
+   * 角色为 target 时拒绝添加（目标证券在上方单独配置），证券为空时拒绝添加，
+   * 两种情况均以 message.warning 提示并 return。成功后重置子表单为默认值。
+   * 表单校验失败由 antd 表单自身提示，这里静默吞掉异常。
+   */
   const addGroup = async () => {
     try {
       const values = await groupForm.validateFields()
@@ -592,11 +703,24 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 按下标删除一条观测组。
+   *
+   * @param index - 待删除观测组在 observationGroups 中的下标
+   */
   const removeGroup = (index: number) => {
     setObservationGroups((current) => current.filter((_item, itemIndex) => itemIndex !== index))
   }
 
-  // 按当前关键配置自动生成模型名称：cnn_{标的}_{周期}_{标签}_{目标}_T{回看}_{计价口径}_{时间戳}
+  /**
+   * 按当前关键配置自动生成并回填模型名称。
+   *
+   * 命名格式为 `cnn_{标的}_{周期}_{标签}_{目标}_T{回看}_{计价口径}_{时间戳}`：
+   * 标的取目标证券去除非字母数字字符（缺失时用 'sym'）；周期对 tick 输入加 'tk' 前缀；
+   * 标签按 label_mode 缩写（nb/h{N}/sc/nsc/oco_tp{x}_sl{y}_h{z}）；目标 cls/reg；
+   * 计价口径 cl/no/nc/vw。末尾 MMDDHHmm 时间戳保证唯一、避免重名覆盖。
+   * 结果直接写入表单 name 字段，用户仍可手动修改。
+   */
   const autoFillModelName = () => {
     const sym = (targetSymbol || '').replace(/\.$/, '').replace(/[^0-9A-Za-z]/g, '') || 'sym'
     const kindInterval = `${inputDataKind === 'tick' ? 'tk' : ''}${inputInterval}`
@@ -630,6 +754,16 @@ const CNNTrain: React.FC = () => {
     form.setFieldsValue({ name })
   }
 
+  /**
+   * 校验主表单并提交 CNN 训练任务，记下返回的 task_id 以便轮询进度。
+   *
+   * 提交前做两道前端拦截：目标证券为空、回看窗口 T 超过 {@link LOOKBACK_MAX}，
+   * 均以 message.warning 提示并 return。阈值/止盈/止损按百分比转小数（除以 100
+   * 并取非负）；label_horizon 仅在 horizon_bars 模式下传，take_profit/stop_loss/
+   * max_hold 仅在 oco 模式下传；regression 与 path_class 目标强制 loss_weighting 为 'none'。
+   * 启动成功后写入 taskId 并提示；表单校验或网络异常时以 message.error 提示。
+   * 全程通过 submitting 控制按钮 loading 态。
+   */
   const handleTrain = async () => {
     try {
       const values = await form.validateFields()
@@ -666,7 +800,7 @@ const CNNTrain: React.FC = () => {
             values.label_mode === 'oco' ? Math.max(0, (values.oco_stop_loss_pct || 0) / 100) : undefined,
           max_hold: values.label_mode === 'oco' ? values.oco_max_hold : undefined,
         },
-        loss_weighting: values.objective === 'regression' ? 'none' : values.loss_weighting,
+        loss_weighting: (values.objective === 'regression' || values.objective === 'path_class') ? 'none' : values.loss_weighting,
         epochs: values.epochs,
         batch_size: values.batch_size,
         learning_rate: values.learning_rate,
@@ -685,6 +819,13 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 拉取指定模型的训练详情并填入右栏详情区。
+   *
+   * 成功后写入 viewDetail（触发网络结构探查）；失败以 message.error 提示。
+   *
+   * @param name - 模型名称
+   */
   const handleViewModel = async (name: string) => {
     try {
       const detail = await cnnService.getModel(name)
@@ -694,6 +835,14 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定 CNN 模型并刷新列表。
+   *
+   * 成功后提示并 refetch 模型列表；若被删模型正是当前详情区展示的模型，
+   * 一并清空 viewDetail。失败以 message.error 提示。
+   *
+   * @param name - 待删除模型名称
+   */
   const handleDeleteModel = async (name: string) => {
     try {
       await cnnService.deleteModel(name)
@@ -707,14 +856,29 @@ const CNNTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 把画像面板给出的方案建议回填到训练表单。
+   *
+   * 当前为 path_class 目标时，强制把建议里的 label_mode 覆盖为 'oco'（path_class
+   * 必须用 OCO 标签，避免禁用的 Select 显示非法值），并在提示中额外说明已锁定。
+   * 有可填字段时按是否存在未映射建议给出不同成功提示；无可填字段时给 warning。
+   *
+   * @param values - 可直接回填的表单字段键值对（已由画像面板映射）
+   * @param unmappedCount - 未能自动映射、需人工处理的建议条数
+   */
   const handleApplyProfilingSuggestion = (values: Record<string, unknown>, unmappedCount: number) => {
     if (Object.keys(values).length > 0) {
-      form.setFieldsValue(values)
-      message.success(
+      // path_class 必须使用 OCO 标签，若建议中携带了其他 label_mode，强制覆盖为 'oco'
+      // 并额外提示用户，避免禁用的 Select 显示非法值。
+      const isPathClass = objective === 'path_class'
+      const overrodeLabel = isPathClass && values.label_mode !== undefined && values.label_mode !== 'oco'
+      const merged = isPathClass ? { ...values, label_mode: 'oco' } : values
+      form.setFieldsValue(merged)
+      const baseMsg =
         unmappedCount > 0
           ? `已填充可映射建议，${unmappedCount} 条需人工处理`
-          : '已填充画像建议，请确认后再训练',
-      )
+          : '已填充画像建议，请确认后再训练'
+      message.success(overrodeLabel ? `${baseMsg}（建议的标签模式已被锁定为 OCO）` : baseMsg)
     } else {
       message.warning('当前建议没有可直接填充的训练字段')
     }
@@ -986,7 +1150,7 @@ const CNNTrain: React.FC = () => {
                   <Form.Item
                     label="预测目标"
                     name="objective"
-                    tooltip="方向分类：输出上涨概率；收益回归：直接预测涨跌幅，分数与幅度单调对应，可按预测收益排序/定仓。"
+                    tooltip="方向分类：输出上涨概率；收益回归：直接预测涨跌幅，分数与幅度单调对应，可按预测收益排序/定仓；路径形态分类：输出四类剧本概率（先触止盈/先触止损/到期小涨/到期小跌），需搭配 OCO 标签。"
                   >
                     <Select options={OBJECTIVE_OPTIONS} />
                   </Form.Item>
@@ -998,8 +1162,21 @@ const CNNTrain: React.FC = () => {
                       message="回归模式：标签为连续未来收益，损失用 Huber，评估看 IC/方向准确率；阈值仅用于剔除过小噪声，损失加权与噪声并类不适用。"
                     />
                   ) : null}
-                  <Form.Item label="标签模式" name="label_mode" rules={[{ required: true, message: '请选择标签模式' }]}>
-                    <Select options={LABEL_MODE_OPTIONS} />
+                  {objective === 'path_class' ? (
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 16 }}
+                      message="路径形态分类：标签模式已锁定为 OCO 三重障碍，输出四类剧本概率（先触止盈/先触止损/到期小涨/到期小跌）；损失加权不适用；回测可启用 veto_threshold 过滤高止损概率信号。"
+                    />
+                  ) : null}
+                  <Form.Item
+                    label="标签模式"
+                    name="label_mode"
+                    rules={[{ required: true, message: '请选择标签模式' }]}
+                    extra={objective === 'path_class' ? '路径形态分类依赖 OCO 三重障碍标签，已自动锁定。' : undefined}
+                  >
+                    <Select options={LABEL_MODE_OPTIONS} disabled={objective === 'path_class'} />
                   </Form.Item>
                   {labelMode === 'horizon_bars' ? (
                     <Form.Item
@@ -1158,7 +1335,7 @@ const CNNTrain: React.FC = () => {
                         name="loss_weighting"
                         tooltip="magnitude 按 |未来收益| 加权，让大波动样本主导梯度，避免对 +0.01% 和 +5% 一视同仁。回归模式下不适用。"
                       >
-                        <Select options={LOSS_WEIGHTING_OPTIONS} disabled={objective === 'regression'} />
+                        <Select options={LOSS_WEIGHTING_OPTIONS} disabled={objective === 'regression' || objective === 'path_class'} />
                       </Form.Item>
                     </Col>
                   </Row>
@@ -1229,7 +1406,12 @@ const CNNTrain: React.FC = () => {
                     <Descriptions.Item label="目标证券">{String(viewDetail.train_config.target_symbol || '-')}</Descriptions.Item>
                     <Descriptions.Item label="输入">{String(viewDetail.train_config.input_data_kind || 'bar')} / {String(viewDetail.train_config.input_interval || 'd')}</Descriptions.Item>
                     <Descriptions.Item label="预测目标">
-                      {String(viewDetail.train_config.objective || 'classification') === 'regression' ? '收益回归' : '方向分类'}
+                      {(() => {
+                        const obj = String(viewDetail.train_config.objective || 'classification')
+                        if (obj === 'regression') return '收益回归'
+                        if (obj === 'path_class') return '路径形态分类（四类）'
+                        return '方向分类'
+                      })()}
                     </Descriptions.Item>
                     <Descriptions.Item label="标签">{String((viewDetail.train_config.label_spec as { mode?: string } | undefined)?.mode || '-')}</Descriptions.Item>
                     <Descriptions.Item label="最佳验证损失">{viewDetail.best_val_loss?.toFixed(4) || '-'}</Descriptions.Item>
@@ -1272,6 +1454,46 @@ const CNNTrain: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="多数类基线">{pct(best.val_baseline_acc)}</Descriptions.Item>
                           </Descriptions>
+                        </Card>
+                      )
+                    }
+                    if (detailObjective === 'path_class') {
+                      // class_distribution 来自训练 result，通过 dataset_info 携带
+                      const classDist = (viewDetail.dataset_info as Record<string, unknown> | undefined)?.class_distribution as
+                        | { tp_first?: number; sl_first?: number; time_up?: number; time_down?: number }
+                        | undefined
+                      // path_class 的"跑赢"判据：TP AUC > 0.5（先触止盈识别力超随机）。
+                      // 后端 epoch_row 不写 val_excess_acc，不能复用通用 beats/excess 变量。
+                      const tpAuc = best.val_tp_auc
+                      const tpBeats = tpAuc !== undefined && tpAuc !== null && tpAuc > 0.5
+                      return (
+                        <Card size="small" title="模型评估（最佳 Epoch · 路径形态分类）" style={{ marginBottom: 16 }}>
+                          <Descriptions size="small" bordered column={2}>
+                            <Descriptions.Item label="TP AUC（先触止盈）">{num3(best.val_tp_auc)}</Descriptions.Item>
+                            <Descriptions.Item label="SL AUC（先触止损）">{num3(best.val_sl_auc)}</Descriptions.Item>
+                            <Descriptions.Item label="Macro F1">{num3(best.val_macro_f1)}</Descriptions.Item>
+                            <Descriptions.Item label="验证损失">{best.val_loss?.toFixed(4) ?? '-'}</Descriptions.Item>
+                            <Descriptions.Item label="TP 识别力">
+                              <Tag color={tpBeats ? 'green' : 'red'}>
+                                {tpBeats ? 'TP 识别力超随机' : 'TP 识别力未超随机'}
+                              </Tag>
+                            </Descriptions.Item>
+                            <Descriptions.Item label="先触止盈占比(验证)">{pct(valPosRatio)}</Descriptions.Item>
+                          </Descriptions>
+                          {classDist ? (
+                            <Descriptions
+                              size="small"
+                              bordered
+                              column={2}
+                              style={{ marginTop: 12 }}
+                              title="样本类别分布（训练集）"
+                            >
+                              <Descriptions.Item label="先触止盈">{classDist.tp_first ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="先触止损">{classDist.sl_first ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="到期小涨">{classDist.time_up ?? '-'}</Descriptions.Item>
+                              <Descriptions.Item label="到期小跌">{classDist.time_down ?? '-'}</Descriptions.Item>
+                            </Descriptions>
+                          ) : null}
                         </Card>
                       )
                     }

@@ -34,9 +34,12 @@ def clip_to_as_of(df: pl.DataFrame, as_of: datetime) -> pl.DataFrame:
     - 空 frame：直接返回（过滤后仍为空）。
     - 缺少 datetime 列：视为无法裁剪，原样返回（由上层保证 frame 合法）。
 
-    :param df: 输入行情 frame（含 datetime 列）
-    :param as_of: 截止时间（含义为"站在该时刻回看"），保留 <= as_of 的行
-    :return: 仅含 datetime <= as_of 的行、按 datetime 升序排列的新 frame
+    Args:
+        df: 输入行情 frame（含 datetime 列）。
+        as_of: 截止时间（含义为"站在该时刻回看"），保留 <= as_of 的行。
+
+    Returns:
+        仅含 datetime <= as_of 的行、按 datetime 升序排列的新 frame。
     """
     # 缺少时间列时无法裁剪，原样返回（防御性处理，正常路径不会触发）
     if _DATETIME_COLUMN not in df.columns:
@@ -59,9 +62,12 @@ def effective_right_bound(df: pl.DataFrame, as_of: datetime) -> datetime | None:
     - 裁剪后为空（包括空 frame、或 as_of 早于全部数据）：返回 None。
     - 缺少 datetime 列：返回 None。
 
-    :param df: 输入行情 frame（含 datetime 列）
-    :param as_of: 截止时间，仅纳入 <= as_of 的行
-    :return: 裁剪后最大 datetime（必然 <= as_of）；裁剪后为空时返回 None
+    Args:
+        df: 输入行情 frame（含 datetime 列）。
+        as_of: 截止时间，仅纳入 <= as_of 的行。
+
+    Returns:
+        裁剪后最大 datetime（必然 <= as_of）；裁剪后为空时返回 None。
     """
     clipped = clip_to_as_of(df, as_of)
 
@@ -74,7 +80,21 @@ def effective_right_bound(df: pl.DataFrame, as_of: datetime) -> datetime | None:
 
 
 def load_local_range(lab, vt_symbol: str, interval: str) -> tuple[datetime | None, datetime | None]:
-    """只读获取本地完整数据区间，用于 unavailable_reason 诊断。"""
+    """只读获取本地完整数据区间（最早 / 最晚 datetime），用于 unavailable_reason 诊断。
+
+    不限定时间窗，读取该标的本地落地的全部 bar，仅用于在画像不可用时向上层
+    报告"本地实际有哪段数据"，辅助判断 as_of 是否落在可用范围之外。
+
+    纯函数：只调用 AlphaLab 的只读读取接口，不做聚合或写入。
+
+    Args:
+        lab: AlphaLab 实例，提供 load_bar_frame_any_range 只读读取接口。
+        vt_symbol: 合约代码，内部会先经 normalize_vt_symbol 归一化。
+        interval: K 线周期，如 "d"、"30m"。
+
+    Returns:
+        (最早 datetime, 最晚 datetime) 二元组；本地无数据或缺 datetime 列时返回 (None, None)。
+    """
     normalized = normalize_vt_symbol(vt_symbol)
     df = lab.load_bar_frame_any_range(normalized, interval, include_derived=True)
     if df is None or df.is_empty() or _DATETIME_COLUMN not in df.columns:
@@ -89,9 +109,23 @@ def _load_window_frame(
     as_of: datetime,
     lookback_days: int,
 ) -> pl.DataFrame | None:
-    """只读加载 as_of 左侧窗口行情并再次物理裁剪。
+    """只读加载 as_of 左侧 lookback_days 天窗口的行情，并再次物理裁剪到 as_of。
 
+    取窗口 [as_of - lookback_days, as_of] 的 bar，加载后再过一遍 clip_to_as_of
+    做物理右裁剪（双保险，杜绝任何 datetime > as_of 的行流入下游指标计算）。
+    若 as_of 带时区会先剥成 naive；lookback_days 下限按 1 天处理。
     该函数只调用 AlphaLab 的只读读取接口，不调用任何聚合或写入方法。
+
+    Args:
+        lab: AlphaLab 实例，提供 load_bar_frame 只读读取接口。
+        vt_symbol: 合约代码，内部会先经 normalize_vt_symbol 归一化。
+        interval: K 线周期，如 "d"、"30m"。
+        as_of: 截止时间（窗口右边界，含）；带时区会被剥为 naive。
+        lookback_days: 向前回看的日历天数，小于 1 时按 1 处理。
+
+    Returns:
+        仅含 datetime <= as_of、按时间升序的窗口 frame；
+        窗口内无数据或裁剪后为空时返回 None。
     """
     normalized = normalize_vt_symbol(vt_symbol)
     if as_of.tzinfo is not None:

@@ -8,16 +8,25 @@ import { isIntradayBarFreq } from '../../utils/barFreq'
 
 const { Text } = Typography
 
+/**
+ * {@link PlanList} 组件 props。
+ */
 interface PlanListProps {
+  /** 交易计划摘要列表（来自 `GET /api/live/plans`）。 */
   plans: TradingPlanSummary[]
+  /** 列表加载态（影响 Table 的 loading 遮罩）。 */
   loading?: boolean
   /** 启停切换中的 plan_id（行内 Switch loading）。 */
   togglingId?: string | null
   /** 触发中的 plan_id（行内触发按钮 loading）。 */
   runningId?: string | null
+  /** 切换启停状态的回调。 */
   onToggle: (planId: string, enabled: boolean) => void
+  /** 立即触发决策的回调。 */
   onRun: (planId: string) => void
+  /** 打开编辑弹窗的回调。 */
   onEdit: (planId: string) => void
+  /** 删除计划的回调。 */
   onDelete: (planId: string) => void
 }
 

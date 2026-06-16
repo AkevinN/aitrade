@@ -8,6 +8,9 @@ import type { LiveDecisionResult, RiskDetailItem } from '../../types/live'
 
 const { Text } = Typography
 
+/**
+ * {@link RiskDetailPanel} 组件 props。
+ */
 interface RiskDetailPanelProps {
   /** 当前决策任务（来自 useTask 订阅）。任务完成后读取 task.result.risk_detail 渲染。 */
   task?: Task | null

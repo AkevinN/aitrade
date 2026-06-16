@@ -12,7 +12,7 @@ AlphaLab-compatible constructor.
 import polars as pl
 
 from ..lab import AlphaLab, BarData
-from ..logger import logger
+from ..logger import logger  # noqa: F401
 
 # Re-export shared types for backward compatibility
 from ...backtest.types import Direction, Offset, OrderData, TradeData  # noqa: F401
@@ -21,17 +21,31 @@ from ...backtest.pnl import ContractDailyResult, PortfolioDailyResult  # noqa: F
 
 
 class BacktestingEngine(_SharedEngine):
-    """Alpha backtesting engine — wraps shared engine with AlphaLab constructor
-    and Jupyter-specific visualization methods."""
+    """Alpha 回测引擎——在共享引擎基础上封装 AlphaLab 构造方式与 Jupyter 可视化方法。
+
+    相比 _SharedEngine，新增：
+    1. 接受 AlphaLab 实例构造（无需手动传 data_loader）；
+    2. show_chart：展示净值/回撤/日盈亏分布四子图；
+    3. show_performance：展示策略收益/超额/换手率/超额回撤五子图（含基准对比）。
+    """
 
     def __init__(self, lab: AlphaLab) -> None:
-        """Constructor — accepts AlphaLab which satisfies BarDataLoader protocol."""
+        """初始化回测引擎，绑定 AlphaLab 数据源。
+
+        Args:
+            lab: AlphaLab 实例，满足 BarDataLoader 协议，
+                同时用于 show_performance 中加载基准行情。
+        """
         super().__init__(data_loader=lab)
         # Keep a reference for show_performance (needs load_bar_data directly)
         self._lab: AlphaLab = lab
 
     def show_chart(self) -> None:
-        """Display chart (Jupyter/notebook only)"""
+        """展示回测结果四子图：净值、回撤、日盈亏柱状图、日盈亏分布（仅 Jupyter 环境）。
+
+        需在 run_backtesting 之后调用，图表高度 1000px、宽度 1000px。
+        依赖 plotly，若未安装则运行时报错。
+        """
         import plotly.graph_objects as go               # type: ignore
         from plotly.subplots import make_subplots       # type: ignore
 
@@ -70,7 +84,18 @@ class BacktestingEngine(_SharedEngine):
         fig.show()
 
     def show_performance(self, benchmark_symbol: str) -> None:
-        """Display performance metrics (Jupyter/notebook only)"""
+        """展示策略绩效五子图（仅 Jupyter 环境）：收益率、超额收益、换手率、超额回撤、含费超额回撤。
+
+        自动加载基准行情计算相对收益，同时计算累计手续费对净值的拖累。
+        图表高度 1500px、宽度 1200px，白色背景。
+
+        Args:
+            benchmark_symbol: 基准合约代码，如 "000300.SSE"，
+                需在 AlphaLab 数据范围内且与回测区间对齐。
+
+        Raises:
+            ImportError: plotly 未安装时抛出。
+        """
         import plotly.graph_objects as go               # type: ignore
         from plotly.subplots import make_subplots       # type: ignore
 

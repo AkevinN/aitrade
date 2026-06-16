@@ -26,9 +26,23 @@ FEATURE_NAMES: list[str] = [
     "high_low_ratio",
 ]
 
+ALIGN_DROP_WARN_THRESHOLD: float = 0.05
+"""多标的对齐丢弃率告警阈值。
+
+对齐丢弃率超过此值时，dataset / trainer / predictor 均会向调用方发出告警，
+提示停牌或数据缺失导致样本流失比例偏高。默认 5%。
+"""
+
 
 def check_torch_available() -> bool:
-    """检查 PyTorch 是否可用。"""
+    """检查当前环境是否安装了 PyTorch。
+
+    通过尝试 import torch 判断，不触发任何模型加载或 CUDA 初始化，
+    供调用方在进入训练/推理前做能力探测、给出友好降级提示。
+
+    Returns:
+        torch 可正常导入时返回 True，缺失（ImportError）时返回 False。
+    """
     try:
         import torch  # noqa: F401
         return True
@@ -37,6 +51,16 @@ def check_torch_available() -> bool:
 
 
 def _normalize_symbol_list(symbols: list[str]) -> list[str]:
+    """规范化证券代码列表并去重（保持首次出现顺序）。
+
+    空字符串与纯空白项会被过滤掉；代码格式经 normalize_vt_symbol 标准化。
+
+    Args:
+        symbols: 原始证券代码列表，允许含空项。
+
+    Returns:
+        去重后的规范化代码列表，顺序与首次出现一致。
+    """
     from ..alpha.lab import normalize_vt_symbol
 
     return list(dict.fromkeys(
@@ -52,12 +76,24 @@ def normalize_observation_groups(
     observation_groups: list[dict[str, Any]] | None,
     vt_symbols: list[str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
-    """
-    Build a normalized semantic group list.
+    """构建规范化的语义分组列表。
 
-    Compatibility behavior:
-    - if observation_groups is empty, map legacy vt_symbols into target + custom
-    - target group is always injected as the first group
+    - target 组始终插入为第一组（role="target"，symbols=[target_symbol]）。
+    - observation_groups 为空时，将 vt_symbols[1:] 打包为单一 "custom" 组（兼容旧接口）。
+    - 来自 API 的 Pydantic 枚举 role（如 "ObservationRole.sector"）统一规整为小写字符串。
+
+    Args:
+        target_symbol: 预测目标证券代码；None 时取 vt_symbols[0]（两者均缺则抛 ValueError）。
+        observation_groups: 语义分组配置列表，每项含 role/name/symbols；None 或空列表触发兼容逻辑。
+        vt_symbols: 旧版兼容用的证券代码列表；observation_groups 有内容时仅用于推断 target_symbol。
+
+    Returns:
+        (target_symbol, groups)：
+        - target_symbol: 规范化后的目标证券代码。
+        - groups: 规范化后的分组列表，第一项始终为 target 组。
+
+    Raises:
+        ValueError: 未能确定 target_symbol，或最终分组列表为空时抛出。
     """
     from ..alpha.lab import normalize_vt_symbol
 
@@ -121,7 +157,24 @@ def _load_market_frame(
     input_data_kind: str,
     input_interval: str,
 ) -> pl.DataFrame:
-    """Load local raw/derived bar frame for CNN input."""
+    """加载单只证券的本地 K 线/Tick 聚合数据帧，供 CNN 输入使用。
+
+    先尝试精确区间加载，失败或为空时查询本地已有区间范围并给出更明确的报错提示。
+    代码经 normalize_vt_symbol 规范化，返回结果按 datetime 升序排列。
+
+    Args:
+        vt_symbol: 证券代码（允许未规范化格式，内部自动转换）。
+        start: 加载起始日期（含）。
+        end: 加载结束日期（含）。
+        input_data_kind: 数据种类，"bar" 或 "tick"。
+        input_interval: K 线周期，"d" | "1m" | "5m" | "10m" | "15m" | "30m" | "60m"。
+
+    Returns:
+        按 datetime 升序排列的 polars DataFrame，含 open/high/low/close/volume 等列。
+
+    Raises:
+        ValueError: 指定区间内无数据，或本地完全无该证券数据时抛出，并提示本地已有区间。
+    """
     from ..alpha import AlphaLab
     from ..alpha.lab import normalize_vt_symbol
     from ..config import ALPHA_LAB_PATH
@@ -158,7 +211,22 @@ def _load_market_frame(
 
 
 def _align_frames_by_datetime(symbol_frames: dict[str, pl.DataFrame]) -> tuple[list[str], pl.DataFrame]:
-    """Inner join all symbols by common datetimes."""
+    """按公共时间轴内连接所有证券的 K 线帧，生成宽表。
+
+    对每只证券重命名列（open → {vt_symbol}__open 等），逐只 inner join，
+    保留所有证券均有数据的时间点，结果按 datetime 升序排列。
+
+    Args:
+        symbol_frames: 证券代码 → 单证券 K 线 DataFrame 的映射，每帧须含 datetime 列。
+
+    Returns:
+        (symbols, merged)：
+        - symbols: 参与对齐的证券代码列表（与 symbol_frames 键顺序一致）。
+        - merged: 宽格式 DataFrame，列名形如 {vt_symbol}__open/close/… 及 datetime。
+
+    Raises:
+        ValueError: 所有证券对齐后没有公共时间点（宽表为空）时抛出。
+    """
     merged: pl.DataFrame | None = None
     symbols = list(symbol_frames.keys())
 
@@ -178,8 +246,51 @@ def _align_frames_by_datetime(symbol_frames: dict[str, pl.DataFrame]) -> tuple[l
     return symbols, merged.sort("datetime")
 
 
+def alignment_drop_rate(symbol_frames: dict[str, pl.DataFrame], aligned_height: int) -> float:
+    """对齐丢弃率 = (max 各标的对齐前行数 - 对齐后行数) / max 各标的行数。
+
+    单标的或空字典时返回 0.0（无跨标的对齐），因此对单标的场景调用此函数永远安全。
+    常与 `_align_frames_by_datetime` 配合使用：先对齐取得 aligned_height，再调此函数
+    测量因停牌/数据缺失导致的样本流失比例。
+
+    本函数是纯函数（只读），绝不修改 symbol_frames 中任何 DataFrame，也不触碰
+    ``_align_frames_by_datetime`` 的返回值——调用前后 merged 输出完全一致。
+
+    Args:
+        symbol_frames: 证券代码 → 对齐前 K 线帧的映射；``_align_frames_by_datetime``
+            入参相同的字典即可。
+        aligned_height: ``_align_frames_by_datetime`` 返回的 merged DataFrame 的行数，
+            即各标的公共时间步数。
+
+    Returns:
+        0.0 ~ 1.0 之间的丢弃率；单标的或空字典时返回 0.0。
+
+    Example:
+        >>> # A=50 行，B=45 行（B 有 5 天停牌），inner join 后 45 行
+        >>> dr = alignment_drop_rate({"A": frame_a, "B": frame_b}, aligned_height=45)
+        >>> # dr == (50 - 45) / 50 == 0.1
+    """
+    heights = [f.height for f in symbol_frames.values()]
+    max_h = max(heights) if heights else 0
+    if max_h <= 0 or len(heights) <= 1:
+        return 0.0
+    return max(0.0, (max_h - aligned_height) / max_h)
+
+
 def _extract_aligned_bars(aligned_df: pl.DataFrame, vt_symbol: str) -> list[dict[str, Any]]:
-    """Extract one symbol's aligned OHLCV sequence from the joined frame."""
+    """从对齐宽表中提取单只证券的 OHLCV 序列。
+
+    将宽表中 {vt_symbol}__open/high/low/close/volume 等列展开为行字典列表，
+    附带 datetime 字段，与 _compute_features 的输入格式一致。
+
+    Args:
+        aligned_df: _align_frames_by_datetime 返回的对齐宽表，含 datetime 列。
+        vt_symbol: 目标证券代码，用于定位 {vt_symbol}__* 列。
+
+    Returns:
+        长度与 aligned_df 行数相同的字典列表，每项含
+        datetime/open/high/low/close/volume 键。
+    """
     rows: list[dict[str, Any]] = []
     for row in aligned_df.iter_rows(named=True):
         rows.append(
@@ -196,7 +307,23 @@ def _extract_aligned_bars(aligned_df: pl.DataFrame, vt_symbol: str) -> list[dict
 
 
 def _compute_features(bars: list[dict[str, Any]]) -> np.ndarray:
-    """Calculate six simple technical channels for one symbol."""
+    """为单只证券计算六个技术特征通道。
+
+    特征列表（与 FEATURE_NAMES 顺序对应）：
+    0. pct_change    — 日涨跌幅（close 一阶差分归一化）
+    1. volume_ratio  — 成交量相对 5 日均量的比值
+    2. amplitude     — 振幅（(high-low)/前收）
+    3. ma5_diff      — 收盘价相对 5 日均价的偏离度
+    4. ma20_diff     — 收盘价相对 20 日均价的偏离度
+    5. high_low_ratio — (high-low)/close，衡量当日价格区间
+
+    Args:
+        bars: _extract_aligned_bars 返回的 OHLCV 行字典列表，顺序为时间升序。
+
+    Returns:
+        形状 [T, 6] 的 float32 ndarray，T 为 bars 长度；
+        前几行因均线/比值窗口未满而保持 0 值，属正常行为。
+    """
     closes = np.array([bar["close"] for bar in bars], dtype=np.float64)
     highs = np.array([bar["high"] for bar in bars], dtype=np.float64)
     lows = np.array([bar["low"] for bar in bars], dtype=np.float64)
@@ -232,7 +359,23 @@ def _build_grouped_tensor(
     """按观测分组把各证券特征填入 [C, T, S, G] 张量，并生成分组掩码 [1, 1, 1, S, G]。
 
     训练（build_dataset）与推理（predictor）共用同一套填充逻辑，避免两处实现漂移。
-    某个位置缺少特征时保持 0 值且掩码为 0（视为占位/无效证券）。
+    遍历每个分组内的证券，将其 [T, C] 特征转置后写入 (symbol_index, group_index) 槽位；
+    某个位置缺少特征（all_features 中无该证券）时保持 0 值且掩码为 0（视为占位/无效证券）。
+
+    Args:
+        groups: 观测分组列表，每项含 "symbols" 键（该组的证券代码列表），
+            顺序即张量最后一维 G 的排列顺序。
+        all_features: 证券代码 → 形状 [T, C] 特征矩阵的映射，缺某证券即留空填 0。
+        feature_channels: 特征通道数 C，张量第 0 维。
+        total_steps: 时间步数 T，张量第 1 维。
+        max_group_width: 单组最大证券数 S，张量第 2 维（不足处填 0、掩码为 0）。
+        group_count: 分组数 G，张量最后一维，应与 len(groups) 一致。
+
+    Returns:
+        (aligned, group_mask)：
+        - aligned: 形状 [C, T, S, G] 的 float32 张量，填入各证券特征，空槽位为 0。
+        - group_mask: 形状 [1, 1, 1, S, G] 的 float32 掩码，有效证券处为 1.0，
+          占位/缺失处为 0.0。
     """
     aligned = np.zeros(
         (feature_channels, total_steps, max_group_width, group_count), dtype=np.float32

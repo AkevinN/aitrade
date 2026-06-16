@@ -14,6 +14,9 @@ import { toEquityPoints, toOHLCBars, toTradeMarkers } from '../../components/cha
 import type { ChartTime } from '../../components/charts/types'
 import type { BacktestResultPayload } from '../../types/alpha'
 
+/**
+ * {@link BacktestCharts} 组件 props。
+ */
 export interface BacktestChartsProps {
   /** 回测结果载荷（来自 task.result），含成交明细与逐日净值 */
   result?: BacktestResultPayload
@@ -25,6 +28,13 @@ export interface BacktestChartsProps {
   end: string
 }
 
+/**
+ * 回测结果图表容器（业务接线组件）。
+ *
+ * 组装净值曲线图（{@link EquityCurveChart}）、策略 vs 基准收益对比图（{@link ReturnComparisonChart}）
+ * 和 K 线+买卖点图（{@link KLineChart}），从 `result` 载荷提取目标标的后
+ * 自动拉取 OHLC 行情、过滤越界买卖点。
+ */
 export default function BacktestCharts({ result, interval, start, end }: BacktestChartsProps) {
   // 1. 净值曲线：逐日净值 → EquityPoint[]。空数据由 EquityCurveChart 自身渲染空状态（Req 6.4）。
   const equityPoints = useMemo(
@@ -67,8 +77,18 @@ export default function BacktestCharts({ result, interval, start, end }: Backtes
     [result?.trades, barTimeRange],
   )
 
-  // K 线区内容：标的缺失 / 行情失败 / 正常三种分支。
-  // 关键：错误仅在 K 线卡片内呈现，绝不影响上方净值曲线与既有统计卡片（Req 6.6、6.7）。
+  /**
+   * 渲染 K 线卡片内的内容，按当前数据状态在三种分支间选择。
+   *
+   * 分支语义：
+   * - 无标的（vtSymbol 为空）：视为本次回测无成交，渲染空状态而非报错（Req 6.4）。
+   * - 行情请求失败：在卡片内就地渲染错误 Alert，并明确提示净值曲线与统计数字不受影响。
+   * - 正常：渲染带买卖点 markers 的 KLineChart，并透传加载态。
+   *
+   * 关键：所有错误/空态都被限制在 K 线卡片内呈现，绝不影响上方的净值曲线与既有统计卡片（Req 6.6、6.7）。
+   *
+   * @returns 对应当前状态的 K 线区域 React 节点
+   */
   const renderKLine = () => {
     if (!vtSymbol) {
       // 无 target_symbol 也无成交 → 本次回测无成交，给空状态而非报错（Req 6.4）。

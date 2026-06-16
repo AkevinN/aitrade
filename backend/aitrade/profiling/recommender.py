@@ -1,6 +1,8 @@
 """Scheme 建议草稿生成器。
 
 本模块只把画像判定翻译为建议项，不写方案、不触发训练或回测。
+唯一对外接口为 build_scheme_suggestion()，接收画像 blocks 与规则，
+返回 SchemeSuggestion（status 恒为 "draft"，Requirement 8.4）。
 """
 
 from __future__ import annotations
@@ -13,10 +15,12 @@ _CONF_RANK = {"insufficient": 0, "low": 1, "medium": 2, "high": 3}
 
 
 def _block(blocks: list[MetricBlock], name: str) -> MetricBlock | None:
+    """从画像块列表中按 block 名查找，未找到返回 None。"""
     return next((b for b in blocks if b.block == name), None)
 
 
 def _metric_conf(block: MetricBlock | None, key: str) -> str:
+    """从指定 block 中取指标 key 的置信度；block 为 None 或指标不存在时返回 "insufficient"。"""
     if block is None:
         return "insufficient"
     metric = next((m for m in block.metrics if m.key == key), None)
@@ -24,10 +28,22 @@ def _metric_conf(block: MetricBlock | None, key: str) -> str:
 
 
 def _can_suggest(confidence: str) -> bool:
+    """判断给定置信度是否达到可生成建议的下限（medium 或以上）。"""
     return _CONF_RANK.get(confidence, 0) >= _CONF_RANK["medium"]
 
 
 def _item(field: str, value, reason: str, confidence: str) -> SuggestionItem:
+    """快捷构造 SuggestionItem 的工厂函数。
+
+    Args:
+        field: Scheme 字段路径，如 ``"label_spec.take_profit"``。
+        value: 建议取值。
+        reason: 命中规则的文字说明（Requirement 8.2）。
+        confidence: 该建议依据的置信度等级。
+
+    Returns:
+        SuggestionItem 对象。
+    """
     return SuggestionItem(
         field=field,
         value=value,
@@ -44,7 +60,26 @@ def build_scheme_suggestion(
     overall_confidence: str,
     rules: ProfilingRules,
 ) -> SchemeSuggestion:
-    """根据画像块生成只读 SchemeSuggestion 草稿。"""
+    """根据画像指标块生成只读方案建议草稿（status 恒为 "draft"）。
+
+    生成逻辑：
+    1. 整体置信度为 insufficient 或数据质量 insufficient → 降级，仅建议扩大 lookback；
+    2. 波动等级（实现波动率）→ OCO 止盈/止损比例与持有天数建议；
+    3. 可预测性结构判定（hurst/VR/ADF 投票）→ 标签类型与策略族建议；
+    4. 流动性等级（日均成交额）→ 滑点提示与日内交易建议；
+    5. 无任何建议项时降级（关键指标置信度不足）。
+    以上各步均受置信度门控（< medium 不下结论，Requirement 7.3）。
+
+    Args:
+        vt_symbol: 目标标的合约代码（写入 SchemeSuggestion.vt_symbols）。
+        interval: K 线周期（写入 SchemeSuggestion.interval）。
+        blocks: 四个 MetricBlock 列表（来自 Profiler._build_blocks()）。
+        overall_confidence: 综合置信度等级（来自 rules.overall_confidence()）。
+        rules: 画像规则配置，包含 suggestion_map。
+
+    Returns:
+        SchemeSuggestion 草稿对象（status="draft"，不触发任何写入）。
+    """
     suggestion = SchemeSuggestion(
         interval=interval,
         vt_symbols=[vt_symbol],

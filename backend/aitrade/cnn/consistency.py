@@ -22,11 +22,19 @@ from typing import Any
 def label_holding_horizon(label_spec: dict[str, Any] | None, input_interval: str = "d") -> int | None:
     """返回 label 蕴含的固定持有期（bar 数）；无法表达为固定 bar 数时返回 None。
 
+    映射规则：
     - next_bar            → 1
-    - horizon_bars        → horizon
+    - horizon_bars        → spec["horizon"]（整型）
     - next_session_close  → 日线下每日一根 = 1；分钟线跨度不固定 → None
     - session_close       → 当日尾盘，跨度不固定 → None
     - oco                 → 路径依赖，realized 持有期不固定 → None
+
+    Args:
+        label_spec: 训练时传入的 label 配置字典；None 等价于 mode=next_bar。
+        input_interval: K 线周期，如 "d"、"30m"。仅 next_session_close 模式下影响结果。
+
+    Returns:
+        固定持有期的 bar 数；持有期不固定或无法表达时返回 None。
     """
     spec = label_spec or {}
     mode = spec.get("mode") or "next_bar"
@@ -45,9 +53,23 @@ def label_holding_horizon(label_spec: dict[str, Any] | None, input_interval: str
 def derive_strategy_exit_from_label(
     label_spec: dict[str, Any] | None, input_interval: str = "d"
 ) -> dict[str, Any]:
-    """由 label 自动推导与之精确对齐的固定持有出场配置。
+    """由 label 自动推导与之精确对齐的出场配置。
 
-    无法推导（持有期非固定 bar 数，如分钟级 session_close）时抛 ValueError。
+    - OCO label → 返回 exit_mode=oco，含 take_profit/stop_loss/hold_days。
+    - 固定持有 label（next_bar/horizon_bars/日线 next_session_close）→
+      返回 exit_mode=fixed_hold，含 hold_days=持有 bar 数。
+    - 持有期不固定（如分钟级 session_close）→ 抛 ValueError。
+
+    Args:
+        label_spec: 训练时的 label 配置字典；None 等价于 mode=next_bar。
+        input_interval: K 线周期，如 "d"、"30m"。
+
+    Returns:
+        出场配置字典，始终包含 exit_mode 键；
+        fixed_hold 时含 hold_days；oco 时含 take_profit/stop_loss/hold_days。
+
+    Raises:
+        ValueError: label 的持有期不是固定 bar 数，且不属于 OCO 模式时抛出。
     """
     mode = (label_spec or {}).get("mode")
     # OCO 路径依赖标签 → 推导对齐的 OCO 出场（止盈/止损 + 最大持有兜底）
@@ -76,15 +98,29 @@ def check_label_strategy_consistency(
     hold_days: int,
     input_interval: str = "d",
 ) -> list[str]:
-    """校验策略出场与 label 是否一致。
+    """校验策略出场与 label 是否一致，返回软性告警列表。
 
-    硬性不一致 → 抛 ValueError（应作为回测失败，杜绝「跑出来但口径错」的隐性失败）：
-      - fixed_hold 但 label 持有期非固定 bar 数；
-      - fixed_hold 的 hold_days 与 label 持有期不符。
+    硬性不一致 → 直接抛 ValueError（回测失败，杜绝「跑出来但口径错」的隐性失败）：
+    - fixed_hold 但 label 持有期非固定 bar 数；
+    - fixed_hold 的 hold_days 与 label 持有期不符。
 
-    软性问题 → 返回告警列表（不阻断，但记录并回传前端）：
-      - price_ref=close（研究口径，按收盘价成交，实盘吃不到）；
-      - threshold 出场（信号衰减式，realized 持有期会偏离训练 horizon）。
+    软性问题 → 追加到返回列表（不阻断，但记录并回传前端）：
+    - price_ref=close（研究口径，按收盘价成交，实盘吃不到）；
+    - price_ref=next_vwap（VWAP 执行成本提示）；
+    - exit_mode=threshold（信号衰减式出场，realized 持有期会偏离训练 horizon）；
+    - exit_mode=oco 与非 OCO label 的口径不一致。
+
+    Args:
+        label_spec: 训练时的 label 配置字典；None 等价于 mode=next_bar。
+        exit_mode: 策略出场模式，"fixed_hold" | "threshold" | "oco" | "auto"。
+        hold_days: 固定持有 bar 数（仅 fixed_hold 模式下与 label 比对）。
+        input_interval: K 线周期，如 "d"、"30m"。
+
+    Returns:
+        软性告警字符串列表；无软性问题时为空列表。
+
+    Raises:
+        ValueError: 硬性 label-trade 不一致，或 exit_mode 不在支持列表内时抛出。
     """
     spec = label_spec or {}
     price_ref = str(spec.get("price_ref") or "close")

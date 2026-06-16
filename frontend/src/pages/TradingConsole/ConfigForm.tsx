@@ -27,11 +27,15 @@ import { barFreqOfInterval, isIntradayBarFreq } from '../../utils/barFreq'
 
 const { Text } = Typography
 
+/** 数据源下拉选项：pull 走接口增量拉取，upload 走本地文件，与 {@link ConfigFormValues.data_source} 取值对应。 */
 const DATA_SOURCE_OPTIONS = [
   { label: '接口拉取（Tushare / 增量）', value: 'pull' },
   { label: '上传文件（CSV / parquet）', value: 'upload' },
 ]
 
+/**
+ * {@link ConfigForm} 组件 props。
+ */
 interface ConfigFormProps {
   /** 拿到 task_id 后回传给页面，供进度/结果/风控区消费（任务 9.3~9.5）。 */
   onStarted: (taskId: string) => void
@@ -47,16 +51,30 @@ interface ConfigFormProps {
  * 日内模型 = 精确到分钟的决策时刻（直接提交）。
  */
 interface ConfigFormValues {
+  /** 所选 CNN 模型名称（来自 /api/cnn/models）。 */
   model: string
+  /** 目标标的 vt_symbol，如 "000001.SZSE"；提交前会 trim。 */
   vt_symbol: string
+  /** 方案名，参与 signal_id 生成；提交前会 trim。 */
   scheme: string
+  /**
+   * 决策日期/时刻。日频模型为决策日（提交时转为该日收盘后 15:05 的本地朴素时间）；
+   * 日内模型为精确到分钟的决策时刻（秒/毫秒清零后直接提交）。
+   */
   as_of_date: Dayjs
+  /** 数据源：pull=接口增量拉取，upload=上传文件。 */
   data_source: 'upload' | 'pull'
+  /** 组合总市值（现金 + 持仓），单位元；用于计算仓位限额。 */
   portfolio_value: number
+  /** 组合内全部持仓的市值合计，单位元；用于总仓位上限检查。 */
   total_position_value: number
+  /** 目标标的当前持有股数；> 0 时可触发出场逻辑。 */
   current_position: number
+  /** 目标标的当前持仓市值，单位元；用于单票上限检查。 */
   current_symbol_value: number
+  /** 买入阈值，取值 [0, 1]；信号概率达到该值才视为买入候选。 */
   buy_threshold: number
+  /** 模型版本号；非生产模型留空，提交时回退为空串。 */
   model_version: string
 }
 
@@ -108,7 +126,12 @@ const ConfigForm: React.FC<ConfigFormProps> = ({ onStarted, hasTriggered, runnin
     },
   })
 
-  // 选择模型时，若目标标的为空则用模型的 target_symbol 预填，省去重复输入。
+  /**
+   * 切换所选模型时联动表单：目标标的为空则用模型的 target_symbol 预填，
+   * 并按是否为生产模型同步 model_version（生产模型填生产版本，否则清空）。
+   *
+   * @param value - 新选中的模型名称
+   */
   const handleModelChange = (value: string) => {
     const picked = (models || []).find((m) => m.name === value)
     if (picked?.target_symbol && !form.getFieldValue('vt_symbol')) {
@@ -121,6 +144,13 @@ const ConfigForm: React.FC<ConfigFormProps> = ({ onStarted, hasTriggered, runnin
     }
   }
 
+  /**
+   * 校验表单、组装 {@link LiveDecisionRequest} 并通过 mutation 触发今日决策。
+   *
+   * 决策时刻 as_of 按模型间隔分两种语义：日内模型取用户选定的精确分钟，
+   * 日频模型取所选决策日收盘后 15:05（均为本地朴素时间，避免时区偏移）。
+   * 校验不通过时静默返回，错误提示交由表单自身渲染。
+   */
   const handleSubmit = async () => {
     let values: ConfigFormValues
     try {

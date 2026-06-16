@@ -25,6 +25,13 @@ class TraceBuilder:
                 "decision_logic", "risk", "result")
 
     def __init__(self, run_id: str, signal_id: str, logger) -> None:
+        """初始化 TraceBuilder。
+
+        Args:
+            run_id:    本次运行的短码（8 位 hex），用于 logger 前缀与 trace 键。
+            signal_id: 与本次决策对应的幂等键（允许在实际 Decision_Bar 确定后更新）。
+            logger:    注入的 logger（约定为 logging.getLogger("aitrade.live.orchestrator")）。
+        """
         self.run_id = run_id
         self.signal_id = signal_id
         self._logger = logger
@@ -32,6 +39,16 @@ class TraceBuilder:
         self._completed: list[str] = []      # 已完成段（顺序）
 
     def set_section(self, name: str, payload: dict, *, debug_detail: dict | None = None) -> None:
+        """记录一个已完成的 Trace_Section 并写日志。
+
+        name 必须在 SECTIONS 中；每段只应调用一次（重复调用会覆盖已有值）。
+
+        Args:
+            name:         段名，须在 SECTIONS 元组中。
+            payload:      段内容 dict（脱敏，不含凭证）。
+            debug_detail: 可选的重负载明细（如逐点信号序列），以 DEBUG 级别输出，
+                          不写入持久化 trace（减少磁盘占用）。
+        """
         assert name in self.SECTIONS
         self._sections[name] = payload
         self._completed.append(name)
@@ -42,6 +59,16 @@ class TraceBuilder:
     def to_trace(self, *, schema_version: int = 1,
                  trace_persisted: bool = True,
                  trace_persist_error: str | None = None) -> dict:
+        """将累积的 trace 内容序列化为可持久化 dict。
+
+        Args:
+            schema_version:     trace schema 版本，供后续字段演进，默认 1。
+            trace_persisted:    是否持久化成功（result 段回填用，已废弃在此传入，保留参数兼容）。
+            trace_persist_error: 持久化错误信息，None 表示无错误。
+
+        Returns:
+            含 schema_version / run_id / signal_id / completed_sections / sections 的 dict。
+        """
         return {
             "schema_version": schema_version,
             "run_id": self.run_id,
@@ -59,23 +86,64 @@ class DecisionTraceStore:
     """
 
     def __init__(self, base_path: Path | str) -> None:
+        """初始化 DecisionTraceStore。
+
+        Args:
+            base_path: trace 文件存放目录（与 DecisionStore 共用同一目录）；不存在时自动创建。
+        """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, signal_id: str) -> Path:
+        """将 signal_id 安全化后返回对应 .trace.json 文件路径。
+
+        Args:
+            signal_id: 幂等键，"/" 与 ":" 替换为 "_"。
+
+        Returns:
+            .trace.json 文件路径（不保证文件存在）。
+        """
         safe = signal_id.replace("/", "_").replace(":", "_")
         return self.base_path / f"{safe}.trace.json"
 
     def exists(self, signal_id: str) -> bool:
+        """判断该 signal_id 是否已有 trace 文件。
+
+        Args:
+            signal_id: 幂等键。
+
+        Returns:
+            True 表示 .trace.json 存在。
+        """
         return self._path(signal_id).exists()
 
     def get(self, signal_id: str) -> Optional[dict]:
+        """读取指定 signal_id 的 trace dict；不存在返回 None。
+
+        Args:
+            signal_id: 幂等键。
+
+        Returns:
+            trace dict；文件不存在时返回 None。
+        """
         path = self._path(signal_id)
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
     def save_if_absent(self, signal_id: str, trace: dict) -> bool:
+        """幂等写入 trace：仅当文件不存在时写盘，已存在则原样保留（满足 8.9）。
+
+        以 UTF-8、缩进 2、``ensure_ascii=False``（保留中文）序列化为 JSON 写入
+        ``{safe}.trace.json``。同一 signal_id 二次决策若想覆盖，须先 `archive`。
+
+        Args:
+            signal_id: 幂等键，决定目标文件名。
+            trace:     待持久化的 trace dict（通常来自 ``TraceBuilder.to_trace``）。
+
+        Returns:
+            True 表示本次新写入成功；False 表示文件已存在、未做任何写入。
+        """
         path = self._path(signal_id)
         if path.exists():
             return False
@@ -83,11 +151,18 @@ class DecisionTraceStore:
         return True
 
     def archive(self, signal_id: str) -> Optional[Path]:
-        """归档式删除：trace 文件移入 archive/ 子目录（文件名追加时间戳）。
+        """归档式删除：把 trace 文件移入 ``archive/`` 子目录（文件名追加时间戳）。
 
         必须与 `DecisionStore.archive` 成对调用——只删决策不删 trace 会使重新决策后
         `save_if_absent` 因旧文件存在而不写，造成「决策是新的、档案是旧的」错位。
-        归档文件保留审计痕迹。不存在则返回 None。
+        归档而非物理删除，保留审计痕迹。
+
+        Args:
+            signal_id: 幂等键，定位待归档的 .trace.json 文件。
+
+        Returns:
+            归档后的目标路径（形如 ``archive/{stem}.{YYYYMMDDTHHMMSSffffff}.trace.json``）；
+            原文件不存在时返回 None（视作无需归档）。
         """
         path = self._path(signal_id)
         if not path.exists():

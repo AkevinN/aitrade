@@ -19,10 +19,24 @@ class TradingCalendar:
         trading_days: Optional[Iterable[date]] = None,
         holidays: Optional[Iterable[date]] = None,
     ) -> None:
+        """初始化交易日历。
+
+        Args:
+            trading_days: 精确交易日集合（如从数据源获取）；传入时以集合为准，忽略 holidays。
+            holidays:     节假日集合，仅 trading_days 为 None 时生效；默认空（即工作日均为交易日）。
+        """
         self._trading_days = set(trading_days) if trading_days is not None else None
         self._holidays = set(holidays) if holidays else set()
 
     def is_trading_day(self, d: date) -> bool:
+        """判断指定日期是否为交易日。
+
+        Args:
+            d: 待判断的日期。
+
+        Returns:
+            若传入了精确 trading_days 集合则直接查表；否则按"工作日且非 holidays"判断。
+        """
         if self._trading_days is not None:
             return d in self._trading_days
         # 工作日且非节假日

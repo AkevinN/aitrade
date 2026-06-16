@@ -18,6 +18,18 @@ import type { BacktestResultPayload, BacktestStatistics } from '../../types/alph
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/**
+ * CNN 模型回测页面。
+ *
+ * 支持三类模型：
+ * - `classification`（方向二分类）：阈值为概率口径（0~1）；
+ * - `regression`（收益回归）：阈值为收益率口径（如 ±0.5%）；
+ * - `path_class`（路径形态四分类）：买入阈值为先触止盈概率（prob_tp），
+ *   并额外支持 veto_threshold（否决阈值，prob_sl ≥ 该值则放弃买入）。
+ *
+ * 出场模式：threshold（概率阈值）/ fixed_hold（固定持有）/ oco（止盈止损）/ auto（按 label 推导）。
+ * 回测结果展示统计指标、成交明细与净值曲线，含 label↔策略一致性自检提示。
+ */
 const CNNBacktest: React.FC = () => {
   const [backtestName, setBacktestName] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
@@ -34,14 +46,20 @@ const CNNBacktest: React.FC = () => {
   const [takeProfit, setTakeProfit] = useState(0.02)
   const [stopLoss, setStopLoss] = useState(0.03)
   const [tPlus1, setTPlus1] = useState(false)
-  // 成本假设（A股默认：佣金万3、卖出印花税千1、滑点5bp、限价缓冲20bp）
+  // 成本假设（A股默认：佣金万3、卖出印花税0.5‰、滑点5bp、限价缓冲20bp）
   const [commissionRate, setCommissionRate] = useState(0.0003)
-  const [stampDuty, setStampDuty] = useState(0.001)
+  const [stampDuty, setStampDuty] = useState(0.0005)
   const [slippage, setSlippage] = useState(0.0005)
   const [priceAdd, setPriceAdd] = useState(0.002)
+  /**
+   * 否决阈值（仅 path_class 模型有效）：prob_sl ≥ 该值时放弃买入；1.0=关闭。
+   * 默认 1.0，选中 path_class 模型时重置到该值。
+   */
+  const [vetoThreshold, setVetoThreshold] = useState(1.0)
   const [taskId, setTaskId] = useState<string | null>(null)
 
   const task = useTask(taskId)
+  // 从回测结果中抽出核心统计指标（收益/回撤/夏普等），供指标卡片与一致性提示消费；任务未完成或无结果时为 undefined
   const statistics = useMemo(
     () => (task.data?.result as { statistics?: BacktestStatistics } | undefined)?.statistics,
     [task.data?.result]
@@ -67,10 +85,12 @@ const CNNBacktest: React.FC = () => {
     const modelName = result?.model ?? selectedModel
     return models?.find((m) => m.name === modelName)?.input_interval ?? ''
   }, [models, result?.model, selectedModel])
-  // 回归模型的 signal 是预测收益，阈值用收益尺度；分类模型用概率尺度
+  // 回归模型的 signal 是预测收益，阈值用收益尺度；分类/path_class 模型用概率尺度
   const isRegression = selectedModelInfo?.objective === 'regression'
+  /** path_class 模型：输出四类剧本概率，买入阈值为 prob_tp，支持 veto_threshold 否决。 */
+  const isPathClass = selectedModelInfo?.objective === 'path_class'
 
-  // 切换模型时，把阈值重置为对应口径的合理默认值（回归: ±0.5%；分类: 0.6/0.4）
+  // 切换模型时，把阈值重置为对应口径的合理默认值（回归: ±0.5%；分类/path_class: 0.6/0.4；path_class 重置 veto）
   useEffect(() => {
     if (isRegression) {
       setBuyThreshold(0.005)
@@ -79,8 +99,18 @@ const CNNBacktest: React.FC = () => {
       setBuyThreshold(0.6)
       setSellThreshold(0.4)
     }
-  }, [isRegression])
+    if (isPathClass) {
+      setVetoThreshold(1.0)
+    }
+  }, [isRegression, isPathClass])
 
+  /**
+   * 启动 CNN 回测任务。
+   *
+   * 校验模型已选且 threshold 模式下买入阈值 > 卖出阈值，
+   * 回测名称留空则自动生成（cnn_bt_{model}_{timestamp}）。
+   * path_class 模型时额外传 veto_threshold（1.0=关闭）。
+   */
   const handleRun = useCallback(async () => {
     if (!selectedModel) {
       message.warning('请选择一个 CNN 模型')
@@ -109,13 +139,14 @@ const CNNBacktest: React.FC = () => {
         take_profit: takeProfit,
         stop_loss: stopLoss,
         t_plus1: tPlus1,
+        ...(isPathClass ? { veto_threshold: vetoThreshold } : {}),
       })
       setTaskId(res.task_id)
       message.success('CNN 回测任务已启动')
     } catch {
       message.error('启动 CNN 回测失败')
     }
-  }, [backtestName, buyThreshold, capital, commissionRate, dateRange, priceAdd, selectedModel, sellThreshold, slippage, stampDuty, exitMode, holdDays, takeProfit, stopLoss, tPlus1])
+  }, [backtestName, buyThreshold, capital, commissionRate, dateRange, priceAdd, selectedModel, sellThreshold, slippage, stampDuty, exitMode, holdDays, takeProfit, stopLoss, tPlus1, isPathClass, vetoThreshold])
 
   return (
     <Row gutter={[16, 16]}>
@@ -146,9 +177,9 @@ const CNNBacktest: React.FC = () => {
               />
               {selectedModelInfo && (
                 <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-                  目标: {selectedModelInfo.target_symbol || '未知'} · 
-                  类型: {isRegression ? '收益回归' : '方向分类'} · 
-                  最佳 epoch: {selectedModelInfo.best_epoch || '-'} · 
+                  目标: {selectedModelInfo.target_symbol || '未知'} ·{' '}
+                  类型: {isRegression ? '收益回归' : isPathClass ? '路径形态分类' : '方向分类'} ·{' '}
+                  最佳 epoch: {selectedModelInfo.best_epoch || '-'} ·{' '}
                   验证损失: {selectedModelInfo.best_val_loss?.toFixed(4) || '-'}
                 </Text>
               )}
@@ -203,7 +234,11 @@ const CNNBacktest: React.FC = () => {
             ) : (
               <>
                 <div>
-                  <Text type="secondary">买入阈值（概率 &gt; 此值时买入）：</Text>
+                  <Text type="secondary">
+                    {isPathClass
+                      ? '先触止盈概率阈值（prob_tp &gt; 此值时买入）：'
+                      : '买入阈值（概率 &gt; 此值时买入）：'}
+                  </Text>
                   <Slider
                     min={0.5}
                     max={0.95}
@@ -214,7 +249,11 @@ const CNNBacktest: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <Text type="secondary">卖出阈值（概率 &lt; 此值时卖出）：</Text>
+                  <Text type="secondary">
+                    {isPathClass
+                      ? '先触止盈概率卖出阈值（prob_tp &lt; 此值时卖出）：'
+                      : '卖出阈值（概率 &lt; 此值时卖出）：'}
+                  </Text>
                   <Slider
                     min={0.1}
                     max={0.5}
@@ -224,6 +263,24 @@ const CNNBacktest: React.FC = () => {
                     marks={{ 0.1: '0.1', 0.2: '0.2', 0.3: '0.3', 0.4: '0.4', 0.5: '0.5' }}
                   />
                 </div>
+                {isPathClass && (
+                  <div>
+                    <Text type="secondary">
+                      否决阈值 veto_threshold（先触止损概率 prob_sl ≥ 此值则放弃买入；1.0=关闭）：
+                    </Text>
+                    <Slider
+                      min={0.1}
+                      max={1.0}
+                      step={0.05}
+                      value={vetoThreshold}
+                      onChange={setVetoThreshold}
+                      marks={{ 0.1: '0.1', 0.3: '0.3', 0.5: '0.5', 0.7: '0.7', 1.0: '关闭' }}
+                    />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      设为 1.0 关闭否决（等同不过滤）；建议先在 0.4~0.6 区间探索。
+                    </Text>
+                  </div>
+                )}
               </>
             )}
             <div>
@@ -314,7 +371,7 @@ const CNNBacktest: React.FC = () => {
                   <InputNumber
                     style={{ width: '100%' }}
                     value={stampDuty}
-                    onChange={(v) => setStampDuty(v ?? 0.001)}
+                    onChange={(v) => setStampDuty(v ?? 0.0005)}
                     min={0}
                     max={0.01}
                     step={0.0005}

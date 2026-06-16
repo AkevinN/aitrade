@@ -29,6 +29,12 @@ import { useTaskList } from '../../hooks/useTask'
 
 const { Title, Text } = Typography
 
+/**
+ * 仪表板页面——显示数据就绪状态、推荐下一步操作和最近任务列表。
+ *
+ * 汇总原始K线、历史Tick、派生周期、CNN模型的数量，以卡片形式引导用户
+ * 进入对应操作页面。最近失败任务会以警告横幅高亮提示。
+ */
 const Dashboard: React.FC = () => {
   const navigate = useNavigate()
 

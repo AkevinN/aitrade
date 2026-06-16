@@ -67,15 +67,25 @@ export type NotifyChannel = 'dingtalk' | 'wecom' | 'serverchan' | 'webhook'
 export interface TradingPlanRequest {
   /** 计划名称（必填） */
   name: string
+  /** CNN 模型名（cnn 模式必填） */
   model: string
+  /** 目标标的（必填） */
   vt_symbol: string
+  /** 方案名（必填） */
   scheme: string
+  /** 买入阈值；信号需达到此值才买入 */
   buy_threshold?: number
+  /** 目标仓位比例 */
   position_ratio?: number
+  /** 最小成交手数 */
   min_volume?: number
+  /** 模型版本，参与 signal_id */
   model_version?: string
+  /** 数据源 */
   data_source?: 'upload' | 'pull'
+  /** 是否触发出场 */
   should_exit?: boolean
+  /** 目标标的当日是否停牌/封死 */
   halted?: boolean
   portfolio: PortfolioSnapshotRequest
   risk?: RiskConfigRequest
@@ -87,39 +97,160 @@ export interface TradingPlanRequest {
   trigger_times?: string[]
   /** 通知通道名（仅名称，无凭证） */
   notify_channels?: NotifyChannel[]
+  // ---- v2 规则调仓字段 ----
+  /** 策略类型：cnn（CNN 决策）/ rule（规则调仓），默认 cnn */
+  strategy_type?: 'cnn' | 'rule'
+  /** 信号源名称（rule 模式必填） */
+  signal_source?: string
+  /** 信号源参数（rule 模式：universe 列表 + signal_params.universe） */
+  signal_params?: Record<string, unknown>
+  /** 触发周期（rule 模式）：daily / weekly_first / monthly_first */
+  trigger_schedule?: 'daily' | 'weekly_first' | 'monthly_first'
+  /** 关联组合 ID（rule 模式） */
+  portfolio_id?: string
 }
 
 /** 计划完整内容（映射后端 TradingPlan dataclass）。 */
-export interface TradingPlan extends Required<Omit<TradingPlanRequest, 'risk' | 'notify_channels'>> {
+export interface TradingPlan extends Required<Omit<TradingPlanRequest, 'risk' | 'notify_channels' | 'strategy_type' | 'signal_source' | 'signal_params' | 'trigger_schedule' | 'portfolio_id'>> {
+  /** 计划唯一 ID */
   plan_id: string
   risk: RiskConfigRequest
   notify_channels: NotifyChannel[]
+  /** 创建时刻 ISO */
   created_at: string
+  /** 最近更新时刻 ISO */
   updated_at: string
+  // ---- v2 规则调仓字段（可选，旧计划无此字段）----
+  strategy_type?: 'cnn' | 'rule'
+  signal_source?: string
+  signal_params?: Record<string, unknown>
+  trigger_schedule?: 'daily' | 'weekly_first' | 'monthly_first'
+  portfolio_id?: string
 }
 
 /** 计划列表项摘要（映射后端 TradingPlanSummary）。 */
 export interface TradingPlanSummary {
+  /** 计划唯一 ID */
   plan_id: string
+  /** 计划名称 */
   name: string
+  /** 目标标的 */
   vt_symbol: string
+  /** 方案名 */
   scheme: string
   /** 决策 bar 频率 */
   bar_freq: string
   /** 生效唤醒时刻集合（去重升序；多时刻展示用） */
   trigger_times?: string[]
+  /** 是否启用自动调度 */
   enabled: boolean
   /** 最近触发日 YYYY-MM-DD（来自 Last_Triggered_Map，取 date） */
   last_triggered?: string | null
+  /** 策略类型：cnn | rule（组合选择器过滤用） */
+  strategy_type: 'cnn' | 'rule'
+  /** rule 计划关联的持仓账本 id（组合选择器数据源） */
+  portfolio_id: string
+  /** rule 计划信号源名（前端展示用） */
+  signal_source: string
 }
 
 /** 调度器运行状态（映射后端 SchedulerStatus）。 */
 export interface SchedulerStatus {
+  /** 调度循环是否在运行 */
   running: boolean
+  /** 调度轮询间隔，单位秒 */
   tick_seconds: number
+  /** 当前启用的计划数 */
   enabled_plan_count: number
-  /** {plan_id: "YYYY-MM-DD"} */
+  /** 各计划最近触发日，形如 {plan_id: "YYYY-MM-DD"} */
   last_triggered: Record<string, string>
+}
+
+// ============================================================
+// 规则调仓（Rebalance）类型。
+// 与后端 backend/aitrade/live/rebalance_decision.py 对齐。
+// ============================================================
+
+/** 单条调仓指令（映射后端 RebalanceItem）。 */
+export interface RebalanceItem {
+  /** 目标标的 */
+  vt_symbol: string
+  /** buy / sell */
+  action: 'buy' | 'sell'
+  /** 调仓手数 */
+  volume: number
+  /** 参考价 */
+  price: number
+  /** 信号值 */
+  signal?: number | null
+  /** 决策原因 */
+  reason: string
+}
+
+/** 调仓决策完整对象（映射后端 RebalanceDecision）。 */
+export interface RebalanceDecision {
+  /** 幂等键 */
+  signal_id: string
+  /** 决策 bar 时刻 ISO */
+  decision_bar_dt: string
+  /** 决策时刻 ISO */
+  as_of: string
+  /** 决策 bar 频率 */
+  bar_freq: string
+  /** 方案名 */
+  scheme: string
+  /** 关联组合 ID */
+  portfolio_id: string
+  /** 调仓明细列表 */
+  items: RebalanceItem[]
+  /** 调仓后目标组合持仓（{vt_symbol: 股数}） */
+  target_portfolio: Record<string, number>
+  /** 风控摘要（逐项，passed=false 表示警示） */
+  risk_summary: Array<{ check: string; passed: boolean; detail: string }>
+  /** 状态：proposed（待确认）/ confirmed（已确认）*/
+  status: 'proposed' | 'confirmed'
+  /** 创建时刻 ISO */
+  created_at: string
+  /** 确认时刻 ISO；未确认为 null */
+  confirmed_at?: string | null
+}
+
+/** 异步调仓任务的 result 形态（映射后端 RebalanceResult）。 */
+export interface RebalanceResult {
+  /** 调仓决策对象；跳过时为 null */
+  decision: RebalanceDecision | null
+  /** 是否幂等命中 */
+  idempotent_hit: boolean
+  /** 风控记录 */
+  risk: Array<{ check: string; passed: boolean; detail: string }>
+  /** 跳过原因；未跳过为 null */
+  skipped_reason: string | null
+}
+
+/** 账本持仓状态（映射后端 /api/live/portfolios/{id} 响应）。 */
+export interface PortfolioState {
+  portfolio_id: string
+  /** 当前持仓（{vt_symbol: 股数}） */
+  positions: Record<string, number>
+  /** 现金余额；null 表示未录入 */
+  cash: number | null
+  /** 最近关联的 signal_id */
+  last_signal_id?: string | null
+  /** 最近更新时刻 ISO */
+  updated_at?: string | null
+}
+
+/** 组合风险状态（映射后端 /api/live/portfolio-risk/{id} 响应）。 */
+export interface PortfolioRiskState {
+  portfolio_id: string
+  /** 历史峰值净值；初始化前为 null */
+  peak_value: number | null
+  /** 是否已触发熔断 */
+  broken: boolean
+  /** 熔断触发日 YYYY-MM-DD；未熔断为 null */
+  broken_date: string | null
+  /** 熔断原因；未熔断为 null */
+  reason: string | null
 }
 
 /** 单条决策记录（映射后端 Decision dataclass）。 */
@@ -132,15 +263,21 @@ export interface Decision {
   as_of: string
   /** 决策 bar 频率（1d 即日频） */
   bar_freq: string
+  /** 方案名 */
   scheme: string
   /** buy / sell / hold */
   action: string
+  /** 目标标的；hold 时可能为 null */
   vt_symbol?: string | null
+  /** 成交手数 */
   volume: number
+  /** 参考价；无价时为 null */
   price?: number | null
+  /** 信号值；无信号时为 null */
   signal?: number | null
+  /** 决策理由 */
   reason: string
-  /** ISO 时间戳 */
+  /** 创建时刻 ISO 时间戳 */
   created_at: string
 }
 
@@ -191,9 +328,13 @@ export interface TraceRunHeaderSection {
   buy_threshold: number
   /** 组合快照摘要 */
   portfolio: {
+    /** 组合总市值（现金+持仓） */
     portfolio_value: number
+    /** 当前总持仓市值 */
     total_position_value?: number | null
+    /** 目标标的当前持仓股数 */
     current_position?: number | null
+    /** 目标标的当前持仓市值 */
     current_symbol_value?: number | null
   }
   /** 风控配置摘要（仅比率与黑名单长度，不展开敏感细节） */
@@ -208,9 +349,13 @@ export interface TraceRunHeaderSection {
 
 /** 信号序列统计（编排器对 signal_df 的聚合）。 */
 export interface TraceSignalSeqStats {
+  /** 有效信号点数量 */
   count: number
+  /** 信号序列均值 */
   mean: number
+  /** 信号序列最小值 */
   min: number
+  /** 信号序列最大值 */
   max: number
 }
 
@@ -306,12 +451,50 @@ export interface TraceResultSection {
 
 /** 六段 Trace_Section 的分组容器（按段名索引，缺段可能不存在）。 */
 export interface TraceSection {
+  /** ① 运行头段 */
   run_header?: TraceRunHeaderSection
+  /** ② 推理段 */
   inference?: TraceInferenceSection
+  /** ③ 取价段 */
   pricing?: TracePricingSection
+  /** ④ 决策逻辑段 */
   decision_logic?: TraceDecisionLogicSection
+  /** ⑤ 风控段 */
   risk?: TraceRiskSection
+  /** ⑥ 结果段 */
   result?: TraceResultSection
+}
+
+// ============================================================
+// 调度运行日志（task-scheduler-observability R6.1 / R6.3）。
+// 与后端 backend/aitrade/live/scheduler_run_log.py 事件形态对齐。
+// ============================================================
+
+/** 调度运行事件类型。 */
+export type SchedulerRunEventType = 'skip' | 'trigger' | 'error'
+
+/**
+ * 调度运行日志单条事件（`GET /api/live/scheduler/runs` 返回列表元素）。
+ *
+ * - skip:    含 reason / detail
+ * - trigger: 含 slot / detail
+ * - error:   含 error 字段
+ */
+export interface SchedulerRunEvent {
+  /** 事件时刻 ISO */
+  ts: string
+  /** 事件类型 */
+  event: SchedulerRunEventType
+  /** 计划 ID */
+  plan_id: string
+  /** skip 事件跳过原因（Skip_Reason 枚举）。 */
+  reason?: string | null
+  /** skip / trigger 事件说明。 */
+  detail?: string | null
+  /** trigger 事件调度时点（HH:MM）。 */
+  slot?: string | null
+  /** error 事件异常摘要（截断 500 字符）。 */
+  error?: string | null
 }
 
 /** 已完成段名（顺序枚举）。 */

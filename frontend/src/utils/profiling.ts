@@ -8,6 +8,7 @@ import type {
   SymbolProfileRequest,
 } from '../types/alpha'
 
+/** 置信度级别的数值排序（用于比较，数值越大越可信）。 */
 export const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = {
   insufficient: 0,
   low: 1,
@@ -15,13 +16,24 @@ export const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = {
   high: 3,
 }
 
+/** 置信度的可视化样式属性（颜色、文案、弱化标记、提示说明）。 */
 export interface ConfidenceStyle {
+  /** Ant Design Tag 颜色名（如 `green` / `blue` / `orange` / `default`）。 */
   color: string
+  /** 中文标签文案（如「高」「中」「低」「样本不足」）。 */
   text: string
+  /** 是否为弱置信度（展示时可淡化）。 */
   weak: boolean
+  /** Tooltip 提示说明。 */
   description: string
 }
 
+/**
+ * 根据置信度枚举值返回对应的可视化样式属性。
+ *
+ * @param confidence - 置信度枚举值（`high` / `medium` / `low` / `insufficient`）。
+ * @returns 包含颜色、文案、弱化标记和说明的 {@link ConfidenceStyle} 对象。
+ */
 export function confidenceStyle(confidence: ConfidenceLevel): ConfidenceStyle {
   const map: Record<ConfidenceLevel, ConfidenceStyle> = {
     high: { color: 'green', text: '高', weak: false, description: '样本充足，指标可作为主要参考。' },
@@ -32,11 +44,15 @@ export function confidenceStyle(confidence: ConfidenceLevel): ConfidenceStyle {
   return map[confidence]
 }
 
+/** 画像指标的中文标签与说明（用于 Tooltip 展示）。 */
 export interface MetricHelp {
+  /** 指标的中文名称（如「Hurst 指数」）。 */
   label: string
+  /** 指标含义说明。 */
   description: string
 }
 
+/** 画像指标键名到中文标签与说明的映射表；键为后端返回的指标键名。 */
 export const METRIC_HELP: Record<string, MetricHelp> = {
   count_valid_bars: {
     label: '有效 K 线数',
@@ -100,6 +116,12 @@ export const METRIC_HELP: Record<string, MetricHelp> = {
   },
 }
 
+/**
+ * 按指标键名查找对应的中文标签与说明；未知指标返回以键名为标签的兜底对象。
+ *
+ * @param metricKey - 后端画像返回的指标键名（如 `hurst_exponent`）。
+ * @returns 对应的 {@link MetricHelp}；键名未在 {@link METRIC_HELP} 中注册时返回兜底对象。
+ */
 export function metricHelp(metricKey: string): MetricHelp {
   return METRIC_HELP[metricKey] ?? {
     label: metricKey,
@@ -107,6 +129,14 @@ export function metricHelp(metricKey: string): MetricHelp {
   }
 }
 
+/**
+ * 把金额按量级压成带「万」「亿」单位的紧凑字符串，末位多余的零会去掉。
+ *
+ * 绝对值 ≥ 1 亿用「亿」、≥ 1 万用「万」、更小则取整不带单位；保留两位有效小数。
+ *
+ * @param value - 金额，单位为元；可为负，负号原样保留。
+ * @returns 形如 `1.23 亿` / `5.6 万` / `800` 的字符串。
+ */
 function compactMoney(value: number): string {
   const abs = Math.abs(value)
   if (abs >= 100_000_000) {
@@ -118,6 +148,13 @@ function compactMoney(value: number): string {
   return value.toFixed(0)
 }
 
+/**
+ * 把数值格式化为简洁小数：整数直接显示，极小值用科学计数法，其余保留至多 4 位并去末位零。
+ *
+ * @param value - 任意有限数值。
+ * @returns 整数返回原值字符串；绝对值小于 0.0001 的非零值返回如 `1.23e-5`；
+ *   其余返回最多 4 位小数且去除末尾零的字符串（如 `0.5`、`1.2345`）。
+ */
 function compactDecimal(value: number): string {
   if (Number.isInteger(value)) {
     return String(value)
@@ -129,10 +166,29 @@ function compactDecimal(value: number): string {
   return value.toFixed(4).replace(/\.?0+$/, '')
 }
 
+/**
+ * 把 0~1 的比例值格式化为百分比字符串，保留至多两位小数并去除末位零。
+ *
+ * @param value - 比例值，单位为「占比」（如 0.1234 表示 12.34%）。
+ * @returns 形如 `12.34%` / `5%` 的字符串。
+ */
 function percent(value: number): string {
   return `${(value * 100).toFixed(2).replace(/\.?0+$/, '')}%`
 }
 
+/**
+ * 将画像指标值格式化为可读字符串。
+ *
+ * - `null` → `'-'`
+ * - 百分比型指标（如 `gap_ratio`、`realized_volatility` 等）→ `xx.xx%`
+ * - `avg_turnover` → 万/亿紧凑金额
+ * - 分布型对象（如 `amplitude_quantiles`）→ `key: value, ...`
+ * - 其余数值 → 简洁小数（最多 4 位，去除末位零）
+ *
+ * @param value - 画像指标值；`null` 表示无效。
+ * @param metricKey - 指标键名，用于判断格式化规则（可省略）。
+ * @returns 格式化后的字符串。
+ */
 export function formatMetricValue(
   value: number | Record<string, number> | null,
   metricKey?: string,
@@ -164,10 +220,25 @@ export function formatMetricValue(
     .join(', ')
 }
 
+/**
+ * 判断建议条目的置信度是否为低（`low`）或更低（`insufficient`）。
+ *
+ * @param item - 建议条目。
+ * @returns 置信度 ≤ `low` 时返回 `true`。
+ */
 export function isLowConfidenceItem(item: SuggestionItem): boolean {
   return CONFIDENCE_ORDER[item.based_on_confidence] <= CONFIDENCE_ORDER.low
 }
 
+/**
+ * 判断是否应丢弃某个观测标的（对齐覆盖率或相关性过低）。
+ *
+ * 覆盖率 < 60% 或绝对相关系数 < 0.05 时建议丢弃，避免噪声观测干扰训练。
+ *
+ * @param alignmentCoverage - 与目标标的的时间轴对齐覆盖率（0~1）。
+ * @param correlationAbs - 收益相关系数绝对值；`null`/`undefined` 视为 0。
+ * @returns 建议丢弃时返回 `true`。
+ */
 export function shouldDropObservation(
   alignmentCoverage: number,
   correlationAbs: number | null | undefined,
@@ -176,16 +247,32 @@ export function shouldDropObservation(
   return alignmentCoverage < 0.6 || corr < 0.05
 }
 
+/** {@link buildProfilingRequest} 的输入参数（前端表单值形态）。 */
 export interface BuildProfilingRequestInput {
+  /** 目标合约代码（会去除首尾空格）。 */
   targetSymbol: string
+  /** K 线周期（如 `'d'`、`'30m'`）。 */
   interval: string
+  /** 画像基准时刻（ISO 字符串或 dayjs 实例）。 */
   asOf: string | Dayjs
+  /** 回看天数（取整，最小为 1）。 */
   lookbackDays: number
+  /** 观测分组列表；省略时 `observation_symbols` 为 `[]`。 */
   observationGroups?: ObservationGroup[]
+  /** 是否请求参数建议（默认 `true`）。 */
   withSuggestion?: boolean
+  /** 是否将结果持久化为 Artifact（默认 `true`）。 */
   persist?: boolean
 }
 
+/**
+ * 将前端表单输入值转换为后端 {@link SymbolProfileRequest}。
+ *
+ * 自动去重观测标的（过滤空值和目标标的本身），`asOf` 统一格式化为 ISO 字符串。
+ *
+ * @param input - 前端表单值。
+ * @returns 后端请求体。
+ */
 export function buildProfilingRequest(input: BuildProfilingRequestInput): SymbolProfileRequest {
   const seen = new Set<string>()
   const targetKey = input.targetSymbol.trim()
@@ -215,11 +302,18 @@ export function buildProfilingRequest(input: BuildProfilingRequestInput): Symbol
   }
 }
 
+/** {@link mapSuggestionToFormValues} 的输出：已映射的表单字段值 + 无法映射的条目列表。 */
 export interface SuggestionFormMapping {
+  /** 可直接写入 Ant Design Form 的字段值映射（如 `label_mode`、`oco_take_profit_pct`）。 */
   values: Record<string, unknown>
+  /** 无法自动映射到表单字段的建议条目（需用户手动确认）。 */
   unmapped: SuggestionItem[]
 }
 
+/**
+ * 「强参数」字段集合：当建议处于降级（degraded）状态时，这些字段不自动写入表单，
+ * 而是放入 `unmapped` 交由用户手动确认，避免低可信建议直接改动关键标注/预测参数。
+ */
 const STRONG_FIELDS = new Set([
   'label_spec.mode',
   'label_spec.take_profit',
@@ -229,6 +323,12 @@ const STRONG_FIELDS = new Set([
   'predictor.params.label_type',
 ])
 
+/**
+ * 把比例值（0~1）转换为百分比数值，供表单数字输入框使用；非有限数返回 undefined。
+ *
+ * @param value - 期望为比例数值（如 0.05 表示 5%）；非 number 或非有限值时无法转换。
+ * @returns 乘以 100 后保留至多 4 位小数的百分比数值（如 0.05 → 5）；输入无效时返回 `undefined`。
+ */
 function percentValue(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined
@@ -236,6 +336,16 @@ function percentValue(value: unknown): number | undefined {
   return Number((value * 100).toFixed(4))
 }
 
+/**
+ * 将画像参数建议（{@link SchemeSuggestion}）映射为 Ant Design Form 可用的字段值。
+ *
+ * 支持的字段：`label_spec.mode`、`label_spec.take_profit/stop_loss`（百分比化）、
+ * `label_spec.max_hold/horizon`、`predictor.params.label_type`。
+ * 不支持的字段或 `suggestion.degraded && STRONG_FIELDS` 命中时放入 `unmapped`。
+ *
+ * @param suggestion - 画像返回的参数建议对象。
+ * @returns 已映射字段值 + 未映射条目的 {@link SuggestionFormMapping}。
+ */
 export function mapSuggestionToFormValues(suggestion: SchemeSuggestion): SuggestionFormMapping {
   const values: Record<string, unknown> = {}
   const unmapped: SuggestionItem[] = []

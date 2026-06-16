@@ -22,9 +22,15 @@ import type {
   KLineColorScheme,
 } from './types'
 
+/**
+ * {@link KLineChart} 组件 props。
+ */
 export interface KLineChartProps {
+  /** K 线数据（升序）；空数组时渲染 {@link emptyText} 占位。 */
   bars: OHLCBar[]
+  /** 买卖点标注列表（可选）。 */
   markers?: TradeMarker[]
+  /** 叠加到主图的价位线等图层（可选）。 */
   overlays?: ChartOverlay[]
   /** 是否显示成交量副图，默认 true */
   showVolume?: boolean
@@ -46,6 +52,16 @@ const DEFAULT_COLORS: KLineColorScheme = {
   sellMarker: '#49aa19',
 }
 
+/**
+ * 通用 K 线图组件（基于 lightweight-charts v5）。
+ *
+ * 纯展示组件：仅消费纯数据 props，不含回测/决策等业务语义。
+ * 支持成交量副图、买卖点标注（`markers`）、价位线叠加（`overlays`）和 ResizeObserver 自适应宽度。
+ * 组件卸载时自动清理图表实例，防止内存泄漏。
+ *
+ * @remarks
+ * 业务数据 → 图表数据的转换应由 {@link ../charts/chartAdapters} 中的纯函数完成后传入。
+ */
 export default function KLineChart({
   bars,
   markers,

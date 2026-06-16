@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
 import polars as pl
 
 from ..alpha import AlphaLab
@@ -35,11 +36,32 @@ from .strategy import CNNSignalStrategy
 from .trainer import train_cnn_model
 
 
+# 多种子治理的基准种子。第 seed_index 个重复试验使用 seed=BASE_SEED+seed_index，
+# 保证 seed_index=0 退化为单种子时与历史硬编码默认（train_cnn_model seed=42）一致。
+BASE_SEED = 42
+
+
 def _now_id(prefix: str) -> str:
+    """生成带时间戳的唯一 ID，格式为 ``{prefix}_{YYYYmmddHHMMSS}_{6位hex}``。
+
+    Args:
+        prefix: ID 前缀，如 "wf"、"cand"、"replay"。
+
+    Returns:
+        可用作文件名或 JSON 主键的唯一字符串。
+    """
     return f"{prefix}_{datetime.now():%Y%m%d%H%M%S}_{uuid.uuid4().hex[:6]}"
 
 
 def _json_default(value: Any) -> Any:
+    """json.dumps default 序列化器，处理 date/datetime 与 Pydantic 模型。
+
+    Args:
+        value: 不可直接 JSON 序列化的对象。
+
+    Returns:
+        可 JSON 序列化的等价值：date/datetime → ISO 字符串，Pydantic 模型 → dict，其余原样返回。
+    """
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if hasattr(value, "model_dump"):
@@ -48,6 +70,15 @@ def _json_default(value: Any) -> Any:
 
 
 def _read_json(path: Path, default: Any) -> Any:
+    """读取 JSON 文件；文件不存在或内容损坏时返回 default。
+
+    Args:
+        path: JSON 文件路径。
+        default: 文件不存在或解析失败时的返回值。
+
+    Returns:
+        解析后的 Python 对象；失败时返回 default。
+    """
     if not path.exists():
         return default
     try:
@@ -57,6 +88,12 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _write_json(path: Path, value: Any) -> None:
+    """将对象序列化为缩进 JSON 并写入文件，自动创建父目录。
+
+    Args:
+        path: 目标文件路径；父目录不存在时自动创建。
+        value: 可 JSON 序列化的对象（date/datetime/Pydantic 模型由 _json_default 处理）。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, default=_json_default),
@@ -65,9 +102,18 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 class CNNGovernanceStore:
-    """治理产物 JSON 存储。"""
+    """CNN 治理产物的 JSON 文件存储。
+
+    管理 config/production/candidates/reports/replay_reports 及历史事件日志（JSONL），
+    均以 JSON/JSONL 格式持久化到 root 目录下，无数据库依赖。
+    """
 
     def __init__(self, root: Path | str = CNN_GOVERNANCE_PATH) -> None:
+        """初始化存储，若目录不存在则自动创建。
+
+        Args:
+            root: 治理产物根目录；默认取配置中的 CNN_GOVERNANCE_PATH。
+        """
         self.root = Path(root)
         self.candidates_dir = self.root / "candidates"
         self.reports_dir = self.root / "reports"
@@ -77,57 +123,124 @@ class CNNGovernanceStore:
 
     @property
     def config_path(self) -> Path:
+        """治理配置文件路径（root/config.json）。"""
         return self.root / "config.json"
 
     @property
     def production_path(self) -> Path:
+        """当前生产模型信息文件路径（root/production.json）。"""
         return self.root / "production.json"
 
     @property
     def history_path(self) -> Path:
+        """治理历史事件日志路径（root/history.jsonl，逐行一条 JSON 事件）。"""
         return self.root / "history.jsonl"
 
     @property
     def scheduler_state_path(self) -> Path:
+        """调度器状态文件路径（root/scheduler_state.json）。"""
         return self.root / "scheduler_state.json"
 
     def get_config(self) -> dict[str, Any]:
+        """读取治理配置；文件不存在时返回 Pydantic 默认值对应的字典。"""
         return CNNGovernanceConfig.model_validate(_read_json(self.config_path, {})).model_dump()
 
     def save_config(self, config: CNNGovernanceConfig) -> dict[str, Any]:
+        """持久化治理配置并追加 config_updated 历史事件。
+
+        Args:
+            config: 新的治理配置对象。
+
+        Returns:
+            序列化后的配置字典。
+        """
         data = config.model_dump()
         _write_json(self.config_path, data)
         self.append_history("config_updated", data)
         return data
 
     def get_production(self) -> dict[str, Any]:
+        """读取当前生产模型信息；文件不存在时返回 Pydantic 默认值对应的字典。"""
         return CNNProductionModel.model_validate(_read_json(self.production_path, {})).model_dump()
 
     def save_production(self, production: dict[str, Any]) -> dict[str, Any]:
+        """持久化生产模型信息（经 Pydantic 校验后写入）。
+
+        Args:
+            production: 生产模型信息字典，须符合 CNNProductionModel 结构。
+
+        Returns:
+            经 Pydantic 校验后的序列化字典。
+        """
         data = CNNProductionModel.model_validate(production).model_dump()
         _write_json(self.production_path, data)
         return data
 
     def candidate_path(self, candidate_id: str) -> Path:
+        """返回候选模型 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            candidate_id: 候选 ID，直接作为文件名主干拼为 candidates/{candidate_id}.json。
+
+        Returns:
+            候选文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.candidates_dir / f"{candidate_id}.json"
 
     def report_path(self, report_id: str) -> Path:
+        """返回 WF/OOS 评估报告 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            report_id: 报告 ID，直接作为文件名主干拼为 reports/{report_id}.json。
+
+        Returns:
+            报告文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.reports_dir / f"{report_id}.json"
 
     def replay_path(self, replay_id: str) -> Path:
+        """返回治理回放报告 JSON 文件的完整路径（不保证文件已存在）。
+
+        Args:
+            replay_id: 回放报告 ID，直接作为文件名主干拼为 replay_reports/{replay_id}.json。
+
+        Returns:
+            回放报告文件的完整 Path，仅做路径拼接、不触盘。
+        """
         return self.replay_reports_dir / f"{replay_id}.json"
 
     def save_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        """持久化候选模型元数据。
+
+        Args:
+            candidate: 候选信息字典，须含 candidate_id 键。
+
+        Returns:
+            原样返回 candidate 字典。
+        """
         _write_json(self.candidate_path(str(candidate["candidate_id"])), candidate)
         return candidate
 
     def get_candidate(self, candidate_id: str) -> dict[str, Any] | None:
+        """读取候选模型元数据；不存在时返回 None。
+
+        Args:
+            candidate_id: 候选 ID，对应 candidates/{candidate_id}.json。
+
+        Returns:
+            候选信息字典；文件不存在时返回 None。
+        """
         path = self.candidate_path(candidate_id)
         if not path.exists():
             return None
         return _read_json(path, {})
 
     def list_candidates(self) -> list[dict[str, Any]]:
+        """列出所有候选模型，按 created_at 降序排列。
+
+        Returns:
+            候选信息字典列表；candidates 目录为空时返回 []。
+        """
         return sorted(
             [_read_json(path, {}) for path in self.candidates_dir.glob("*.json")],
             key=lambda item: str(item.get("created_at", "")),
@@ -135,26 +248,63 @@ class CNNGovernanceStore:
         )
 
     def save_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        """持久化 WF/OOS 评估报告。
+
+        Args:
+            report: 报告字典，须含 report_id 键。
+
+        Returns:
+            原样返回 report 字典。
+        """
         _write_json(self.report_path(str(report["report_id"])), report)
         return report
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
+        """读取 WF/OOS 评估报告；不存在时返回 None。
+
+        Args:
+            report_id: 报告 ID，对应 reports/{report_id}.json。
+
+        Returns:
+            报告字典；文件不存在时返回 None。
+        """
         path = self.report_path(report_id)
         if not path.exists():
             return None
         return _read_json(path, {})
 
     def save_replay_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        """持久化治理回放报告。
+
+        Args:
+            report: 回放报告字典，须含 replay_id 键。
+
+        Returns:
+            原样返回 report 字典。
+        """
         _write_json(self.replay_path(str(report["replay_id"])), report)
         return report
 
     def get_replay_report(self, replay_id: str) -> dict[str, Any] | None:
+        """读取治理回放报告；不存在时返回 None。
+
+        Args:
+            replay_id: 回放报告 ID，对应 replay_reports/{replay_id}.json。
+
+        Returns:
+            回放报告字典；文件不存在时返回 None。
+        """
         path = self.replay_path(replay_id)
         if not path.exists():
             return None
         return _read_json(path, {})
 
     def list_replay_reports(self) -> list[dict[str, Any]]:
+        """列出所有治理回放报告，按 created_at 降序排列。
+
+        Returns:
+            回放报告字典列表；replay_reports 目录为空时返回 []。
+        """
         return sorted(
             [_read_json(path, {}) for path in self.replay_reports_dir.glob("*.json")],
             key=lambda item: str(item.get("created_at", "")),
@@ -162,6 +312,15 @@ class CNNGovernanceStore:
         )
 
     def append_history(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """追加一条治理历史事件到 JSONL 日志文件。
+
+        Args:
+            event_type: 事件类型字符串，如 "candidate_trained"、"production_rollback"。
+            payload: 事件附带的结构化数据字典。
+
+        Returns:
+            序列化后的事件字典（含 event_type/payload/created_at）。
+        """
         event = CNNGovernanceHistoryEvent(event_type=event_type, payload=payload).model_dump()
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
         with self.history_path.open("a", encoding="utf-8") as file:
@@ -169,6 +328,11 @@ class CNNGovernanceStore:
         return event
 
     def history(self) -> list[dict[str, Any]]:
+        """读取全量治理历史事件列表（按写入时间升序）。
+
+        Returns:
+            事件字典列表；历史文件不存在时返回 []。
+        """
         if not self.history_path.exists():
             return []
         return [
@@ -179,17 +343,57 @@ class CNNGovernanceStore:
 
 
 store = CNNGovernanceStore()
+# 全局生产治理 store 的稳定别名：供函数内部在形参也叫 ``store`` 时仍能干净地
+# 引用到模块级生产 store（避免形参遮蔽全局名），二者始终指向同一对象。
+_GLOBAL_STORE = store
 
 
 def _serialize_groups(groups: list[Any]) -> list[dict[str, Any]]:
+    """将观测分组列表序列化为纯字典列表（兼容 Pydantic 模型和普通字典）。
+
+    Args:
+        groups: Pydantic 模型对象或字典的混合列表。
+
+    Returns:
+        纯字典列表，顺序与输入一致。
+    """
     return [g.model_dump() if hasattr(g, "model_dump") else dict(g) for g in groups]
 
 
 def _label_spec_dict(value: Any) -> dict[str, Any]:
+    """将 label 配置对象转为纯字典（兼容 Pydantic 模型和 None）。
+
+    Args:
+        value: Pydantic LabelSpec 模型、普通字典或 None。
+
+    Returns:
+        纯字典；value 为 None 时返回空字典。
+    """
     return value.model_dump() if hasattr(value, "model_dump") else dict(value or {})
 
 
 def _core_score(statistics: dict[str, Any], objective: str) -> float:
+    """计算用于 WF 折对比的核心综合得分，越高越好。
+
+    公式：``total_return + sharpe * 5 - max_dd * 0.2 - trade_penalty``，
+    附加训练质量项（由 ``_merge_training_metrics`` 注入）：
+    - regression：``+best_val_rank_ic * 10``（键缺失时中性按 0.0）
+    - path_class：``+(tp_auc + sl_auc - 1) * 10``（键缺失时各按 0.5 中性；
+      注意 0.5-0.5=0 恰好中性——此处用 ``None`` 判断而非 ``or``，
+      防止 0.0 被错误升为 0.5）
+
+    statistics 含 error 字段时返回 -1e9（标记为失败/无效）。
+
+    Args:
+        statistics: 回测统计字典，含 total_return/sharpe_ratio/max_ddpercent/
+            total_trade_count 等键（缺失或 None 按 0 处理）；
+            regression 时可含 best_val_rank_ic；
+            path_class 时可含 best_val_tp_auc / best_val_sl_auc。
+        objective: 训练目标，"classification"、"regression" 或 "path_class"。
+
+    Returns:
+        综合得分浮点值，保留 6 位有效小数。
+    """
     if statistics.get("error"):
         return -1e9
     total_return = float(statistics.get("total_return", 0.0) or 0.0)
@@ -200,7 +404,64 @@ def _core_score(statistics: dict[str, Any], objective: str) -> float:
     score = total_return + sharpe * 5.0 - max_dd * 0.2 - trade_penalty
     if objective == "regression":
         score += float(statistics.get("best_val_rank_ic", 0.0) or 0.0) * 10.0
+    elif objective == "path_class":
+        # 用 None 判断而非 or：AUC=0.0 是有效值，不可被 or 吞掉升为 0.5
+        raw_tp = statistics.get("best_val_tp_auc")
+        raw_sl = statistics.get("best_val_sl_auc")
+        tp_auc = 0.5 if raw_tp is None else float(raw_tp)
+        sl_auc = 0.5 if raw_sl is None else float(raw_sl)
+        score += (tp_auc + sl_auc - 1.0) * 10.0
     return round(score, 6)
+
+
+def _merge_training_metrics(
+    statistics: dict[str, Any],
+    model_name: str,
+    checkpoint: dict[str, Any],
+) -> None:
+    """将 checkpoint 对应的训练期验证指标并入 statistics（原地修改）。
+
+    从 ``{model_name}_history.json`` 读取 ``best_epoch`` 处的 epoch 指标，
+    将目标键写入 statistics 供 ``_core_score`` 读取：
+    - regression：``best_val_rank_ic``（Spearman 相关，范围 -1~1）
+    - path_class：``best_val_tp_auc``、``best_val_sl_auc``（AUC，范围 0~1）
+
+    设计说明：这些指标存储于训练历史 JSON，而非 checkpoint 本体，因此回测统计
+    中默认不含这些键。本函数是唯一将训练质量信息接入治理评分的桥梁；若历史文件
+    缺失或 best_epoch 超出范围，静默跳过（由 _core_score 的缺失回退 0.5/0.0 兜底）。
+
+    Args:
+        statistics: 回测统计字典，原地写入目标键。
+        model_name: 模型名称（不含 .pt 后缀），用于定位 _history.json 文件。
+        checkpoint: 已加载的 checkpoint 字典，须含 best_epoch 键。
+    """
+    history_path = CNN_MODEL_DIR / f"{model_name}_history.json"
+    if not history_path.exists():
+        return
+    try:
+        with history_path.open(encoding="utf-8") as file:
+            history: list[dict[str, Any]] = json.load(file)
+    except (OSError, ValueError):
+        return
+
+    best_epoch: int = int(checkpoint.get("best_epoch") or 0)
+    if best_epoch <= 0 or best_epoch > len(history):
+        return
+    best_metrics = history[best_epoch - 1]
+
+    objective = checkpoint.get("train_config", {}).get("objective", "classification")
+    if objective == "regression":
+        val = best_metrics.get("val_rank_ic")
+        if val is not None:
+            statistics["best_val_rank_ic"] = float(val)
+    elif objective == "path_class":
+        for stat_key, hist_key in (
+            ("best_val_tp_auc", "val_tp_auc"),
+            ("best_val_sl_auc", "val_sl_auc"),
+        ):
+            val = best_metrics.get(hist_key)
+            if val is not None:
+                statistics[stat_key] = float(val)
 
 
 def _backtest_model(
@@ -212,7 +473,30 @@ def _backtest_model(
     capital: float,
     params: CNNBacktestParams,
 ) -> dict[str, Any]:
-    """Run a CNN model backtest without going through the API layer."""
+    """直接在治理流程内回测一个 CNN 模型，绕过 API 层。
+
+    先用 predict_cnn_signals 生成信号，再读取 checkpoint 的训练配置确定标的、
+    输入周期与离场方式（exit_mode="auto" 时由标签规格反推持有/止盈止损），
+    配好交易成本/滑点/T+1/成交价模式后跑回测，最终把训练期验证指标
+    （rank_ic / tp_auc / sl_auc）并入统计供 _core_score 评分。仅供治理模块内部调用。
+
+    Args:
+        model_name: 待回测的模型名（不含 .pt 后缀），对应 CNN_MODEL_DIR 下的权重文件。
+        name: 本次回测的展示名，原样写入返回结果的 name 字段，用于区分候选/生产/各折。
+        start: 回测起始日期（含）。
+        end: 回测结束日期（含）。
+        capital: 初始资金（元），传入引擎时取整。
+        params: 回测参数（买卖阈值、离场方式、成本、滑点、否决阈值等）；
+            exit_mode="auto" 时离场参数由标签规格自动反推。
+
+    Returns:
+        字典，含 name/model/target_symbol/statistics/trades/equity_curve。
+        异常路径下 statistics 仅含 error 键（取值："CNN 推理未产生任何信号"、
+        "信号与行情 datetime 无交集"、"回测期间无成交"），trades/equity_curve 为空列表。
+
+    Raises:
+        FileNotFoundError: 模型权重文件 {model_name}.pt 不存在时抛出。
+    """
     import torch
 
     from .storage import CNN_MODEL_DIR
@@ -281,6 +565,8 @@ def _backtest_model(
             "hold_days": hold_days,
             "take_profit": take_profit,
             "stop_loss": stop_loss,
+            # path_class 专用：否决阈值透传，非 path_class 下保持默认 1.0（等效关闭）
+            "veto_threshold": params.veto_threshold,
         },
         signal_df,
     )
@@ -311,6 +597,10 @@ def _backtest_model(
             "equity_curve": [],
         }
     statistics = engine.calculate_statistics()
+    # 将训练期验证指标（best_val_rank_ic / best_val_tp_auc / best_val_sl_auc）并入统计，
+    # 供 _core_score 读取。这些指标存储在 _history.json 的 best_epoch 行，而非 checkpoint 本体。
+    # 对称接线：regression 与 path_class 均从 history 读取，结构完全一致。
+    _merge_training_metrics(statistics, model_name, checkpoint)
     statistics.update({
         "objective": objective,
         "label_spec": label_spec,
@@ -342,6 +632,26 @@ def _train_governance_model(
     seed_index: int = 0,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
+    """在指定时间区间训练一个治理专用 CNN 模型（按 seed_index 选定随机种子）。
+
+    从 CNNWalkForwardRequest 中提取全量证券列表，将 ``seed_index`` 映射为
+    ``seed = BASE_SEED + seed_index`` 下传 train_cnn_model：seed_index 不再只是
+    返回字典里的标记，而是真正驱动权重初始化与 DataLoader shuffle，使不同
+    seed_index 训出可分辨的不同模型（多种子治理的基础）。seed_index=0 退化为
+    单种子，等价于历史的硬编码默认种子。
+
+    Args:
+        req: WF/OOS 评估请求，含目标证券、观测分组、训练参数等。
+        model_name: 本次训练保存的模型名称（含日期范围后缀由 train_cnn_model 自动追加）。
+        start: 训练数据起始日期（含）。
+        end: 训练数据结束日期（含）。
+        seed_index: 重复试验序号（从 0 起）；映射为实际种子 BASE_SEED+seed_index
+            下传训练，并写入返回字典供溯源。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+
+    Returns:
+        train_cnn_model 的返回字典附加 seed_index 键（实际所用种子为 BASE_SEED+seed_index）。
+    """
     target = req.target_symbol
     symbols = [target]
     for group in req.observation_groups:
@@ -366,22 +676,87 @@ def _train_governance_model(
         label_spec=_label_spec_dict(req.label_spec),
         loss_weighting=req.training_params.loss_weighting,
         objective=req.objective,
+        seed=BASE_SEED + seed_index,
         on_progress=on_progress,
     ) | {"seed_index": seed_index}
+
+
+def _cross_seed_dispersion(scores: list[float]) -> dict[str, Any]:
+    """汇总同一折内多个随机种子的得分，给出均值/标准差/样本数。
+
+    用于衡量候选模型对随机种子的敏感度：std 越大说明该折结果越不稳定、
+    越依赖具体种子，治理决策应更谨慎。门禁与生产对比统一消费这里的 mean，
+    避免单一幸运种子蒙混过关。
+
+    Args:
+        scores: 同一折内各种子的核心得分列表（_core_score 输出）。n=1 即单种子。
+
+    Returns:
+        字典 ``{"mean": float, "std": float, "n": int}``：
+        - n: 种子数（len(scores)）；
+        - mean: 各种子得分均值，空列表时为 0.0；
+        - std: 总体标准差（ddof=0），n<2 或空列表时恒为 0.0。
+
+    Example:
+        >>> _cross_seed_dispersion([0.2, 0.4, 0.6])
+        {'mean': 0.4, 'std': 0.163..., 'n': 3}
+        >>> _cross_seed_dispersion([0.5])
+        {'mean': 0.5, 'std': 0.0, 'n': 1}
+    """
+    n = len(scores)
+    if n == 0:
+        return {"mean": 0.0, "std": 0.0, "n": 0}
+    arr = np.asarray(scores, dtype=float)
+    mean = float(arr.mean())
+    std = float(arr.std(ddof=0)) if n > 1 else 0.0
+    return {"mean": mean, "std": std, "n": n}
 
 
 def run_walk_forward_evaluate(
     req: CNNWalkForwardRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
+    store: Optional["CNNGovernanceStore"] = None,
 ) -> dict[str, Any]:
-    """Run WF/OOS evaluation and persist a report."""
+    """执行 Walk-Forward/OOS 多折评估并持久化评估报告（支持折内多种子）。
+
+    按 (train_days, test_days, step_days) 生成滚动窗口。每折对 ``req.n_seeds`` 个
+    随机种子（seed=BASE_SEED+seed_index）各训一个独立模型并在测试区间回测，候选
+    得分取这些种子核心得分的均值（``cross_seed.mean``），并记录跨种子标准差
+    （``cross_seed.std``）衡量结果对种子的敏感度。门禁与生产对比均消费跨种子均值，
+    避免单一幸运种子蒙混过关。生产模型已固定，每折只回测一次。最终汇总折胜率、
+    平均得分提升与平均跨种子波动，并应用 promotion_gate 判断是否通过晋级门禁。
+
+    Args:
+        req: WF/OOS 评估请求，含时间区间、训练参数、回测参数、晋级门禁与
+            ``n_seeds``（每折种子数，<1 时按 1 兜底）。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+        store: 治理产物存储。默认 None，表示沿用模块级全局生产 store
+            （写入 ``CNN_GOVERNANCE_PATH``）——既有调用方不传此参数时行为
+            与改动前逐字节一致。选股 Tier-2 传入一个指向
+            ``SCREENING_GOVERNANCE_PATH`` 的隔离 ``CNNGovernanceStore``，
+            使 WF 报告与历史落到选股专用治理区，绝不污染生产治理产物。
+            注意：仅评估报告/历史/生产模型读取经此 store 路由；折内临时
+            训练模型（``.pt``）仍由 ``CNN_MODEL_DIR`` 接管，与本参数无关。
+
+    Returns:
+        评估报告字典，含 report_id/type/folds/summary 等字段；每折附
+        ``cross_seed`` ``{mean,std,n}`` 与 ``candidate_seed_scores``，summary 附
+        ``n_seeds`` 与 ``avg_cross_seed_std``；已持久化到所用 store。
+
+    Raises:
+        ValueError: 无法生成 walk-forward 窗口（日期范围或窗口参数不合理）时抛出。
+    """
+    # 形参 ``store`` 与模块级全局生产 store 同名；未注入时回落到 _GLOBAL_STORE，
+    # 函数体内一律改用 active_store，避免名字遮蔽并保证默认路径零行为变化。
+    active_store = store if store is not None else _GLOBAL_STORE
     report_id = _now_id("wf")
     windows = walk_forward_windows(req.start, req.end, req.train_days, req.test_days, req.step_days)
     if not windows:
         raise ValueError("无法生成 walk-forward 窗口，请扩大日期范围或缩短 train/test days")
 
-    production = store.get_production()
+    production = active_store.get_production()
     production_model = req.production_model or production.get("model_name") or ""
+    n_seeds = max(1, req.n_seeds)
     folds: list[dict[str, Any]] = []
     candidate_wins = 0
     score_deltas: list[float] = []
@@ -391,29 +766,45 @@ def run_walk_forward_evaluate(
         train_start, train_end = window["train"]
         test_start, test_end = window["test"]
         if on_progress:
-            on_progress(5 + 85 * (idx - 1) / total_steps, f"WF {idx}/{total_steps}: 训练 {train_start}~{train_end}")
+            on_progress(
+                5 + 85 * (idx - 1) / total_steps,
+                f"WF {idx}/{total_steps}: 训练 {train_start}~{train_end}（{n_seeds} 个种子）",
+            )
 
-        model_name = f"{req.name}_wf{idx}_{uuid.uuid4().hex[:4]}"
-        train_result = _train_governance_model(
-            req,
-            model_name=model_name,
-            start=train_start,
-            end=train_end,
-        )
-        actual_model = str(train_result["name"])
-        candidate_bt = _backtest_model(
-            model_name=actual_model,
-            name=f"{req.name}_wf{idx}_candidate",
-            start=test_start,
-            end=test_end,
-            capital=1_000_000,
-            params=req.backtest_params,
-        )
-        candidate_score = _core_score(candidate_bt.get("statistics", {}), req.objective)
+        # 折内对 n_seeds 个种子各训一个模型并回测，收集核心得分；
+        # 候选得分取跨种子均值，避免单个幸运种子主导晋级判定。
+        seed_scores: list[float] = []
+        seed_models: list[str] = []
+        seed_statistics: list[dict[str, Any]] = []
+        for seed_index in range(n_seeds):
+            model_name = f"{req.name}_wf{idx}_s{seed_index}_{uuid.uuid4().hex[:4]}"
+            train_result = _train_governance_model(
+                req,
+                model_name=model_name,
+                start=train_start,
+                end=train_end,
+                seed_index=seed_index,
+            )
+            actual_model = str(train_result["name"])
+            candidate_bt = _backtest_model(
+                model_name=actual_model,
+                name=f"{req.name}_wf{idx}_s{seed_index}_candidate",
+                start=test_start,
+                end=test_end,
+                capital=1_000_000,
+                params=req.backtest_params,
+            )
+            seed_models.append(actual_model)
+            seed_statistics.append(candidate_bt.get("statistics", {}))
+            seed_scores.append(_core_score(candidate_bt.get("statistics", {}), req.objective))
+
+        cross_seed = _cross_seed_dispersion(seed_scores)
+        candidate_score = cross_seed["mean"]
 
         production_bt: dict[str, Any] | None = None
         production_score: float | None = None
         if production_model and (CNN_MODEL_DIR / f"{production_model}.pt").exists():
+            # 生产模型已固定，无需多种子重复，单次回测即可。
             production_bt = _backtest_model(
                 model_name=production_model,
                 name=f"{req.name}_wf{idx}_production",
@@ -432,9 +823,17 @@ def run_walk_forward_evaluate(
             "fold": idx,
             "train": {"start": train_start.isoformat(), "end": train_end.isoformat()},
             "test": {"start": test_start.isoformat(), "end": test_end.isoformat()},
-            "candidate_model": actual_model,
-            "candidate_statistics": candidate_bt.get("statistics", {}),
+            # candidate_model / candidate_statistics 取第 0 个种子作"代表"展示用；
+            # 晋级判定真正消费的 candidate_score 是跨种子均值（cross_seed.mean），
+            # 二者在多种子分歧时不会逐项对账一致——完整的逐种子数据见
+            # candidate_seed_statistics / candidate_seed_scores / cross_seed。
+            "candidate_model": seed_models[0],
+            "candidate_models": seed_models,
+            "candidate_statistics": seed_statistics[0],
+            "candidate_seed_statistics": seed_statistics,
+            "candidate_seed_scores": seed_scores,
             "candidate_score": candidate_score,
+            "cross_seed": cross_seed,
             "production_model": production_model,
             "production_statistics": production_bt.get("statistics", {}) if production_bt else None,
             "production_score": production_score,
@@ -455,12 +854,16 @@ def run_walk_forward_evaluate(
             "candidate_win_count": candidate_wins,
             "candidate_win_rate": round(candidate_wins / len(folds), 4) if folds else 0.0,
             "avg_score_delta": round(sum(score_deltas) / len(score_deltas), 6) if score_deltas else None,
+            "n_seeds": n_seeds,
+            "avg_cross_seed_std": (
+                round(sum(f["cross_seed"]["std"] for f in folds) / len(folds), 6) if folds else None
+            ),
             "passed": pass_result["passed"],
             "reasons": pass_result["reasons"],
         },
     }
-    store.save_report(report)
-    store.append_history("wf_evaluate_completed", {"report_id": report_id, "passed": pass_result["passed"]})
+    active_store.save_report(report)
+    active_store.append_history("wf_evaluate_completed", {"report_id": report_id, "passed": pass_result["passed"]})
     if on_progress:
         on_progress(100, "WF/OOS 评估完成")
     return report
@@ -473,6 +876,25 @@ def _gate_result(
     *,
     has_production: bool,
 ) -> dict[str, Any]:
+    """判断候选模型是否通过晋级门禁，返回结果与失败原因列表。
+
+    无生产模型时，直接返回 passed=False 并附提示（首个模型需人工确认）。
+    有生产模型时，依次校验：
+    - require_positive_oos：候选平均 OOS 核心分数须为正。
+    - min_win_rate：候选折胜率须达标。
+    - min_core_score_delta：候选平均分数提升须达标。
+
+    Args:
+        folds: WF 各折结果列表，每项含 candidate_score/score_delta 等键。
+        gate: 晋级门禁配置（CNNPromotionGate）。
+        objective: 训练目标，"classification" | "regression" | "path_class"；
+            门禁判定本身不区分目标（目标间的评分差异已在 _core_score 中体现）。
+        has_production: 当前是否存在生产模型；False 时跳过对比类门禁。
+
+    Returns:
+        字典 ``{"passed": bool, "reasons": list[str]}``；通过时 reasons 含成功说明，
+        未通过时 reasons 列出各失败原因。
+    """
     reasons: list[str] = []
     if not folds:
         return {"passed": False, "reasons": ["无 WF 折结果"]}
@@ -499,7 +921,21 @@ def train_candidate(
     req: CNNCandidateTrainRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """Run WF report, train final candidate, and persist candidate metadata."""
+    """执行 WF/OOS 评估、训练最终候选模型并持久化候选元数据。
+
+    流程：
+    1. 运行 WF/OOS 评估（占总进度 55%）；
+    2. 用 final_train_start~final_train_end 训练最终候选模型（占 25%）；
+    3. 将候选信息（含 WF 报告 ID、通过/失败状态）写入候选库。
+
+    Args:
+        req: 候选训练请求，继承 CNNWalkForwardRequest 并补充 final_train_start/end。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+
+    Returns:
+        候选元数据字典，含 candidate_id/status/model_name/report_id/summary 等键；
+        已持久化到 store，并追加 candidate_trained 历史事件。
+    """
     if on_progress:
         on_progress(5, "开始候选模型 WF/OOS 评估...")
     wf_report = run_walk_forward_evaluate(
@@ -541,6 +977,21 @@ def train_candidate(
 
 
 def promote_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict[str, Any]:
+    """将候选模型晋级为生产模型并记录历史事件。
+
+    校验候选存在且模型文件存在后，将候选信息写入 production.json，
+    更新候选状态为 "promoted"，追加 candidate_promoted 历史事件。
+
+    Args:
+        candidate_id: 待晋级的候选 ID。
+        req: 晋级请求，含 promoted_by（操作人）和 note（备注）。
+
+    Returns:
+        更新后的生产模型信息字典。
+
+    Raises:
+        FileNotFoundError: 候选不存在或候选模型文件缺失时抛出。
+    """
     candidate = store.get_candidate(candidate_id)
     if candidate is None:
         raise FileNotFoundError(f"候选不存在: {candidate_id}")
@@ -570,6 +1021,18 @@ def promote_candidate(candidate_id: str, req: CNNPromotionRequest) -> dict[str, 
 
 
 def reject_candidate(candidate_id: str, note: str = "") -> dict[str, Any]:
+    """拒绝候选模型并更新其状态为 "rejected"。
+
+    Args:
+        candidate_id: 待拒绝的候选 ID。
+        note: 拒绝原因备注（可为空）。
+
+    Returns:
+        更新后的候选元数据字典。
+
+    Raises:
+        FileNotFoundError: 候选不存在时抛出。
+    """
     candidate = store.get_candidate(candidate_id)
     if candidate is None:
         raise FileNotFoundError(f"候选不存在: {candidate_id}")
@@ -582,6 +1045,21 @@ def reject_candidate(candidate_id: str, note: str = "") -> dict[str, Any]:
 
 
 def rollback_production(req: CNNRollbackRequest) -> dict[str, Any]:
+    """将生产模型回滚到上一版本（或指定模型）并记录历史事件。
+
+    取当前生产信息的 previous_model_name 作为回滚目标（或使用 req.rollback_to 显式指定），
+    将目标模型升格为新生产模型，并在版本号中嵌入 "rollback_" 前缀以示区分。
+
+    Args:
+        req: 回滚请求，含可选的 rollback_to（指定回滚目标）、requested_by 和 note。
+
+    Returns:
+        更新后的生产模型信息字典。
+
+    Raises:
+        ValueError: 当前生产信息中无上一版本可回滚时抛出。
+        FileNotFoundError: 回滚目标模型文件不存在时抛出。
+    """
     current = store.get_production()
     target_model = req.rollback_to or current.get("previous_model_name", "")
     if not target_model:
@@ -603,6 +1081,22 @@ def rollback_production(req: CNNRollbackRequest) -> dict[str, Any]:
 
 
 def _buy_and_hold(vt_symbol: str, start: date, end: date, capital: float, interval: str) -> dict[str, Any]:
+    """计算买入持有基准策略的净值曲线与汇总统计。
+
+    以 start 日收盘价买入，持有到 end，仅计算持有期内每日相对首日收盘价的资产价值变化，
+    不考虑交易成本。用于治理回放中与主动管理策略对比。
+
+    Args:
+        vt_symbol: 标的证券代码。
+        start: 持仓起始日期（含）。
+        end: 持仓结束日期（含）。
+        capital: 初始资金（元）。
+        interval: K 线周期，如 "d"。
+
+    Returns:
+        字典，含 statistics（total_return/end_balance 等汇总指标）
+        和 equity_curve（逐日 {date, balance} 列表）；无行情时 statistics 含 error 键。
+    """
     lab = AlphaLab(ALPHA_LAB_PATH)
     rows = lab.load_bar_frame(
         vt_symbol,
@@ -639,7 +1133,30 @@ def run_governance_replay(
     req: CNNGovernanceReplayRequest,
     on_progress: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, Any]:
-    """Replay model governance through history."""
+    """在历史区间回放模型治理决策，对比三种基线策略。
+
+    按 evaluation_period_days 将 [start, end] 切分为多个评估周期，每周期：
+    1. 训练新候选；
+    2. 在本周期回测候选模型与当前治理模型；
+    3. 若候选得分超出 promotion_gate.min_core_score_delta 则自动晋级（"governed_promotion"）。
+
+    同步维护三条基线以供比较：
+    - fixed_initial_model：全程使用初始模型，不重训不换；
+    - always_retrain：每周期无脑重训并使用最新模型；
+    - governed_promotion：治理决策驱动的晋级策略（本方法的核心）；
+    - buy_and_hold：买入持有目标标的基准。
+
+    Args:
+        req: 治理回放请求，含时间区间、评估周期、初训天数、晋级门禁等配置。
+        on_progress: 进度回调 ``(percent, message)``，可为 None。
+
+    Returns:
+        回放报告字典，含 replay_id/baselines/promotion_events/rejected_events/conclusion 等；
+        已持久化到 store，并追加 governance_replay_completed 历史事件。
+
+    Raises:
+        ValueError: 回放区间为空（end <= start）时抛出。
+    """
     replay_id = _now_id("replay")
     cycle_starts: list[date] = []
     cursor = req.start
@@ -650,6 +1167,19 @@ def run_governance_replay(
         raise ValueError("回放区间为空")
 
     def train_for_cycle(prefix: str, train_end: date) -> str:
+        """为回放某一周期训练单个治理模型并返回落盘后的模型名。
+
+        回放刻意使用单种子（seed_index=0，即 seed=BASE_SEED），保证回放结果
+        确定可复现，且不让"每周期×多种子"的开销在长区间回放中爆炸；多种子的
+        鲁棒性评估留给 run_walk_forward_evaluate 的折内循环。
+
+        Args:
+            prefix: 本周期模型名前缀（已含唯一后缀，避免覆盖）。
+            train_end: 该周期训练窗结束日期；起点回退 initial_train_days 天。
+
+        Returns:
+            train_cnn_model 落盘后的实际模型名（含日期范围后缀）。
+        """
         train_start = train_end - timedelta(days=req.initial_train_days)
         train_req = CNNWalkForwardRequest(
             name=prefix,
@@ -667,7 +1197,11 @@ def run_governance_replay(
             backtest_params=req.backtest_params,
             promotion_gate=req.promotion_gate,
         )
-        return str(_train_governance_model(train_req, model_name=prefix, start=train_start, end=train_end)["name"])
+        return str(
+            _train_governance_model(
+                train_req, model_name=prefix, start=train_start, end=train_end, seed_index=0
+            )["name"]
+        )
 
     if on_progress:
         on_progress(5, "训练回放初始模型...")
@@ -790,6 +1324,18 @@ def run_governance_replay(
 
 
 def _period_result(start: date, end: date, model: str, backtest: dict[str, Any], objective: str) -> dict[str, Any]:
+    """将单个评估周期的回测结果汇整为标准化字典。
+
+    Args:
+        start: 评估周期起始日期。
+        end: 评估周期结束日期。
+        model: 本周期使用的模型名称。
+        backtest: _backtest_model 返回的完整回测结果字典。
+        objective: 训练目标，用于 _core_score 的计算。
+
+    Returns:
+        字典，含 start/end/model/statistics/score/equity_curve/trades 键。
+    """
     stats = backtest.get("statistics", {})
     return {
         "start": start.isoformat(),
@@ -803,6 +1349,19 @@ def _period_result(start: date, end: date, model: str, backtest: dict[str, Any],
 
 
 def _aggregate_periods(periods: list[dict[str, Any]], capital: float) -> dict[str, Any]:
+    """汇总多个评估周期的统计指标为整体绩效摘要。
+
+    total_return 为各周期之和（非复利），annual_return 按周期数折算为年化，
+    sharpe_ratio 为各周期均值，max_ddpercent 取各周期最大值。
+
+    Args:
+        periods: _period_result 返回的字典列表，含 statistics 键。
+        capital: 初始资金（元），写入 summary 供前端显示。
+
+    Returns:
+        绩效摘要字典，含 total_return/annual_return/sharpe_ratio/max_ddpercent/
+        total_trade_count/turnover/total_cost/empty_position_ratio/capital。
+    """
     returns = [float(p.get("statistics", {}).get("total_return", 0.0) or 0.0) for p in periods]
     trade_counts = [float(p.get("statistics", {}).get("total_trade_count", 0.0) or 0.0) for p in periods]
     turnovers = [float(p.get("statistics", {}).get("total_turnover", 0.0) or 0.0) for p in periods]
@@ -823,6 +1382,18 @@ def _aggregate_periods(periods: list[dict[str, Any]], capital: float) -> dict[st
 
 
 def _replay_conclusion(results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """根据三条基线的总收益率生成治理回放结论与建议。
+
+    比较 governed_promotion 与 fixed_initial_model、always_retrain 的 total_return，
+    给出四种结论之一并附使用建议。
+
+    Args:
+        results: 回放报告的 baselines 字典，键为基线名，值含 statistics 子字典。
+
+    Returns:
+        字典，含 better_than_fixed_initial_model/better_than_always_retrain/
+        recommend_enable_promotion/verdict 四个键。
+    """
     fixed = results.get("fixed_initial_model", {}).get("statistics", {})
     always = results.get("always_retrain", {}).get("statistics", {})
     governed = results.get("governed_promotion", {}).get("statistics", {})

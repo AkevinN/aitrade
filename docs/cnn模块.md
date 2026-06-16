@@ -684,3 +684,150 @@ flowchart TB
 7. **保存**（storage.py）：`.pt` checkpoint + `_history.json`
 8. **进度更新**（全程）：`on_progress(percent, message)` → TaskManager → 前端轮询
 9. **结果展示**（前端）：自动刷新模型列表 + 加载训练详情面板
+
+---
+
+## 五、路径形态多分类（path_class）
+
+> 特性来源：`.kiro/specs/cnn-path-multiclass-head/`，分支 `feat/cnn-path-multiclass-head`，Task 1~8 全部闭环。
+
+### 5.1 是什么——四类出场剧本
+
+`objective="path_class"` 将预测目标从"方向（涨/跌）"升级为"持仓路径"，对未来 `max_hold` 根 bar 内的出场方式做四分类：
+
+| 标签 | 编码 | 含义 | 触发条件 |
+|------|------|------|----------|
+| `tp_first` | 0 | 止盈先触发 | 持仓期内任意 bar 的 **high** 首先触及止盈价（`entry_price × (1 + take_profit)`） |
+| `sl_first` | 1 | 止损先触发 | 持仓期内任意 bar 的 **low** 首先触及止损价（`entry_price × (1 - stop_loss)`）；同根 bar 两侧均触发时保守假设止损先到 |
+| `time_up` | 2 | 时间止损（上涨方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **> threshold**（默认 threshold=0）|
+| `time_down` | 3 | 时间止损（下跌方向） | `max_hold` 根 bar 内未触及任何障碍，到期收益 **< -threshold**；dead-zone（\|ret\| ≤ threshold）按 `neutral_policy` 归入此类或丢弃 |
+
+标签由三重障碍法（OCO，One-Cancels-Other）生成，**必须配合 `label_spec.mode="oco"`**。建仓对齐 A 股 T+1：在 anchor+1 根**开盘价**建仓，障碍宽度以**建仓价**（开盘价）为基准，固定比例（`take_profit`/`stop_loss`）、最长持有 `max_hold` 根 bar；触发判定用每根 bar 的 **high/low**（收盘价不参与判定）。
+
+### 5.2 训练
+
+**损失函数**：`CrossEntropyLoss`（四分类），输出头为线性层（无 Sigmoid），logits 形状 `[B, 4]`。
+
+**选优指标**：验证集上同时监控 `tp_auc`（类 0 的 OvR AUC）和 `sl_auc`（类 1 的 OvR AUC），取 `tp_auc + sl_auc` 之和最大的 epoch 为最佳 epoch。AUC 缺失（某类无样本）时按 0.5 兜底。
+
+**`result` 字典额外键**：
+
+| 键 | 类型 | 说明 |
+|----|------|------|
+| `num_classes` | int=4 | 固定 4 类 |
+| `best_val_tp_auc` | float \| None | 最佳 epoch 的 tp_auc |
+| `best_val_sl_auc` | float \| None | 最佳 epoch 的 sl_auc |
+| `best_val_macro_f1` | float | 最佳 epoch 的 macro F1 |
+| `class_distribution` | dict | 四类训练样本数 `{tp_first, sl_first, time_up, time_down}` |
+
+**`loss_weighting`**：path_class 模式下强制回退为 `"none"`（均匀权重），幅度加权（`"magnitude"`）在此模式下无意义。
+
+### 5.3 推理
+
+`predict_cnn_signals(model_name, start, end)` 对 `path_class` 模型返回 **七列信号帧**：
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `datetime` | Datetime | 预测锚点日期 |
+| `vt_symbol` | String | 目标证券代码 |
+| `signal` | Float64 | **恒等于** `prob_tp`（止盈概率），保证与旧策略消费语义兼容 |
+| `prob_tp` | Float64 | 止盈先触发概率（类 0 softmax 输出） |
+| `prob_sl` | Float64 | 止损先触发概率（类 1 softmax 输出） |
+| `prob_time_up` | Float64 | 时间止损·向上概率（类 2） |
+| `prob_time_down` | Float64 | 时间止损·向下概率（类 3） |
+
+**关键约束**：`prob_tp + prob_sl + prob_time_up + prob_time_down ≡ 1.0`（softmax 保证）；`signal ≡ prob_tp`（Property 3）。
+
+`on_meta` 回调会透传 `objective="path_class"`，供调用方区分模型类型。
+
+### 5.4 回测——veto_threshold 否决
+
+`CNNSignalStrategy` 新增 `veto_threshold` 参数（默认 1.0，等效关闭）：
+
+```python
+# 入场时：prob_sl >= veto_threshold → 否决本次买入（否决计数 +1）
+if prob_sl >= veto_threshold:
+    self._veto_count += 1
+    return  # 不发出买单
+```
+
+**行为约束**：
+
+- 否决仅在 `prob_tp >= buy_threshold`（即将下买单）时才判断，不会在信号不足时误计数。
+- 信号帧不含 `prob_sl` 列（旧 classification/regression 模型）时，否决恒为 False，向后兼容。
+- 否决不影响出场：已持仓后 `prob_sl` 飙高，不触发提前平仓。
+- `engine.strategy._veto_count` 记录整个回测期间的累计否决次数。
+
+**`exit_mode="auto"` 推导**：`exit_mode` 请求默认值为 `"threshold"`，用户须显式传入 `"auto"` 才触发自动对齐。`auto` 读取 checkpoint 中存储的 **`label_spec.mode`** 进行推导：OCO label（`mode="oco"`）→ `exit_mode="oco"`（`take_profit`/`stop_loss`/`max_hold` 与 label 同口径）；固定持有期类 label（`horizon_bars` 等）→ `exit_mode="fixed_hold"`（`hold_days` 取自 label 持有期）。与信号帧列数无关；推导逻辑由 `aitrade.cnn.consistency.derive_strategy_exit_from_label` 实现。
+
+### 5.5 前端入口
+
+| 位置 | 控件 | 说明 |
+|------|------|------|
+| 训练页（CNNTrain） | 训练目标下拉 | 第三选项「**路径形态分类（四类剧本概率）**」，选中后标签模式自动锁定为 `oco`，显示止盈/止损/最大持有配置 |
+| 回测页（CNNBacktest） | veto 控件 | **无需勾选**；选中 `path_class` 模型后自动显示 `veto_threshold` 滑块（范围 **0.1~1.0**，1.0 标注"关闭"）；回测结果中 `veto_count` 仅在 **>0** 时展示 |
+
+### 5.6 与 classification / regression 的对比
+
+| 维度 | classification | regression | path_class |
+|------|---------------|------------|------------|
+| 预测目标 | 方向（涨/跌） | 未来收益率 | 出场路径（4 类） |
+| 损失函数 | BCELoss | HuberLoss | CrossEntropyLoss |
+| 输出形状 | [B, 1] + Sigmoid | [B, 1] | [B, 4]（logits） |
+| 信号帧列数 | 3 列 | 3 列 | 7 列 |
+| signal 含义 | 上涨概率 | 预测收益 | prob_tp（止盈概率） |
+| 选优指标 | val_auc | val_rank_ic | tp_auc + sl_auc |
+| 回测否决 | 不支持 | 不支持 | veto_threshold + prob_sl |
+| 实盘否决 | — | — | v1 未接线（见 O-002） |
+| label_spec.mode | 任意 | 任意 | 必须 oco |
+
+---
+
+## 六、评估诚实性（迭代 0）
+
+> 特性来源：`.kiro/specs/cnn-eval-honesty-fixes/`，分支 `feat/cnn-eval-honesty-fixes`，Task 1~7 全部落地，Property 1~7 由 Hypothesis 守护。
+>
+> 问题背景：初版训练/推理管道存在三处"静默欺骗"——多种子训出同一模型、阈值类型无法校验、对齐丢样本无告警——导致评估报告看起来健全，实际包含系统性误差。迭代 0 对这三处逐一打补丁并用属性测试锁定修复效果。
+
+### 6.1 种子真生效（多种子 WF）
+
+**问题**：旧实现 `train_cnn_model` 硬编码 `torch.manual_seed(42)`，治理模块的 `n_seeds` 多种子循环实际每次用同一随机状态，稳健性验证形同虚设，跨种子 std 恒为 0。
+
+**修复**：
+- `train_cnn_model(seed: int = 42)`：seed 作为显式参数传入，checkpoint `train_config.seed` 记录实际使用的值。
+- `_train_governance_model`：`seed_index` 映射为 `seed = BASE_SEED(42) + seed_index`，确保不同 seed_index 产出不同的随机状态。
+- `run_walk_forward_evaluate`：折内套 `CNNWalkForwardRequest.n_seeds`（默认 1）循环，每次用不同 seed 训练，聚合跨种子均值/标准差，WF summary 新增 `avg_cross_seed_std`，门禁用跨种子均值。
+
+**怎么用**：
+- 单种子（默认）：直接调用，行为与旧版一致。
+- 多种子验证：治理请求设置 `n_seeds=5`（或更多），WF 结果的 `cross_seed.std` 反映模型对随机初始化的敏感程度——std 越大说明模型越"靠运气"，建议在晋级门禁中设置 `avg_cross_seed_std` 上限。
+- **注意**：seed 在 CPU 上完全可复现；GPU 训练若未强制 `cudnn.deterministic`，单种子结果可能微小浮动（性能权衡，见 O-005）。
+
+### 6.2 信号自描述 objective + 阈值校验
+
+**问题**：`predict_cnn_signals` 返回的信号帧不携带 `objective` 元信息，回测 API、策略、实盘三处消费方无法区分当前模型是分类（概率型阈值 ∈[0,1]）还是回归（收益型阈值，任意量级）；regression 模型配 `buy_threshold=0.6`（概率默认值）静默不开仓，无任何报错。
+
+**修复**：
+- `predict_cnn_signals`：信号帧末列追加常量 `objective`（值为模型 checkpoint 中存储的 `objective` 字符串，如 `"regression"` / `"classification"` / `"path_class"`）。
+- `cnn/thresholds.py:threshold_scale_check(objective, buy, sell)`：纯函数，**返回违规原因列表 `list[str]`（空列表=通过），自身不抛异常**；概率型 objective 要求阈值 ∈[0,1]；regression 且 `buy≥0.5` 视为误用概率默认值；`objective=None` 或信号帧无 `objective` 列时返回空列表（向后兼容跳过）。如何处置非空原因由三处调用方各自决定（见下）。
+- 三处接入：回测 API 端点（400 Bad Request）、策略 `CNNSignalStrategy.on_init`（`_threshold_invalid=True` 防御纵深，仅拦开仓不阻出场）、实盘 `SignalService`（违规返回 hold）。
+
+**怎么用**：
+- 用户侧无需改动，校验自动生效。回测 API 在 `objective` 与阈值量纲不匹配时返回 `400 Bad Request`（detail 含违规原因），按提示调整 `buy_threshold`/`sell_threshold` 即可；策略/实盘侧则记录原因并拒绝开仓。
+- regression 模型的合理阈值量级是预期收益率（如 `buy_threshold=0.01` 表示预期涨 1% 才开仓），不是概率。
+- **已知限制**：regression 阈值校验是启发式（`buy≥0.5` 判概率误用），不拦"刻意设 0.4 超大收益阈值"这类罕见误配（见 O-005）。
+
+### 6.3 对齐丢弃率测量 + 报警
+
+**问题**：`_align_frames_by_datetime` 对多标的做 inner join，任一标的停牌则该时间步整体丢弃；停牌比例高时大量样本被静默删除，训练集出现系统性偏差，但结果字典不透出丢失比例。
+
+**修复**：
+- `features.alignment_drop_rate(symbol_frames, aligned_height)`：以参与对齐的各标的原始行数最大值为基准，计算丢弃比例（单标的无观测组时返回 0）。
+- 训练路径：`info["alignment_drop_rate"]` + 超阈值时 `info["alignment_warning"]`，trainer 同步写入 checkpoint 与 result warnings。
+- 推理路径：`on_meta["alignment_drop_rate"]`，超阈值时也写入警告。
+- 阈值常量 `ALIGN_DROP_WARN_THRESHOLD = 0.05`（丢失 >5% 触发警告）。
+
+**怎么用**：
+- 训练结果中 `result["alignment_drop_rate"]` 反映本次训练实际丢弃的样本比例；若超过 5% 会同时出现 `result["alignment_warning"]`。
+- 推理时 `on_meta["alignment_drop_rate"]` 可用于判断当前推理窗口的对齐质量，帮助排查"最近几天停牌导致信号缺失"问题。
+- 当 `alignment_drop_rate` 偏高（如 >20%）时，建议检查观测组中是否有长期停牌或数据缺失的标的，酌情从观测组中移除。

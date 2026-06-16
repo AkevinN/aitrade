@@ -1,15 +1,31 @@
 import React, { useMemo, useState } from 'react'
-import { Alert, Button, Card, Modal, Progress, Space, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Collapse, Modal, Progress, Space, Tag, Typography } from 'antd'
 
 import type { Task } from '../types/alpha'
 
 const { Text } = Typography
 
+/** 任务状态面板的 Props。 */
 interface TaskStatusPanelProps {
+  /** 要展示的任务对象；null/undefined 时整个组件不渲染 */
   task?: Task | null
+  /** 卡片标题；缺省使用 task.title 或 "任务状态" */
   title?: string
 }
 
+/**
+ * 通用任务状态面板（Task Status Panel）。
+ *
+ * 将异步任务的生命周期以卡片形式展示：
+ * - 状态 Tag + 实体名 + 更新时刻 + 耗时（duration_ms，R1 新增）
+ * - 进度条
+ * - 失败时：error Alert + 可折叠错误堆栈（error_traceback，R1 新增）
+ * - 部分失败：warning Alert（failed_symbols 列表）
+ * - 完成时：可弹窗查看完整 result JSON
+ *
+ * @param task - 要展示的任务对象
+ * @param title - 卡片标题覆盖
+ */
 const TaskStatusPanel: React.FC<TaskStatusPanelProps> = ({ task, title }) => {
   const [resultOpen, setResultOpen] = useState(false)
   const resultText = useMemo(
@@ -46,6 +62,9 @@ const TaskStatusPanel: React.FC<TaskStatusPanelProps> = ({ task, title }) => {
         <Tag color={tagColor[task.status] || 'default'}>{task.status}</Tag>
         {task.entity_name ? <Text type="secondary">{task.entity_name}</Text> : null}
         <Text type="secondary">{new Date(task.updated_at).toLocaleString()}</Text>
+        {task.duration_ms != null ? (
+          <Text type="secondary">耗时 {(task.duration_ms / 1000).toFixed(1)} 秒</Text>
+        ) : null}
       </Space>
       <Progress
         percent={Math.round(task.progress)}
@@ -68,6 +87,36 @@ const TaskStatusPanel: React.FC<TaskStatusPanelProps> = ({ task, title }) => {
               ))}
             </ul>
           ) : undefined}
+        />
+      ) : null}
+      {task.status === 'failed' && task.error_traceback ? (
+        <Collapse
+          size="small"
+          items={[
+            {
+              key: 'traceback',
+              label: '错误堆栈',
+              children: (
+                <pre
+                  style={{
+                    maxHeight: 240,
+                    margin: 0,
+                    overflow: 'auto',
+                    padding: 8,
+                    background: 'rgba(0, 0, 0, 0.04)',
+                    borderRadius: 4,
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  {task.error_traceback}
+                </pre>
+              ),
+            },
+          ]}
         />
       ) : null}
       {task.status === 'completed' && task.result ? (

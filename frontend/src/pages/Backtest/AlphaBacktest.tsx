@@ -18,6 +18,13 @@ import type { BacktestResultPayload, BacktestStatistics } from '../../types/alph
 const { Text } = Typography
 const { RangePicker } = DatePicker
 
+/**
+ * Alpha 信号回测页面：配置信号/资金/区间/基准，启动异步回测任务并展示结果。
+ *
+ * 左栏为回测配置表单与任务进度条；右栏在任务完成后展示统计指标（BacktestResults），
+ * 并在拿到完整结果载荷后追加净值曲线与买卖点 K 线（BacktestCharts）。
+ * 任务通过 useTask 轮询状态；失败时在右栏顶部以错误 Alert 提示。无 props，自管全部状态。
+ */
 const AlphaBacktest: React.FC = () => {
   const [backtestName, setBacktestName] = useState('')
   const [selectedSignal, setSelectedSignal] = useState('')
@@ -45,6 +52,12 @@ const AlphaBacktest: React.FC = () => {
     queryFn: () => alphaService.listSignals(),
   })
 
+  /**
+   * 提交回测请求并开始轮询任务。
+   *
+   * 未选信号时弹警告并直接返回；回测名称留空时按 `backtest_<信号>_<时间戳>` 自动生成；
+   * 基准留空则不传。成功后记录返回的 task_id 触发轮询，失败时弹错误提示（不抛出）。
+   */
   const handleRun = useCallback(async () => {
     if (!selectedSignal) {
       message.warning('请选择一个信号')

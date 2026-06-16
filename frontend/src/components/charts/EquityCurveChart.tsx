@@ -15,7 +15,11 @@ import {
 } from 'recharts'
 import type { EquityPoint } from './types'
 
+/**
+ * {@link EquityCurveChart} 组件 props。
+ */
 export interface EquityCurveChartProps {
+  /** 净值曲线数据点（按日期升序）；空数组时渲染占位空状态。 */
   points: EquityPoint[]
   /** 图表高度（px），默认 280 */
   height?: number
@@ -27,6 +31,12 @@ export interface EquityCurveChartProps {
 const BALANCE_COLOR = '#1668dc'
 const DRAWDOWN_COLOR = '#dc4446'
 
+/**
+ * 净值/回撤曲线图（基于 recharts）。
+ *
+ * 左轴展示账户净值（蓝色折线），右轴叠加回撤百分比（红色填充区域）。
+ * `points` 为空时渲染「暂无净值数据」占位。
+ */
 export default function EquityCurveChart({
   points,
   height = 280,

@@ -11,6 +11,8 @@ import {
   FolderOutlined,
   FundOutlined,
   ControlOutlined,
+  PieChartOutlined,
+  SearchOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
@@ -18,27 +20,37 @@ import DataPrepare from './pages/DataPrepare'
 import ModelTrain from './pages/ModelTrain'
 import CNNTrain from './pages/CNNTrain'
 import CNNGovernance from './pages/CNNGovernance'
+import CNNScreening from './pages/CNNScreening'
 import Signal from './pages/Signal'
 import Backtest from './pages/Backtest'
 import Resource from './pages/Resource'
 import TradingConsole from './pages/TradingConsole'
+import Portfolio from './pages/Portfolio'
 import { useTaskList } from './hooks/useTask'
 
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
+/** 侧边导航菜单项；key 同时作为路由路径，点击后 navigate 到对应页面。 */
 const menuItems = [
   { key: '/', icon: <DashboardOutlined />, label: '工作台' },
   { key: '/data-prepare', icon: <DatabaseOutlined />, label: '数据准备' },
   { key: '/model-train', icon: <RobotOutlined />, label: '模型训练' },
   { key: '/cnn-train', icon: <ExperimentOutlined />, label: 'CNN训练' },
   { key: '/cnn-governance', icon: <ControlOutlined />, label: 'CNN治理' },
+  { key: '/cnn-screening', icon: <SearchOutlined />, label: 'CNN选股' },
   { key: '/signal', icon: <ThunderboltOutlined />, label: '信号分析' },
   { key: '/backtest', icon: <LineChartOutlined />, label: '回测' },
   { key: '/trading-console', icon: <FundOutlined />, label: '交易操作台' },
+  { key: '/portfolio', icon: <PieChartOutlined />, label: '策略组合' },
   { key: '/resource', icon: <FolderOutlined />, label: '资源管理' },
 ]
 
+/**
+ * 路由路径到页面标题与描述的映射，供顶部标题栏渲染。
+ *
+ * 键为路由路径；未命中时回退到 `pageMeta['/']`（工作台）。
+ */
 const pageMeta: Record<string, { title: string; description: string }> = {
   '/': {
     title: '工作台',
@@ -60,6 +72,10 @@ const pageMeta: Record<string, { title: string; description: string }> = {
     title: 'CNN 治理',
     description: '滚动评估、候选模型、半自动晋级、回滚与治理回放回测。',
   },
+  '/cnn-screening': {
+    title: 'CNN 选股',
+    description: '批量评估 CNN 适配度，Tier-1 打分 + Tier-2 WF/OOS 实证，产出草稿榜单后一键带入训练。',
+  },
   '/signal': {
     title: '信号分析',
     description: '生成并检查预测信号，准备下游评估。',
@@ -72,12 +88,25 @@ const pageMeta: Record<string, { title: string; description: string }> = {
     title: '交易操作台',
     description: '临近收盘基于 CNN 预测产出今日决策与风控明细，仅提醒不下单。',
   },
+  '/portfolio': {
+    title: '策略组合',
+    description: '查看组合持仓账本、熔断状态与历史调仓记录。',
+  },
   '/resource': {
     title: '资源管理',
     description: '集中查看数据、模型和信号资源。',
   },
 }
 
+/**
+ * 应用外层布局（侧边导航 + 顶部标题栏 + 内容区）。
+ *
+ * - 侧边导航宽度自适应：≥768px 展开 200px；<768px 折叠至 72px 图标模式。
+ * - 顶部标题栏展示当前页面标题、描述与运行中任务计数（来自 useTaskList）。
+ * - children 渲染路由出口（由 App 组件传入）。
+ *
+ * @param children - 页面路由出口内容
+ */
 const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const navigate = useNavigate()
   const location = useLocation()
@@ -89,6 +118,7 @@ const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const meta = pageMeta[location.pathname] || pageMeta['/']
 
   React.useEffect(() => {
+    /** 监听窗口宽度，<768px 时把 isNarrow 置为 true 以折叠侧边导航。 */
     const handleResize = () => setIsNarrow(window.innerWidth < 768)
     handleResize()
     window.addEventListener('resize', handleResize)
@@ -207,6 +237,12 @@ const AppLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   )
 }
 
+/**
+ * 应用根组件，挂载路由树。
+ *
+ * 新增路由（本分支）：`/portfolio` → `Portfolio`（策略组合页面）。
+ * 其余路由与既有页面保持不变。
+ */
 const App: React.FC = () => {
   return (
     <AppLayout>
@@ -216,9 +252,11 @@ const App: React.FC = () => {
         <Route path="/model-train" element={<ModelTrain />} />
         <Route path="/cnn-train" element={<CNNTrain />} />
         <Route path="/cnn-governance" element={<CNNGovernance />} />
+        <Route path="/cnn-screening" element={<CNNScreening />} />
         <Route path="/signal" element={<Signal />} />
         <Route path="/backtest" element={<Backtest />} />
         <Route path="/trading-console" element={<TradingConsole />} />
+        <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/resource" element={<Resource />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

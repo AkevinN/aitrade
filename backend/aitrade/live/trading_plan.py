@@ -23,6 +23,26 @@ from .legacy_migration import migrate_plan
 
 @dataclass
 class TradingPlan:
+    """交易计划：把一次决策所需的完整配置持久化为可复用、可编辑的单元。
+
+    同时用于手动「按计划触发」与自动调度的输入（enable=True 时由 PlanScheduler 自动触发）。
+
+    脱敏红线（需求 2.9 / 9.4）：notify_channels 仅存通道名，凭证由 build_notifier 在运行时解析。
+
+    Attributes:
+        plan_id:          唯一标识（12 位 hex），由 new_id() 生成。
+        name:             计划展示名称（如 "etf_momentum_daily"）。
+        model:            CNN 模型名（cnn 计划必填）。
+        vt_symbol:        目标标的（cnn 计划必填）。
+        scheme:           方案名，参与 signal_id 命名空间。
+        bar_freq:         决策 bar 频率，"1d" 日频，分钟频为盘中监控模式。
+        trigger_times:    日频计划的调度唤醒时刻列表（HH:MM）。
+        notify_channels:  通知通道名列表（不含凭证）。
+        strategy_type:    "cnn"（默认）| "rule"（规则信号组合调仓）。
+        signal_source:    rule 计划的注册表信号源名（如 "etf_momentum"）。
+        trigger_schedule: 调度粒度："daily" | "weekly_first" | "monthly_first"。
+    """
+
     plan_id: str
     name: str
     # —— 决策参数（与 LiveDecisionRequest 同义；触发时构造请求用）——
@@ -46,17 +66,39 @@ class TradingPlan:
     trigger_times: list[str] = field(default_factory=lambda: ["15:05"])
     # —— 通知 ——（仅通道名，无凭证）
     notify_channels: list[str] = field(default_factory=list)
+    # —— Phase 3：策略类型与调度粒度 ——
+    strategy_type: str = "cnn"             # "cnn" | "rule"
+    signal_source: str = ""                # rule 计划的注册表信号源名（如 "etf_momentum"）
+    signal_params: dict = field(default_factory=dict)
+    trigger_schedule: str = "daily"        # "daily" | "weekly_first" | "monthly_first"
+    portfolio_id: str = ""                 # rule 计划关联的持仓账本 id（Phase 3 后续任务消费）
     # —— 元信息 ——
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     @staticmethod
     def new_id() -> str:
+        """生成新的 plan_id，用于初始化一个新计划。
+
+        Returns:
+            截取 UUID4 十六进制串前 12 位的字符串，如 "a1b2c3d4e5f6"；
+            在本系统规模下碰撞概率可忽略。
+        """
         return uuid.uuid4().hex[:12]
 
 
 def effective_trigger_times(plan: "TradingPlan") -> list[str]:
-    """计划生效的唤醒时刻集合（去重升序；"HH:MM" 字典序即时间序）。"""
+    """计算计划实际生效的调度唤醒时刻集合，供调度器排程时使用。
+
+    在原始 trigger_times 基础上剔除空串、去重并升序排列；由于时刻为
+    定宽 "HH:MM" 格式，字典序即时间先后序。
+
+    Args:
+        plan: 目标交易计划；读取其 trigger_times 字段。
+
+    Returns:
+        去重升序的 "HH:MM" 时刻列表；无有效时刻时返回空列表。
+    """
     return sorted({t for t in plan.trigger_times if t})
 
 
@@ -68,14 +110,38 @@ class TradingPlanStore:
     """
 
     def __init__(self, base_path: Path | str) -> None:
+        """初始化计划存储，并确保落盘目录存在。
+
+        Args:
+            base_path: 计划 JSON 文件的存放目录；不存在时会连同父目录一并创建。
+        """
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _path(self, plan_id: str) -> Path:
+        """把 plan_id 映射为对应的 JSON 文件路径，并做文件名脱敏。
+
+        将 plan_id 中的 "/" 与 ":" 替换为 "_"，避免越权写到目录外或生成非法文件名。
+
+        Args:
+            plan_id: 计划唯一标识；正常由 new_id() 生成，仅含 hex 字符。
+
+        Returns:
+            base_path 下的 ``<安全化 plan_id>.json`` 路径（文件不一定已存在）。
+        """
         safe = plan_id.replace("/", "_").replace(":", "_")
         return self.base_path / f"{safe}.json"
 
     def _load(self, path: Path, *, rewrite: bool) -> TradingPlan:
+        """从文件加载并迁移 TradingPlan，可选地回写迁移结果。
+
+        Args:
+            path:    JSON 文件路径（已存在）。
+            rewrite: 若迁移后内容有变，是否回写磁盘（逐步收敛新结构）。
+
+        Returns:
+            迁移后的 TradingPlan 对象。
+        """
         raw = json.loads(path.read_text(encoding="utf-8"))
         migrated = migrate_plan(raw)
         if rewrite and migrated != raw:
@@ -83,12 +149,28 @@ class TradingPlanStore:
         return TradingPlan(**migrated)
 
     def get(self, plan_id: str) -> Optional[TradingPlan]:
+        """读取计划，不存在返回 None；读取时自动执行一次性迁移并回写。
+
+        Args:
+            plan_id: 计划唯一标识。
+
+        Returns:
+            TradingPlan 对象；文件不存在时返回 None。
+        """
         path = self._path(plan_id)
         if not path.exists():
             return None
         return self._load(path, rewrite=True)
 
     def save(self, plan: TradingPlan) -> Path:
+        """将计划序列化为 JSON 并落盘，返回写入路径。
+
+        Args:
+            plan: 待持久化的 TradingPlan 对象。
+
+        Returns:
+            写入的 .json 文件路径。
+        """
         path = self._path(plan.plan_id)
         path.write_text(
             json.dumps(asdict(plan), ensure_ascii=False, indent=2), encoding="utf-8"
@@ -96,6 +178,14 @@ class TradingPlanStore:
         return path
 
     def delete(self, plan_id: str) -> bool:
+        """删除计划文件。
+
+        Args:
+            plan_id: 计划唯一标识。
+
+        Returns:
+            True 表示文件存在且已删除，False 表示文件不存在。
+        """
         path = self._path(plan_id)
         if path.exists():
             path.unlink()
@@ -103,4 +193,9 @@ class TradingPlanStore:
         return False
 
     def list_all(self) -> list[TradingPlan]:
+        """返回目录下全部计划列表（按文件名升序，即 plan_id 字典序）。
+
+        Returns:
+            TradingPlan 列表；目录为空时返回空列表。不回写迁移结果（list 路径只读）。
+        """
         return [self._load(p, rewrite=False) for p in sorted(self.base_path.glob("*.json"))]

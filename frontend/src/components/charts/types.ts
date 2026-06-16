@@ -21,7 +21,9 @@ export type TradeSide = 'buy' | 'sell'
 
 /** 画在 K 线上的买卖点标注 */
 export interface TradeMarker {
+  /** 标注所在时间，需与所属 K 线序列的 time 取值口径一致 */
   time: ChartTime
+  /** 买卖方向，决定标注的箭头朝向与默认配色 */
   side: TradeSide
   /** 成交价（可选） */
   price?: number
@@ -53,8 +55,11 @@ export interface EquityPoint {
 export interface ChartOverlay {
   /** v1 仅 'price-line'（阈值/决策价位线）；后续可扩展 'line'（均线序列） */
   type: 'price-line'
+  /** 价位线的 y 值，单位与主图价格轴一致 */
   price: number
+  /** 线条颜色（CSS 颜色串，可选）；缺省时由图表主题决定 */
   color?: string
+  /** 价位线右侧标题文案（可选） */
   title?: string
 }
 

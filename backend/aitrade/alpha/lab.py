@@ -96,7 +96,18 @@ _EXCHANGE_TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _to_exchange_naive(dt: datetime | None) -> datetime | None:
-    """将时间统一为交易所本地裸时间：带时区者先转 Asia/Shanghai 再去时区。"""
+    """将时间统一为交易所本地裸时间。
+
+    带时区的 datetime 先转换为 ``Asia/Shanghai`` 时区再去掉 tzinfo；
+    已是裸时间或 ``None`` 时原样返回。
+    用于写入 parquet 前统一格式，避免带时区与不带时区混存导致 8 小时错位。
+
+    Args:
+        dt: 任意带/不带时区的 datetime，或 ``None``。
+
+    Returns:
+        无时区的本地 datetime；输入为 ``None`` 时返回 ``None``。
+    """
     if dt is not None and dt.tzinfo is not None:
         return dt.astimezone(_EXCHANGE_TZ).replace(tzinfo=None)
     return dt
@@ -107,7 +118,11 @@ def _to_exchange_naive(dt: datetime | None) -> datetime | None:
 
 
 class BarData:
-    """Standalone BarData dataclass (no vnpy dependency)."""
+    """独立 K 线数据类（不依赖 vnpy）。
+
+    持有单根 K 线的 OHLCV 数据及合约标识，供 AlphaLab 内部序列化/反序列化使用。
+    ``interval`` 在构造时经 ``_canonical_bar_interval`` 规范化存储。
+    """
 
     def __init__(
         self,
@@ -123,6 +138,22 @@ class BarData:
         turnover: float = 0.0,
         open_interest: float = 0.0,
     ) -> None:
+        """初始化 K 线数据对象。
+
+        Args:
+            symbol: 合约代码，如 ``"000001"``。
+            exchange: 交易所代码，如 ``"SZSE"``、``"SSE"``。
+            datetime: K 线对应的时间戳（结束时刻）。
+            interval: K 线周期，支持别名（``"daily"``/``"d"``/``"1m"`` 等），
+                构造时自动规范化。
+            open_price: 开盘价。
+            high_price: 最高价。
+            low_price: 最低价。
+            close_price: 收盘价。
+            volume: 成交量，默认 ``0.0``。
+            turnover: 成交额，默认 ``0.0``。
+            open_interest: 持仓量（期货适用），默认 ``0.0``。
+        """
         self.symbol = symbol
         self.exchange = exchange
         self.datetime = datetime
@@ -137,11 +168,15 @@ class BarData:
 
     @property
     def vt_symbol(self) -> str:
+        """合成 ``symbol.EXCHANGE`` 格式的统一合约代码；无交易所时仅返回 symbol。"""
         return f"{self.symbol}.{self.exchange}" if self.exchange else self.symbol
 
 
 class TickData:
-    """Standalone historical tick record."""
+    """独立历史 Tick 数据类（不依赖 vnpy）。
+
+    持有单笔成交/快照的价量信息及合约标识，供历史 Tick 文件读写使用。
+    """
 
     def __init__(
         self,
@@ -156,6 +191,20 @@ class TickData:
         bid_volume_1: float = 0.0,
         ask_volume_1: float = 0.0,
     ) -> None:
+        """初始化历史 Tick 数据对象。
+
+        Args:
+            symbol: 合约代码，如 ``"600519"``。
+            exchange: 交易所代码，如 ``"SSE"``。
+            datetime: Tick 时间戳。
+            last_price: 最新成交价。
+            volume: 累计成交量，默认 ``0.0``。
+            turnover: 累计成交额，默认 ``0.0``。
+            bid_price_1: 买一价，默认 ``0.0``。
+            ask_price_1: 卖一价，默认 ``0.0``。
+            bid_volume_1: 买一量，默认 ``0.0``。
+            ask_volume_1: 卖一量，默认 ``0.0``。
+        """
         self.symbol = symbol
         self.exchange = exchange
         self.datetime = datetime
@@ -169,13 +218,35 @@ class TickData:
 
     @property
     def vt_symbol(self) -> str:
+        """合成 ``symbol.EXCHANGE`` 格式的统一合约代码；无交易所时仅返回 symbol。"""
         return f"{self.symbol}.{self.exchange}" if self.exchange else self.symbol
 
 
 class AlphaLab:
-    """Alpha Research Laboratory — manages research artifacts and local market data."""
+    """Alpha 因子研究实验室——本地行情数据与研究工件的管理中心。
+
+    负责以下存储类型的读写与维护：
+
+    - ``bars/<interval>/``：原始 K 线 parquet；
+    - ``ticks/``：历史 Tick parquet；
+    - ``derived/<interval>/``：本地聚合派生 K 线；
+    - ``imports/<kind>/<interval>/<vt_symbol>/``：待合并的导入批次；
+    - ``component/``：指数成分 shelve 文件；
+    - ``dataset/``、``model/``、``signal/``：研究工件 pickle/parquet；
+    - ``contract.json``：合约交易参数配置。
+
+    所有写入操作对同一文件加锁，防止并发下载/导入产生竞态；
+    K 线写入前做复权口径校验，拒绝不同口径的数据静默混入。
+    """
 
     def __init__(self, lab_path: Path | str) -> None:
+        """初始化 AlphaLab，创建所有必要的目录结构。
+
+        Args:
+            lab_path: 实验室根目录路径，可为字符串或 ``Path`` 对象。
+                目录不存在时自动递归创建；典型路径如
+                ``".aitrade/alpha_lab"`` 或绝对路径。
+        """
         self.lab_path: Path = Path(lab_path)
         self.bars_path: Path = self.lab_path / "bars"
         self.daily_path: Path = self.bars_path / "d"
@@ -213,6 +284,17 @@ class AlphaLab:
         self._file_locks_guard = threading.Lock()
 
     def _lock_for(self, path: Path) -> threading.Lock:
+        """按文件路径返回（或懒创建）对应的线程锁。
+
+        同一进程内同一路径始终返回同一把锁，保证并发写入安全。
+        使用 ``_file_locks_guard`` 做双重保护，支持多线程并发调用。
+
+        Args:
+            path: 目标文件路径。
+
+        Returns:
+            该路径对应的 ``threading.Lock`` 实例。
+        """
         key = str(path)
         with self._file_locks_guard:
             lock = self._file_locks.get(key)
@@ -223,7 +305,16 @@ class AlphaLab:
 
     @staticmethod
     def _atomic_write_parquet(df: pl.DataFrame, path: Path) -> None:
-        """先写临时文件再原子替换，避免写入中途崩溃留下半截文件。"""
+        """以原子方式将 DataFrame 写入 parquet 文件。
+
+        先写入同目录的唯一临时文件，再用 ``os.replace`` 原子替换目标路径，
+        即使进程中途崩溃也不会留下半截文件污染目录。
+        临时文件在 ``finally`` 块中清理，即便写入失败也不残留。
+
+        Args:
+            df: 待写入的 polars DataFrame。
+            path: 目标 parquet 文件路径；父目录必须已存在。
+        """
         tmp_path = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}")
         try:
             df.write_parquet(tmp_path)
@@ -237,22 +328,62 @@ class AlphaLab:
     # =========================================================================
 
     def _bar_interval_path(self, interval: str, *, derived: bool = False) -> Path:
+        """返回指定周期的 K 线存储目录路径（不含文件名）。
+
+        Args:
+            interval: K 线周期，经 ``_canonical_bar_interval`` 规范化。
+            derived: ``True`` 时指向 ``derived/<interval>/``，
+                ``False``（默认）指向 ``bars/<interval>/``。
+
+        Returns:
+            对应的 ``Path`` 目录对象；目录不一定存在，由调用方负责创建。
+        """
         canonical = _canonical_bar_interval(interval)
         base = self.derived_path if derived else self.bars_path
         return base / canonical
 
     def _bar_file_path(self, vt_symbol: str, interval: str, *, derived: bool = False) -> Path:
+        """返回指定合约和周期的 K 线 parquet 文件路径，并确保父目录存在。
+
+        Args:
+            vt_symbol: 合约代码，用作文件名主体（含交易所后缀，如 ``"000001.SZSE"``）。
+            interval: K 线周期，自动规范化。
+            derived: ``True`` 时路径位于 ``derived/`` 层，否则位于 ``bars/`` 层。
+
+        Returns:
+            形如 ``<base>/<interval>/<vt_symbol>.parquet`` 的 ``Path`` 对象。
+        """
         folder = self._bar_interval_path(interval, derived=derived)
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{vt_symbol}.parquet"
 
     def _bar_metadata_path(self, vt_symbol: str, interval: str, *, derived: bool = True) -> Path:
+        """返回 K 线 sidecar 元数据文件（``.meta.json``）的路径，并确保父目录存在。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期，自动规范化。
+            derived: ``True``（默认）时指向派生层元数据；
+                ``False`` 时指向原始层（用于记录复权口径）。
+
+        Returns:
+            形如 ``<base>/<interval>/<vt_symbol>.meta.json`` 的 ``Path`` 对象。
+        """
         folder = self._bar_interval_path(interval, derived=derived)
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{vt_symbol}.meta.json"
 
     def _write_raw_bar_metadata(self, vt_symbol: str, interval: str, adjust_type: str) -> None:
-        """记录原始 K 线的复权口径，供后续写入时校验一致性。"""
+        """将原始 K 线的复权口径写入 sidecar 元数据文件。
+
+        每次成功写入原始 K 线后调用，用于后续写入时校验口径一致性——
+        若发现已有不同口径的元数据则拦截，防止复权价格错误混入同一 parquet。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期（规范化后写入）。
+            adjust_type: 复权口径字符串，如 ``"none"``、``"hfq"``（后复权）、``"qfq"``（前复权）。
+        """
         payload = {
             "vt_symbol": normalize_vt_symbol(vt_symbol),
             "interval": _canonical_bar_interval(interval),
@@ -263,6 +394,15 @@ class AlphaLab:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def _load_raw_bar_metadata(self, vt_symbol: str, interval: str) -> dict[str, Any]:
+        """加载原始 K 线 sidecar 元数据（复权口径等）。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期。
+
+        Returns:
+            元数据字典；文件不存在时返回空字典。
+        """
         metadata_path = self._bar_metadata_path(vt_symbol, interval, derived=False)
         if not metadata_path.exists():
             return {}
@@ -270,9 +410,29 @@ class AlphaLab:
             return json.load(f)
 
     def _tick_file_path(self, vt_symbol: str) -> Path:
+        """返回指定合约的历史 Tick parquet 文件路径（不保证文件存在）。
+
+        Args:
+            vt_symbol: 合约代码。
+
+        Returns:
+            ``ticks/<vt_symbol>.parquet`` 的 ``Path`` 对象。
+        """
         return self.ticks_path / f"{vt_symbol}.parquet"
 
     def _legacy_bar_candidates(self, vt_symbol: str, interval: str) -> list[Path]:
+        """返回旧版目录（``daily/``/``minute/``）下可能存在的 K 线候选路径列表。
+
+        用于向后兼容迁移前的存储布局：日线曾存放于 ``daily/``，
+        分钟线曾存放于 ``minute/``。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期，支持别名。
+
+        Returns:
+            候选路径列表；非日线/分钟线周期返回空列表。
+        """
         canonical = _canonical_bar_interval(interval)
         if canonical == "d":
             return [self.legacy_daily_path / f"{vt_symbol}.parquet"]
@@ -287,6 +447,19 @@ class AlphaLab:
         *,
         include_derived: bool = True,
     ) -> list[Path]:
+        """按优先级枚举指定合约和周期的所有候选 K 线文件路径（不过滤是否存在）。
+
+        顺序：派生层（derived）→ 原始层（bars）→ 旧版目录（legacy）。
+        去重后保持顺序返回，供调用方按顺序探测文件是否存在。
+
+        Args:
+            vt_symbol: 合约代码（已规范化）。
+            interval: K 线周期。
+            include_derived: ``False`` 时跳过派生层候选。
+
+        Returns:
+            去重后的候选 ``Path`` 列表，顺序反映读取优先级。
+        """
         canonical = _canonical_bar_interval(interval)
         candidates: list[Path] = []
         if include_derived:
@@ -311,7 +484,20 @@ class AlphaLab:
         *,
         include_derived: bool = True,
     ) -> list[Path]:
-        """按规范证券代码扫描目录，匹配历史遗留文件名。"""
+        """遍历目录，按规范证券代码匹配所有可能的遗留文件名。
+
+        将扫描到的每个 ``.parquet`` 文件名经 ``canonical_vt_symbol_from_stem``
+        还原为规范代码，与目标 ``vt_symbol`` 对比，匹配则纳入结果。
+        用于补充 ``_iter_bar_candidates`` 无法覆盖的不规则历史命名。
+
+        Args:
+            vt_symbol: 目标合约代码（未规范化；内部自动规范化后比对）。
+            interval: K 线周期。
+            include_derived: ``False`` 时跳过 ``derived/`` 目录扫描。
+
+        Returns:
+            所有匹配文件路径的去重有序列表。
+        """
         canonical = _canonical_bar_interval(interval)
         target = normalize_vt_symbol(vt_symbol)
         folders: list[Path] = [self.bars_path / canonical]
@@ -344,7 +530,22 @@ class AlphaLab:
         *,
         include_derived: bool = True,
     ) -> list[Path]:
-        """汇总精确路径与目录扫描得到的候选 parquet 文件。"""
+        """汇总精确路径候选与目录扫描结果，返回去重后的 parquet 候选文件列表。
+
+        综合两种定位策略：
+        1. 对 ``_vt_symbol_lookup_keys`` 生成的每个代码变体，调用
+           ``_iter_bar_candidates`` 按优先级枚举精确路径；
+        2. 再用 ``_scan_bar_files`` 扫描目录补充无法被精确路径命中的遗留文件。
+
+        Args:
+            vt_symbol: 目标合约代码（任意格式均可）。
+            interval: K 线周期。
+            include_derived: ``False`` 时跳过派生层。
+
+        Returns:
+            去重后按定位优先级排列的候选 ``Path`` 列表；
+            调用方应按顺序探测文件是否存在。
+        """
         ordered: list[Path] = []
         seen: set[str] = set()
         for lookup_key in _vt_symbol_lookup_keys(vt_symbol):
@@ -377,6 +578,19 @@ class AlphaLab:
         start: datetime | None = None,
         end: datetime | None = None,
     ) -> Optional[pl.DataFrame]:
+        """从 parquet 文件加载 DataFrame，并按可选的时间范围过滤。
+
+        文件不存在时不抛错，直接返回 ``None``，由调用方选择下一个候选文件。
+        过滤使用闭区间 ``[start, end]``；缺少 ``datetime`` 列时跳过过滤直接返回全量数据。
+
+        Args:
+            file_path: 目标 parquet 文件路径。
+            start: 起始时间（含），``None`` 表示不过滤下界。
+            end: 结束时间（含），``None`` 表示不过滤上界。
+
+        Returns:
+            按 ``datetime`` 升序排列的 DataFrame；文件不存在时返回 ``None``。
+        """
         if not file_path.exists():
             return None
 
@@ -394,6 +608,16 @@ class AlphaLab:
         interval: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """将派生 K 线的聚合元数据写入 sidecar JSON 文件。
+
+        记录聚合来源（source_kind/source_interval/target_interval/session_profile 等），
+        供前端资源详情接口展示；传入的 ``metadata`` 字典可覆盖/追加默认字段。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: 目标 K 线周期（派生层）。
+            metadata: 额外写入的字段字典，``None`` 时仅写入基础字段。
+        """
         payload = {
             "vt_symbol": vt_symbol,
             "target_interval": _canonical_bar_interval(interval),
@@ -405,6 +629,15 @@ class AlphaLab:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
     def _load_derived_metadata(self, vt_symbol: str, interval: str) -> dict[str, Any]:
+        """加载派生 K 线的聚合元数据。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: 目标 K 线周期（派生层）。
+
+        Returns:
+            元数据字典；文件不存在时返回空字典。
+        """
         metadata_path = self._bar_metadata_path(vt_symbol, interval)
         if not metadata_path.exists():
             return {}
@@ -425,7 +658,28 @@ class AlphaLab:
         metadata: dict[str, Any] | None = None,
         adjust_type: str | None = None,
     ) -> None:
-        """Save normalized bar dataframe to parquet."""
+        """将规范化后的 K 线 DataFrame 写入 parquet（增量去重合并）。
+
+        写入前：
+        1. 补齐缺失的必填列（以 ``0.0`` 填充），并按 ``datetime`` 排序；
+        2. 若文件已存在，读取现有数据与新数据合并，以 ``datetime`` 为主键去重（保留最新）；
+        3. 原始层（``derived=False``）且指定了 ``adjust_type`` 时，校验复权口径一致性；
+           不一致则抛 ``ValueError``，避免不同口径数据静默混入。
+
+        Args:
+            vt_symbol: 合约代码（写入前自动规范化）。
+            interval: K 线周期，自动规范化。
+            df: 待写入的 polars DataFrame，至少含 ``datetime`` 列；
+                其余必填列缺失时自动补 ``0.0``。
+            derived: ``True`` 表示写派生层（``derived/``），否则写原始层（``bars/``）。
+            metadata: 派生层专用元数据字典，``derived=True`` 时写入 sidecar JSON；
+                原始层忽略此参数。
+            adjust_type: 复权口径，如 ``"none"``、``"hfq"``。仅对原始层生效；
+                ``None`` 表示不写入/校验口径。
+
+        Raises:
+            ValueError: 原始层已有数据口径与本次 ``adjust_type`` 不一致时抛出。
+        """
         if df.is_empty():
             return
 
@@ -482,7 +736,17 @@ class AlphaLab:
         metadata: dict[str, Any] | None = None,
         adjust_type: str | None = None,
     ) -> None:
-        """Save bar data to parquet."""
+        """将 BarData 列表转为 DataFrame 后调用 ``save_bar_frame`` 写入 parquet。
+
+        所有 ``bars`` 必须来自同一合约和同一周期（取自第一根 K 线的 ``vt_symbol``/``interval``）。
+        时间统一转换为交易所本地裸时间后写入。
+
+        Args:
+            bars: 待写入的 K 线列表；空列表时直接返回。
+            derived: 同 ``save_bar_frame``，是否写派生层。
+            metadata: 同 ``save_bar_frame``，派生层元数据。
+            adjust_type: 同 ``save_bar_frame``，复权口径。
+        """
         if not bars:
             return
 
@@ -517,11 +781,25 @@ class AlphaLab:
         adjust_type: str = "none",
         source: str = "download",
         file_name: str | None = None,
+        extra_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """将一组 K 线写入「待合并批次」（imports 层），不直接进正式资源。
 
         供下载流程复用：下载到的数据先入批次，由用户在合并环节做连续性/一致性
         校验后再并入正式 K 线，避免脏数据或断档直接污染正式资源。
+
+        Args:
+            bars: 待写入的 K 线列表；空列表时抛 ``ValueError``。
+            adjust_type: 复权口径，默认 ``"none"``；写入批次元数据，用于合并时校验。
+            source: 数据来源标识，如 ``"download"``/``"upload"``；仅写入元数据，不影响逻辑。
+            file_name: 可选的原始文件名，记录在元数据中便于审计。
+            extra_meta: 额外写入批次元数据的字段字典。
+
+        Returns:
+            批次摘要字典，结构同 ``_batch_summary_from_file`` 返回值。
+
+        Raises:
+            ValueError: ``bars`` 为空时抛出。
         """
         if not bars:
             raise ValueError("没有可写入批次的 K 线数据")
@@ -533,10 +811,20 @@ class AlphaLab:
             file_name=file_name,
             adjust_type=adjust_type,
             source=source,
+            extra_meta=extra_meta,
         )
 
     def save_tick_frame(self, vt_symbol: str, df: pl.DataFrame) -> None:
-        """Save normalized historical tick dataframe."""
+        """将规范化后的历史 Tick DataFrame 写入 parquet（增量去重合并）。
+
+        补齐缺失的必填列、按 ``datetime`` 排序；若文件已存在，与现有数据合并，
+        以 ``datetime`` 为主键去重（保留最新），再原子写回。
+
+        Args:
+            vt_symbol: 合约代码（写入前自动规范化）。
+            df: 待写入的 polars DataFrame，至少含 ``datetime`` 列；
+                其余必填列缺失时自动补 ``0.0``。空 DataFrame 直接返回。
+        """
         if df.is_empty():
             return
 
@@ -573,7 +861,14 @@ class AlphaLab:
             self._atomic_write_parquet(normalized, file_path)
 
     def save_tick_data(self, ticks: list[TickData]) -> None:
-        """Save historical tick records."""
+        """将 TickData 列表转为 DataFrame 后调用 ``save_tick_frame`` 写入 parquet。
+
+        所有 ``ticks`` 必须来自同一合约（取自第一条 Tick 的 ``vt_symbol``）。
+        时间统一转换为交易所本地裸时间后写入。
+
+        Args:
+            ticks: 待写入的历史 Tick 列表；空列表时直接返回。
+        """
         if not ticks:
             return
 
@@ -603,7 +898,21 @@ class AlphaLab:
         *,
         include_derived: bool = True,
     ) -> Optional[pl.DataFrame]:
-        """Load stored bar dataframe by interval."""
+        """按时间范围加载指定合约和周期的 K 线 DataFrame。
+
+        依次尝试 ``_collect_bar_file_paths`` 返回的候选文件，返回第一个非空结果。
+        时间范围使用闭区间 ``[start, end]``。
+
+        Args:
+            vt_symbol: 合约代码，支持非规范格式。
+            interval: K 线周期，支持别名。
+            start: 起始时间，支持 ``date``、``datetime``、ISO 字符串等。
+            end: 结束时间，支持同 ``start``。
+            include_derived: ``False`` 时跳过派生层，默认 ``True``。
+
+        Returns:
+            按 ``datetime`` 升序排列的 DataFrame；无数据时返回 ``None``。
+        """
         start_dt = _normalize_bound(start, is_end=False)
         end_dt = _normalize_bound(end, is_end=True)
         for candidate in self._collect_bar_file_paths(
@@ -623,7 +932,19 @@ class AlphaLab:
         *,
         include_derived: bool = True,
     ) -> Optional[pl.DataFrame]:
-        """Load stored bar dataframe without date filtering."""
+        """不限时间范围加载指定合约和周期的全量 K 线 DataFrame。
+
+        逻辑同 ``load_bar_frame`` 但不做时间过滤，通常用于合并计划或
+        可用区间探测时读取完整数据。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期。
+            include_derived: ``False`` 时跳过派生层，默认 ``True``。
+
+        Returns:
+            按 ``datetime`` 升序排列的 DataFrame；无数据时返回 ``None``。
+        """
         for candidate in self._collect_bar_file_paths(
             vt_symbol,
             interval,
@@ -641,7 +962,20 @@ class AlphaLab:
         start,
         end,
     ) -> list[BarData]:
-        """Load bar data from parquet files."""
+        """从 parquet 文件加载 K 线数据并返回 BarData 对象列表。
+
+        内部调用 ``load_bar_frame`` 读取 DataFrame，再逐行构造 ``BarData``。
+        数据不存在时记录错误日志并返回空列表（不抛异常）。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: K 线周期。
+            start: 起始时间（含）。
+            end: 结束时间（含）。
+
+        Returns:
+            按时间升序排列的 ``BarData`` 列表；无数据时返回空列表。
+        """
         df = self.load_bar_frame(vt_symbol, interval, start, end, include_derived=True)
         if df is None or df.is_empty():
             logger.error(f"Bar data {vt_symbol}/{interval} does not exist")
@@ -669,7 +1003,18 @@ class AlphaLab:
         return bars
 
     def load_tick_frame(self, vt_symbol: str, start, end) -> Optional[pl.DataFrame]:
-        """Load stored historical tick dataframe."""
+        """按时间范围加载指定合约的历史 Tick DataFrame。
+
+        遍历代码变体对应的文件路径，返回第一个非空结果。
+
+        Args:
+            vt_symbol: 合约代码，支持非规范格式。
+            start: 起始时间（含）。
+            end: 结束时间（含）。
+
+        Returns:
+            按 ``datetime`` 升序排列的 DataFrame；无数据时返回 ``None``。
+        """
         start_dt = _normalize_bound(start, is_end=False)
         end_dt = _normalize_bound(end, is_end=True)
         for lookup_key in _vt_symbol_lookup_keys(vt_symbol):
@@ -683,7 +1028,16 @@ class AlphaLab:
         return None
 
     def load_tick_data(self, vt_symbol: str, start, end) -> list[TickData]:
-        """Load historical tick data from parquet."""
+        """从 parquet 文件加载历史 Tick 数据并返回 TickData 对象列表。
+
+        Args:
+            vt_symbol: 合约代码。
+            start: 起始时间（含）。
+            end: 结束时间（含）。
+
+        Returns:
+            按时间升序排列的 ``TickData`` 列表；无数据时返回空列表。
+        """
         df = self.load_tick_frame(vt_symbol, start, end)
         if df is None or df.is_empty():
             return []
@@ -709,7 +1063,18 @@ class AlphaLab:
         return ticks
 
     def available_bar_intervals(self, vt_symbol: str, *, include_derived: bool = True) -> list[str]:
-        """List stored intervals for one symbol."""
+        """列出本地已存储的指定合约所有 K 线周期。
+
+        遍历 ``bars/`` 和（可选）``derived/`` 子目录，检测每个周期文件夹下是否存在
+        匹配该合约代码（含变体）的 parquet 文件；同时检测旧版目录。
+
+        Args:
+            vt_symbol: 合约代码，支持非规范格式。
+            include_derived: ``False`` 时跳过派生层，默认 ``True``。
+
+        Returns:
+            已存储周期的排序列表，日线 ``"d"`` 优先，分钟线次之，其余按字母序。
+        """
         intervals: set[str] = set()
         lookup_keys = _vt_symbol_lookup_keys(vt_symbol)
         for base in [self.bars_path, self.derived_path] if include_derived else [self.bars_path]:
@@ -740,13 +1105,27 @@ class AlphaLab:
         input_data_kind: str = "bar",
         session_profile: str = "cn_equity",
     ) -> Optional[pl.DataFrame]:
-        """
-        Resolve bar input for training/preview.
+        """加载或本地聚合 K 线，优先直接读文件，不存在时从更细粒度数据聚合。
 
-        Priority:
-        1. exact raw/derived bar file
-        2. finer stored bars that can be aggregated locally
-        3. historical ticks aggregated locally
+        用于训练/预览时解析 K 线输入，按以下优先级尝试：
+
+        1. 直接读取已存储的原始/派生 K 线文件（最快）；
+        2. 仅分钟周期：从本地更细粒度分钟 K 线聚合（如 1m → 5m）；
+        3. 从历史 Tick 聚合（最慢，仅在上述均无数据时作为兜底）。
+
+        聚合结果自动写入派生层，下次直接命中步骤 1。
+
+        Args:
+            vt_symbol: 合约代码。
+            interval: 目标 K 线周期。
+            start: 起始时间（含）。
+            end: 结束时间（含）。
+            input_data_kind: ``"tick"`` 时强制从 Tick 聚合，跳过 K 线候选；
+                默认 ``"bar"``。
+            session_profile: 交易时段配置，目前仅支持 ``"cn_equity"``（A 股）。
+
+        Returns:
+            按 ``datetime`` 升序排列的 DataFrame；所有来源均无数据时返回 ``None``。
         """
         canonical = _canonical_bar_interval(interval)
         direct = self.load_bar_frame(vt_symbol, canonical, start, end, include_derived=True)
@@ -852,7 +1231,27 @@ class AlphaLab:
         end,
         extended_days: int = 0,
     ) -> Optional[pl.DataFrame]:
-        """Load bar data as a normalized polars DataFrame."""
+        """批量加载多只标的的 K 线并拼接为规范化宽表，供因子计算使用。
+
+        对每只标的执行以下处理：
+        1. 加载指定时间范围（可按 ``extended_days`` 向外延伸）的 K 线；
+        2. 补齐缺失的 ``turnover``/``open_interest`` 列；
+        3. 计算成交量加权均价 ``vwap``（成交量为 0 时 fallback 到 ``close``）；
+        4. 以第一个收盘价为基准做相对价格归一化（open/high/low/close 均除以 close_0）；
+        5. 将数值全为 0 的行替换为 NaN（标记无效/停牌行情）。
+
+        Args:
+            vt_symbols: 合约代码列表，如 ``["000001.SZSE", "600000.SSE"]``。
+            interval: K 线周期。
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+            extended_days: 向左延伸的天数（用于因子计算的 lookback），默认 ``0``；
+                右侧额外延伸 ``extended_days // 10`` 天。
+
+        Returns:
+            以 ``[datetime, vt_symbol]`` 排序的 polars DataFrame，
+            含 ``vt_symbol`` 标识列；所有标的均无数据时返回 ``None``。
+        """
         if not vt_symbols:
             return None
 
@@ -915,7 +1314,15 @@ class AlphaLab:
 
     @staticmethod
     def _seconds_to_datetime(reference: datetime, seconds_of_day: int) -> datetime:
-        """以 reference 的日期为基准，构造当日 seconds_of_day 对应的裸时间。"""
+        """以 reference 的日期为基准，将秒数转换为当日对应的裸时间。
+
+        Args:
+            reference: 基准 datetime，仅取其 ``date`` 部分。
+            seconds_of_day: 当日秒数，如 ``9*3600+30*60`` 表示 09:30:00。
+
+        Returns:
+            与 reference 同日、时分秒对应 ``seconds_of_day`` 的裸 datetime。
+        """
         hour, remainder = divmod(seconds_of_day, 3600)
         minute, second = divmod(remainder, 60)
         return reference.replace(hour=hour, minute=minute, second=second, microsecond=0)
@@ -936,7 +1343,17 @@ class AlphaLab:
         - tick 来源：事件时刻按 floor 落入 [start, end) 桶后以桶结束时刻标注；
         - 收盘/午盘整点（11:30 / 15:00）并入该 session 最后一个桶（右闭）。
 
-        非交易时段返回 None（由调用方丢弃）。
+        Args:
+            dt: 待归桶的时间戳；带时区会先转为交易所本地裸时间，秒以下精度被截断。
+            interval_minutes: 目标聚合周期的分钟数，如 ``5``、``30``。
+            source_kind: ``"bar"`` 时桶边界用 ceil（结束时刻约定），
+                其余（``"tick"``）用 floor 后归到桶结束时刻。
+            session_profile: 交易时段配置，``"cn_equity"``（默认）按 A 股双时段
+                （09:30~11:30、13:00~15:00）归桶；其他值按全天连续时段处理。
+
+        Returns:
+            该时间戳所属桶的结束时刻（裸 datetime）；
+            ``session_profile="cn_equity"`` 下落在非交易时段时返回 ``None``（由调用方丢弃）。
         """
         normalized = _to_exchange_naive(dt).replace(microsecond=0)
         interval_sec = interval_minutes * 60
@@ -977,6 +1394,15 @@ class AlphaLab:
           避免在数据正常结束于盘中时静默丢弃合法 K 线；
         - bar 来源：收于 session 收盘时刻（11:30 / 15:00）视为完整；否则要求
           桶内含有标注为该结束时刻的源 K 线（末分钟存在）才视为完整。
+
+        Args:
+            bucket_end: 该桶的结束时刻（``_session_bucket_end`` 的输出）。
+            bucket_rows: 落入该桶的源行记录列表，用于检测末分钟源 K 线是否存在。
+            source_kind: ``"bar"`` 或 ``"tick"``；``"tick"`` 一律视为完整。
+            session_profile: 交易时段配置，``"cn_equity"`` 下额外用 session 收盘时刻判完整。
+
+        Returns:
+            ``True`` 表示该桶完整可写入；``False`` 表示疑似半根 K 线，应由调用方丢弃。
         """
         if source_kind != "bar":
             return True
@@ -995,12 +1421,45 @@ class AlphaLab:
         session_profile: str = "cn_equity",
         stats: dict[str, Any] | None = None,
     ) -> pl.DataFrame:
+        """将已排序的行记录列表聚合为目标周期的 K 线 DataFrame。
+
+        核心聚合逻辑：
+        1. 调用 ``_session_bucket_end`` 将每行归入对应桶；
+        2. 非交易时段（返回 ``None``）的行被丢弃；
+        3. 检测并可选丢弃末尾不完整桶（防止写入半根 K 线）；
+        4. 每个桶聚合为一根 K 线（OHLCV，bar 来源保留 open_interest，tick 来源置 0）。
+
+        Args:
+            rows: 已按 ``datetime`` 升序排列的行记录字典列表。
+                bar 来源含 ``open/high/low/close/volume/turnover/open_interest``；
+                tick 来源含 ``last_price/volume/turnover``。
+            target_interval: 目标聚合周期，必须为分钟周期（``"5m"``/``"30m"`` 等）。
+            source_kind: ``"bar"`` 或 ``"tick"``，决定桶分配和聚合方式。
+            session_profile: 交易时段配置，``"cn_equity"``（默认）使用 A 股双时段。
+            stats: 若传入可变字典，聚合后写入 ``dropped_incomplete``/``bucket_count`` 统计。
+
+        Returns:
+            聚合后按 ``datetime`` 升序排列的 polars DataFrame；输入为空返回空 DataFrame。
+        """
         if not rows:
             return pl.DataFrame([])
 
         target_minutes = _interval_minutes(target_interval)
 
         def build_bucket(bucket_end: datetime, bucket_rows: list[dict[str, Any]]) -> dict[str, Any]:
+            """将同一桶内的原始行聚合成一根 K 线字典。
+
+            按 ``source_kind`` 分支：tick 来源以 ``last_price`` 序列取开高低收，open_interest 置 0；
+            bar 来源直接沿用各行的 ``open/high/low/close`` 并取末行的 open_interest。
+            两种来源的 ``volume``/``turnover`` 均按桶内求和。
+
+            Args:
+                bucket_end: 该桶的结束时刻，作为聚合后 K 线的 ``datetime``。
+                bucket_rows: 落入同一桶、已按时间升序的行记录列表（非空）。
+
+            Returns:
+                含 ``datetime/open/high/low/close/volume/turnover/open_interest`` 的单根 K 线字典。
+            """
             if source_kind == "tick":
                 prices = [float(item["last_price"]) for item in bucket_rows]
                 return {
@@ -1077,7 +1536,21 @@ class AlphaLab:
         session_profile: str = "cn_equity",
         stats: dict[str, Any] | None = None,
     ) -> pl.DataFrame:
-        """Aggregate historical ticks into minute bars."""
+        """将历史 Tick DataFrame 聚合为指定分钟周期的 K 线 DataFrame。
+
+        以 Tick 时刻对应的桶结束时刻作为 K 线时间戳（A 股区间结束时刻约定）；
+        每桶首 Tick 为开盘价，末 Tick 为收盘价，成交量/额累加，open_interest 置 0。
+
+        Args:
+            tick_df: 历史 Tick DataFrame，至少含 ``datetime``/``last_price`` 列；
+                内部按 ``datetime`` 升序排序后处理。
+            target_interval: 目标 K 线周期，必须为分钟周期（如 ``"5m"``、``"30m"``）。
+            session_profile: 交易时段配置，默认 ``"cn_equity"``（A 股）。
+            stats: 若传入可变字典，写入聚合统计（``dropped_incomplete``/``bucket_count``）。
+
+        Returns:
+            聚合后按 ``datetime`` 升序排列的 K 线 DataFrame；无有效桶时返回空 DataFrame。
+        """
         rows = tick_df.sort("datetime").iter_rows(named=True)
         return self._aggregate_rows(
             list(rows),
@@ -1096,7 +1569,25 @@ class AlphaLab:
         session_profile: str = "cn_equity",
         stats: dict[str, Any] | None = None,
     ) -> pl.DataFrame:
-        """Aggregate stored minute bars into a coarser minute interval."""
+        """将细粒度分钟 K 线 DataFrame 聚合为较粗周期。
+
+        要求 ``target_interval`` 为 ``source_interval`` 的整数倍（如 1m → 5m/30m）；
+        K 线聚合遵循 A 股区间结束时刻约定（与下载源一致）。
+
+        Args:
+            bar_df: 来源 K 线 DataFrame，至少含 ``datetime``/``open``/``high``/``low``/
+                ``close`` 列；内部按 ``datetime`` 升序排序后处理。
+            source_interval: 来源 K 线周期，必须为分钟周期（如 ``"1m"``）。
+            target_interval: 目标 K 线周期，必须为来源周期的整数倍（如 ``"5m"``）。
+            session_profile: 交易时段配置，默认 ``"cn_equity"``。
+            stats: 若传入可变字典，写入聚合统计（``dropped_incomplete``/``bucket_count``）。
+
+        Returns:
+            聚合后按 ``datetime`` 升序排列的 K 线 DataFrame；无有效桶时返回空 DataFrame。
+
+        Raises:
+            ValueError: ``target_interval`` 不是 ``source_interval`` 整数倍时抛出。
+        """
         source_minutes = _interval_minutes(source_interval)
         target_minutes = _interval_minutes(target_interval)
         if target_minutes % source_minutes != 0:
@@ -1123,7 +1614,27 @@ class AlphaLab:
         end,
         session_profile: str = "cn_equity",
     ) -> dict[str, Any]:
-        """Aggregate local raw data into derived bar resources."""
+        """批量将本地原始数据聚合为派生 K 线资源（写入 ``derived/`` 层）。
+
+        逐合约执行聚合，成功写入后返回摘要统计；单个合约失败不影响其余合约。
+        仅支持聚合到分钟周期目标。
+
+        Args:
+            vt_symbols: 待聚合的合约代码列表。
+            source_kind: 来源数据类型，``"tick"`` 或 ``"bar"``。
+            source_interval: 来源 K 线周期（``source_kind="bar"`` 时使用，
+                如 ``"1m"``）；``source_kind="tick"`` 时忽略。
+            target_interval: 目标 K 线周期，必须为分钟周期（如 ``"5m"``、``"30m"``）。
+            start: 起始时间（含）。
+            end: 结束时间（含）。
+            session_profile: 交易时段配置，默认 ``"cn_equity"``。
+
+        Returns:
+            包含 ``total``/``success``/``failed``/``failed_symbols``/``target_interval`` 的统计字典。
+
+        Raises:
+            ValueError: ``target_interval`` 不是分钟周期，或 ``source_interval`` 非分钟周期时抛出。
+        """
         start_dt = _normalize_bound(start, is_end=False)
         end_dt = _normalize_bound(end, is_end=True)
         canonical_target = _canonical_bar_interval(target_interval)
@@ -1202,6 +1713,19 @@ class AlphaLab:
     # =========================================================================
 
     def _resource_key(self, kind: str, vt_symbol: str, interval: str = "") -> str:
+        """生成正式资源的稳定唯一键，用作前端列表的 rowKey。
+
+        Tick 类型键格式为 ``<vt_symbol>``；
+        K 线类型键格式为 ``<interval>__<vt_symbol>``。
+
+        Args:
+            kind: 资源类型，如 ``"raw_bar"``/``"derived_bar"``/``"raw_tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: K 线周期；Tick 资源时可忽略。
+
+        Returns:
+            唯一资源键字符串。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         if kind in {"raw_tick"}:
             return vt_symbol
@@ -1215,6 +1739,20 @@ class AlphaLab:
         interval: str,
         batch_id: str,
     ) -> str:
+        """生成导入批次的稳定唯一键（含 batch_id 以区分同合约多次上传）。
+
+        格式：``batch__<resource_kind>__<interval>__<vt_symbol>__<batch_id>``，
+        可由 ``_parse_batch_key`` 逆解析。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: K 线/Tick 周期（Tick 固定为 ``"tick"``）。
+            batch_id: 批次唯一 ID（含时间戳前缀）。
+
+        Returns:
+            批次唯一键字符串。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         resource_kind = "raw_tick" if data_kind == "tick" else "raw_bar"
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
@@ -1222,6 +1760,19 @@ class AlphaLab:
         return f"batch__{resource_kind}__{canonical}__{vt_symbol}__{batch_id}"
 
     def _parse_batch_key(self, key: str) -> dict[str, str]:
+        """将批次唯一键解析为结构化字段字典。
+
+        Args:
+            key: ``_batch_resource_key`` 生成的批次键，格式：
+                ``batch__<resource_kind>__<interval>__<vt_symbol>__<batch_id>``。
+
+        Returns:
+            含 ``data_kind``/``resource_kind``/``interval``/``vt_symbol``/``batch_id``
+            字段的字典。
+
+        Raises:
+            ValueError: key 格式不符或 resource_kind 非法时抛出。
+        """
         parts = key.split("__")
         if len(parts) != 5 or parts[0] != "batch":
             raise ValueError("批次 key 格式错误")
@@ -1240,14 +1791,46 @@ class AlphaLab:
         }
 
     def _batch_dir(self, data_kind: str, interval: str, vt_symbol: str) -> Path:
+        """返回指定合约批次文件所在目录路径（不保证存在）。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            interval: 周期（Tick 自动替换为 ``"tick"``）。
+            vt_symbol: 合约代码（内部自动规范化）。
+
+        Returns:
+            ``imports/<data_kind>/<interval>/<vt_symbol>/`` 的 ``Path`` 对象。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
         return self.imports_path / data_kind / canonical / vt_symbol
 
     def _batch_file_path(self, data_kind: str, interval: str, vt_symbol: str, batch_id: str) -> Path:
+        """返回批次 parquet 数据文件路径（不保证存在）。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            interval: 周期。
+            vt_symbol: 合约代码。
+            batch_id: 批次唯一 ID。
+
+        Returns:
+            ``imports/<data_kind>/<interval>/<vt_symbol>/<batch_id>.parquet`` 的 ``Path``。
+        """
         return self._batch_dir(data_kind, interval, vt_symbol) / f"{batch_id}.parquet"
 
     def _batch_metadata_path(self, data_kind: str, interval: str, vt_symbol: str, batch_id: str) -> Path:
+        """返回批次 sidecar 元数据 JSON 文件路径（不保证存在）。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            interval: 周期。
+            vt_symbol: 合约代码。
+            batch_id: 批次唯一 ID。
+
+        Returns:
+            ``imports/<data_kind>/<interval>/<vt_symbol>/<batch_id>.meta.json`` 的 ``Path``。
+        """
         return self._batch_dir(data_kind, interval, vt_symbol) / f"{batch_id}.meta.json"
 
     def _write_batch_metadata(
@@ -1262,7 +1845,28 @@ class AlphaLab:
         status: str = "pending",
         adjust_type: str = "none",
         source: str = "upload",
+        extra_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """写入批次 sidecar 元数据 JSON 并返回元数据字典。
+
+        元数据包含批次 ID、合约、周期、行数、时间范围、状态、复权口径、来源等信息，
+        供合并计划校验和前端展示使用；传入的 ``extra_meta`` 可追加/覆盖字段。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: 周期。
+            batch_id: 批次唯一 ID。
+            file_name: 原始上传文件名（可为 ``None``）。
+            df: 已写入 parquet 的批次 DataFrame，用于统计行数和时间范围。
+            status: 批次状态，``"pending"``（默认）或 ``"merged"``。
+            adjust_type: 复权口径，默认 ``"none"``。
+            source: 来源标识，``"upload"``（默认）或 ``"download"``。
+            extra_meta: 额外写入的字段字典。
+
+        Returns:
+            写入文件的完整元数据字典。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
         metadata = {
@@ -1281,6 +1885,8 @@ class AlphaLab:
             "adjust_type": adjust_type,
             "source": source,
         }
+        if extra_meta:
+            metadata.update(extra_meta)
         metadata_path = self._batch_metadata_path(data_kind, canonical, vt_symbol, batch_id)
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
         with open(metadata_path, "w", encoding="utf-8") as f:
@@ -1294,6 +1900,17 @@ class AlphaLab:
         vt_symbol: str,
         batch_id: str,
     ) -> dict[str, Any]:
+        """加载批次 sidecar 元数据 JSON。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            interval: 周期。
+            vt_symbol: 合约代码。
+            batch_id: 批次唯一 ID。
+
+        Returns:
+            元数据字典；文件不存在时返回空字典。
+        """
         metadata_path = self._batch_metadata_path(data_kind, interval, vt_symbol, batch_id)
         if not metadata_path.exists():
             return {}
@@ -1310,6 +1927,24 @@ class AlphaLab:
         file_path: Path,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """从批次 parquet 文件（及可选的元数据）生成批次摘要字典。
+
+        用于 ``list_data_resources`` 和 ``_save_import_batch`` 返回值，
+        提供前端展示所需的行数、时间范围、文件大小等信息。
+        若 parquet 读取失败（文件损坏等），降级使用元数据中的统计值。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: 周期。
+            batch_id: 批次唯一 ID。
+            file_path: 批次 parquet 文件路径（必须存在）。
+            metadata: 预先加载的元数据字典；``None`` 时从 JSON 文件读取。
+
+        Returns:
+            包含 ``key``/``kind``/``vt_symbol``/``interval``/``row_count``/
+            ``start``/``end``/``file_size_kb``/``status`` 等字段的摘要字典。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
         resource_kind = "raw_tick_batch" if data_kind == "tick" else "raw_bar_batch"
@@ -1360,6 +1995,23 @@ class AlphaLab:
         file_path: Path,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """从正式资源 parquet 文件生成资源摘要字典。
+
+        用于 ``list_data_resources`` 遍历 ``bars/``/``ticks/``/``derived/`` 目录时
+        构建前端资源列表条目。读取失败时行数和时间范围降级为 0/空串。
+
+        Args:
+            kind: 资源类型，``"raw_bar"``/``"derived_bar"``/``"raw_tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: 周期（Tick 传 ``"tick"``）。
+            file_path: parquet 文件路径（必须存在）。
+            metadata: 派生层元数据字典（含 source_kind/source_interval 等）；
+                ``None`` 时相关字段使用默认值。
+
+        Returns:
+            含 ``key``/``kind``/``vt_symbol``/``interval``/``row_count``/
+            ``start``/``end``/``file_size_kb``/``source_kind`` 等字段的摘要字典。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         canonical = _canonical_bar_interval(interval) if kind != "raw_tick" else "tick"
         try:
@@ -1395,7 +2047,21 @@ class AlphaLab:
         return payload
 
     def list_data_resources(self) -> dict[str, Any]:
-        """List raw bar, raw tick, and derived bar resources."""
+        """列出本地所有数据资源（原始 K 线/Tick、派生 K 线、待合并批次）。
+
+        遍历 ``bars/``、``ticks/``、``derived/``、``imports/`` 目录，
+        为每个 parquet 文件构建摘要条目；重复文件（旧版与新版布局同时存在）按规范代码去重。
+
+        Returns:
+            包含以下键的字典：
+            - ``raw_bars``：原始 K 线摘要列表；
+            - ``raw_ticks``：历史 Tick 摘要列表；
+            - ``raw_bar_batches``：待合并 K 线批次列表；
+            - ``raw_tick_batches``：待合并 Tick 批次列表；
+            - ``derived_bars``：派生 K 线摘要列表；
+            - ``raw_bar_intervals``：原始 K 线已有周期列表（排序）；
+            - ``derived_intervals``：派生 K 线已有周期列表（排序）。
+        """
         raw_bars: list[dict[str, Any]] = []
         raw_ticks: list[dict[str, Any]] = []
         raw_bar_batches: list[dict[str, Any]] = []
@@ -1503,6 +2169,24 @@ class AlphaLab:
         }
 
     def _resolve_resource_file(self, kind: str, key: str) -> tuple[Path, str, str]:
+        """将资源类型和键解析为本地文件路径、周期和合约代码三元组。
+
+        不同资源类型的键格式各异：
+        - ``raw_tick``：键即合约代码；
+        - ``raw_bar_batch``/``raw_tick_batch``：键为 ``_batch_resource_key`` 格式；
+        - ``raw_bar``/``derived_bar``：键为 ``<interval>__<vt_symbol>`` 格式。
+
+        Args:
+            kind: 资源类型字符串。
+            key: 资源唯一键（由 ``_resource_key`` 或 ``_batch_resource_key`` 生成）。
+
+        Returns:
+            ``(file_path, interval, vt_symbol)`` 三元组；
+            文件路径不保证存在，由调用方校验。
+
+        Raises:
+            ValueError: key 格式不符或资源类型不支持时抛出。
+        """
         if kind == "raw_tick":
             vt_symbol = normalize_vt_symbol(key)
             seen: set[str] = set()
@@ -1565,7 +2249,26 @@ class AlphaLab:
         limit: int = 100,
         before: str | None = None,
     ) -> dict[str, Any]:
-        """Preview a single stored resource."""
+        """获取单个资源的详情（含分页数据预览）。
+
+        支持游标分页：传入 ``before`` 可向前翻页，每次返回最新的 ``limit`` 条记录。
+        时间字段自动转换为 ISO 字符串，浮点字段保留原精度。
+
+        Args:
+            kind: 资源类型，如 ``"raw_bar"``/``"derived_bar"``/``"raw_tick"``/
+                ``"raw_bar_batch"``/``"raw_tick_batch"``。
+            key: 资源唯一键。
+            limit: 每页预览行数，``0`` 表示返回全量，默认 ``100``。
+            before: 游标，ISO 格式时间字符串（含 ``Z`` 后缀）；
+                返回早于该时间的记录（不含边界）。
+
+        Returns:
+            含资源元信息和预览行列表的详情字典（key/kind/vt_symbol/interval/
+            row_count/start/end/columns/preview/has_more/next_before 等）。
+
+        Raises:
+            FileNotFoundError: 资源文件不存在时抛出。
+        """
         file_path, interval, vt_symbol = self._resolve_resource_file(kind, key)
         if not file_path.exists():
             raise FileNotFoundError(f"资源不存在: {kind}/{key}")
@@ -1647,7 +2350,23 @@ class AlphaLab:
         }
 
     def relocate_raw_bar_interval(self, key: str, new_interval: str) -> dict[str, Any]:
-        """将原始 K 线资源移动到正确的周期目录，用于更正错误标签。"""
+        """将原始 K 线资源移动到正确的周期目录，更正错误的周期标签。
+
+        仅重命名/移动文件，不修改数据内容；同步迁移复权口径 sidecar 元数据并记录
+        ``relocated_from`` 字段便于审计。若目标周期下已存在同合约文件则拒绝覆盖。
+
+        Args:
+            key: 原始 K 线资源键（``<interval>__<vt_symbol>`` 格式）。
+            new_interval: 新周期字符串，必须在支持列表内（``d/1m/5m/15m/30m/60m``）。
+
+        Returns:
+            含 ``success``/``message``/``key``/``interval``/``vt_symbol`` 的结果字典；
+            周期未变化时返回 ``success=True`` 并附说明。
+
+        Raises:
+            FileNotFoundError: 资源文件不存在时抛出。
+            ValueError: ``new_interval`` 不在支持列表内，或目标周期已有同合约文件时抛出。
+        """
         canonical_new = _canonical_bar_interval(new_interval)
         supported = {"d", "1m", "5m", "15m", "30m", "60m"}
         if canonical_new not in supported:
@@ -1705,7 +2424,18 @@ class AlphaLab:
         }
 
     def delete_data_resource(self, kind: str, key: str) -> bool:
-        """Delete a stored raw or derived data resource."""
+        """删除指定的原始/派生/批次数据资源文件（含 sidecar 元数据）。
+
+        同时清理对应的 ``.meta.json`` sidecar 文件；文件不存在时返回 ``False`` 而非报错。
+
+        Args:
+            kind: 资源类型，支持 ``"raw_bar"``/``"derived_bar"``/``"raw_tick"``/
+                ``"raw_bar_batch"``/``"raw_tick_batch"``。
+            key: 资源唯一键。
+
+        Returns:
+            ``True`` 表示成功删除文件；``False`` 表示文件本不存在。
+        """
         file_path, interval, vt_symbol = self._resolve_resource_file(kind, key)
         if not file_path.exists():
             return False
@@ -1731,7 +2461,19 @@ class AlphaLab:
         return True
 
     def _batch_minutes_expected(self, prev_dt: datetime, curr_dt: datetime, interval: str) -> bool:
-        """按 A 股日内时段校验分钟线相邻点；午休和跨日天然允许断开。"""
+        """按 A 股日内时段检验相邻分钟 K 线时间间隔是否合法。
+
+        跨日、或两个时间点分属不同交易小节（上午/下午）时视为合法断口；
+        同一小节内要求相差恰好为 ``interval`` 分钟。
+
+        Args:
+            prev_dt: 上一根 K 线时间戳。
+            curr_dt: 当前根 K 线时间戳。
+            interval: 分钟 K 线周期，如 ``"1m"``、``"5m"``。
+
+        Returns:
+            ``True`` 表示间隔合法（含允许跨日/跨小节）；``False`` 表示同小节内断档。
+        """
         minutes = _interval_minutes(interval)
         if curr_dt.date() != prev_dt.date():
             return True
@@ -1739,6 +2481,10 @@ class AlphaLab:
             return False
 
         def session_id(dt: datetime) -> str | None:
+            """判断时间点属于哪个 A 股交易小节，盘外返回 ``None``。
+
+            上午时段 ``[09:30, 11:30)`` 返回 ``"morning"``，下午时段 ``[13:00, 15:00)`` 返回 ``"afternoon"``。
+            """
             t = dt.time()
             if time(9, 30) <= t < time(11, 30):
                 return "morning"
@@ -1755,6 +2501,24 @@ class AlphaLab:
         return curr_dt - prev_dt == timedelta(minutes=minutes)
 
     def _validate_batch_frame(self, df: pl.DataFrame, *, data_kind: str, interval: str) -> list[str]:
+        """校验批次 DataFrame 的基本完整性，返回错误信息列表。
+
+        检查项：
+        1. 非空；
+        2. 含 ``datetime`` 列；
+        3. 无空 datetime；
+        4. datetime 按升序排列；
+        5. datetime 无内部重复；
+        6. 分钟 K 线：同交易小节内无断档（调用 ``_batch_minutes_expected``）。
+
+        Args:
+            df: 待校验的批次 DataFrame。
+            data_kind: ``"bar"`` 或 ``"tick"``；Tick 不做频率连续性校验。
+            interval: K 线周期（``data_kind="bar"`` 时使用）。
+
+        Returns:
+            错误信息列表；无错误则返回空列表。
+        """
         errors: list[str] = []
         if df.is_empty():
             return ["批次数据为空"]
@@ -1784,7 +2548,18 @@ class AlphaLab:
     def _load_official_raw_frame(
         self, kind: str, vt_symbol: str, interval: str
     ) -> Optional[pl.DataFrame]:
-        """加载现有正式（raw）资源，作为合并基底；不含派生数据。无则返回 None。"""
+        """加载现有正式（raw）资源全量数据，作为合并计划的基底。
+
+        仅读取 ``bars/``/``ticks/`` 正式层，不含派生数据，确保合并校验针对已确认数据。
+
+        Args:
+            kind: ``"raw_bar"`` 或 ``"raw_tick"``。
+            vt_symbol: 合约代码。
+            interval: K 线周期（``kind="raw_tick"`` 时忽略）。
+
+        Returns:
+            全量正式资源 DataFrame；不存在或为空时返回 ``None``。
+        """
         if not vt_symbol or not interval:
             return None
         if kind == "raw_tick":
@@ -1805,6 +2580,26 @@ class AlphaLab:
         - 重叠时间点的数据必须完全一致（OHLC/量额），不一致则拒绝（防止复权口径/源混用）；
         - 分钟线还要求合并结果在交易小节内无断档；
         - 仅 1 个批次且无正式资源时，允许直接晋级为正式（无需重叠）。
+
+        本方法只做计划与校验，不写任何文件；返回值中以下划线开头的内部键
+        （``_batches``/``_merged_df``）供 ``merge_import_batches`` 复用，
+        对外接口（``preview_merge_import_batches``）会过滤掉这些键。
+
+        Args:
+            kind: 合并目标类型，仅支持 ``"raw_bar"`` 或 ``"raw_tick"``。
+            keys: 待合并的批次唯一键列表（至少 1 个），由
+                ``_batch_resource_key`` 生成。
+
+        Returns:
+            合并计划字典。``can_merge`` 标记是否可合并；``errors`` 为所有校验
+            失败原因列表，``reason`` 取其首条；``intersection_start``/
+            ``intersection_end`` 为参与方公共重叠区间；``conflict_count`` 为重叠区
+            数据冲突的时间点数；``estimated_rows`` 为合并后预计行数；
+            ``has_official`` 表示是否含现有正式资源作基底。另含内部键
+            ``_batches``（参与批次列表）与 ``_merged_df``（合并后 DataFrame）。
+
+        Raises:
+            ValueError: ``kind`` 不是 ``"raw_bar"``/``"raw_tick"`` 时抛出。
         """
         result: dict[str, Any] = {
             "can_merge": False,
@@ -1925,6 +2720,20 @@ class AlphaLab:
         return result
 
     def _load_merge_batches(self, kind: str, keys: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        """加载并校验指定键列表对应的批次文件，返回批次信息列表和错误列表。
+
+        对每个键：解析批次键 → 校验类型匹配 → 检查文件存在 → 加载元数据 →
+        拒绝已合并批次 → 读取 DataFrame → 调用 ``_validate_batch_frame`` 校验完整性。
+        成功加载的批次按创建时间升序排列（``batch_id`` 作为时间戳回退键）。
+
+        Args:
+            kind: 合并目标类型，``"raw_bar"`` 或 ``"raw_tick"``。
+            keys: 批次唯一键列表。
+
+        Returns:
+            ``(batches, errors)`` 二元组；``batches`` 中每项含 ``df``/``metadata``/
+            ``file_path`` 等字段；``errors`` 为各条失败原因的字符串列表。
+        """
         errors: list[str] = []
         batches: list[dict[str, Any]] = []
         expected_data_kind = "tick" if kind == "raw_tick" else "bar"
@@ -1969,13 +2778,38 @@ class AlphaLab:
         return batches, errors
 
     def preview_merge_import_batches(self, *, kind: str, keys: list[str]) -> dict[str, Any]:
-        """Validate batches against the official base and summarize without writing."""
+        """预演合并计划：校验批次与现有正式数据，返回摘要但不写入任何文件。
+
+        是 ``_build_merge_plan`` 的公开只读接口；内部临时对象（DataFrame 缓存等）
+        在返回前被过滤掉，不向外泄露。
+
+        Args:
+            kind: 合并目标类型，``"raw_bar"`` 或 ``"raw_tick"``。
+            keys: 待合并的批次唯一键列表（至少 1 个）。
+
+        Returns:
+            合并计划摘要字典，含 ``can_merge``/``reason``/``errors``/
+            ``intersection_start``/``intersection_end``/``conflict_count``/
+            ``estimated_rows``/``batch_count``/``has_official`` 等字段。
+        """
         plan = self._build_merge_plan(kind, keys)
         # 预览结果不向外暴露内部缓存（df / 批次对象）。
         return {key: value for key, value in plan.items() if not key.startswith("_")}
 
     def merge_import_batches(self, *, kind: str, keys: list[str]) -> dict[str, Any]:
-        """Merge validated batches (with existing official base) into the official raw resource."""
+        """执行合并：将通过校验的批次写入正式原始资源（``bars/``/``ticks/``）。
+
+        调用 ``_build_merge_plan`` 再次校验（不缓存前次 preview 结果）；
+        合并成功后将各批次元数据状态更新为 ``"merged"``（保留原始批次文件，便于审计）。
+
+        Args:
+            kind: 合并目标类型，``"raw_bar"`` 或 ``"raw_tick"``。
+            keys: 待合并的批次唯一键列表（至少 1 个）。
+
+        Returns:
+            合并结果字典；``success=True`` 时额外含 ``message``/``row_count``/
+            ``start``/``end``；``success=False`` 时含 ``reason``/``errors``。
+        """
         plan = self._build_merge_plan(kind, keys)
         public = {key: value for key, value in plan.items() if not key.startswith("_")}
         if not plan.get("can_merge"):
@@ -2026,7 +2860,15 @@ class AlphaLab:
         index_symbol: str,
         index_components: dict[str, list[str]],
     ) -> None:
-        """Save index component data to shelve."""
+        """将指数成分数据批量写入 shelve 文件。
+
+        shelve key 为日期字符串（``"YYYY-MM-DD"``），value 为该日成分股代码列表。
+        已有 key 会被覆盖（``db.update``）；新 key 直接追加。
+
+        Args:
+            index_symbol: 指数代码，如 ``"000300.SZSE"``；用作 shelve 文件名。
+            index_components: ``{"YYYY-MM-DD": ["code1", "code2", ...]}`` 格式字典。
+        """
         file_path: Path = self.component_path / index_symbol
         with shelve.open(str(file_path)) as db:
             db.update(index_components)
@@ -2038,7 +2880,20 @@ class AlphaLab:
         start,
         end,
     ) -> dict:
-        """Load index component data from shelve."""
+        """从 shelve 文件加载指定时间范围内的指数成分数据（带进程内缓存）。
+
+        结果以 ``@lru_cache`` 缓存，适合在因子计算循环中重复调用相同参数。
+        缓存依赖参数不可变性：``start``/``end`` 须为可哈希类型（字符串/date）。
+
+        Args:
+            index_symbol: 指数代码，如 ``"000300.SZSE"``。
+            start: 起始日期（含），传入 ``date``/``datetime``/ISO 字符串均可。
+            end: 结束日期（含），同 ``start``。
+
+        Returns:
+            ``{datetime: [symbol, ...]}`` 字典，key 为解析后的 datetime 对象；
+            shelve 文件不存在时返回空字典。
+        """
         file_path: Path = self.component_path / index_symbol
         start = to_datetime(start)
         end = to_datetime(end)
@@ -2058,7 +2913,19 @@ class AlphaLab:
         start,
         end,
     ) -> list[str]:
-        """Collect all component symbols for an index."""
+        """获取指数在指定时间范围内出现过的所有成分股代码（去重）。
+
+        常用于构建回测/研究的标的池，无需关心具体日期维度。
+        内部调用 ``load_component_data``，结果集合化后返回。
+
+        Args:
+            index_symbol: 指数代码。
+            start: 起始日期（含）。
+            end: 结束日期（含）。
+
+        Returns:
+            去重后的成分股代码列表（无序）；无数据时返回空列表。
+        """
         components: dict = self.load_component_data(index_symbol, start, end)
         symbols: set[str] = set()
         for syms in components.values():
@@ -2066,13 +2933,25 @@ class AlphaLab:
         return list(symbols)
 
     def save_dataset(self, name: str, dataset: AlphaDataset) -> None:
-        """Save dataset to pickle."""
+        """将 AlphaDataset 对象序列化为 pickle 文件保存到 dataset 目录。
+
+        Args:
+            name: 数据集名称，用作文件名（不含扩展名）。
+            dataset: 待保存的 ``AlphaDataset`` 对象。
+        """
         file_path: Path = self.dataset_path / f"{name}.pkl"
         with open(file_path, mode="wb") as f:
             pickle.dump(dataset, f)
 
     def load_dataset(self, name: str) -> Optional[AlphaDataset]:
-        """Load dataset from pickle."""
+        """从 pickle 文件加载 AlphaDataset 对象。
+
+        Args:
+            name: 数据集名称（不含扩展名）。
+
+        Returns:
+            对应的 ``AlphaDataset`` 对象；文件不存在时记录错误日志并返回 ``None``。
+        """
         file_path: Path = self.dataset_path / f"{name}.pkl"
         if not file_path.exists():
             logger.error(f"Dataset file {name} does not exist")
@@ -2081,7 +2960,14 @@ class AlphaLab:
             return pickle.load(f)
 
     def remove_dataset(self, name: str) -> bool:
-        """Delete a dataset."""
+        """删除指定数据集的 pickle 文件。
+
+        Args:
+            name: 数据集名称（不含扩展名）。
+
+        Returns:
+            ``True`` 表示成功删除；``False`` 表示文件本不存在。
+        """
         file_path: Path = self.dataset_path / f"{name}.pkl"
         if not file_path.exists():
             return False
@@ -2089,17 +2975,33 @@ class AlphaLab:
         return True
 
     def list_all_datasets(self) -> list[str]:
-        """List all dataset names."""
+        """列出 dataset 目录下所有已保存的数据集名称。
+
+        Returns:
+            数据集名称列表（文件名去掉 ``.pkl`` 后缀）；无数据集时返回空列表。
+        """
         return [f.stem for f in self.dataset_path.glob("*.pkl")]
 
     def save_model(self, name: str, model: AlphaModel) -> None:
-        """Save model to pickle."""
+        """将 AlphaModel 对象序列化为 pickle 文件保存到 model 目录。
+
+        Args:
+            name: 模型名称（不含扩展名）。
+            model: 待保存的 ``AlphaModel`` 对象。
+        """
         file_path: Path = self.model_path / f"{name}.pkl"
         with open(file_path, mode="wb") as f:
             pickle.dump(model, f)
 
     def load_model(self, name: str):
-        """Load model from pickle."""
+        """从 pickle 文件加载 AlphaModel 对象。
+
+        Args:
+            name: 模型名称（不含扩展名）。
+
+        Returns:
+            对应的 ``AlphaModel`` 对象；文件不存在时记录错误日志并返回 ``None``。
+        """
         file_path: Path = self.model_path / f"{name}.pkl"
         if not file_path.exists():
             logger.error(f"Model file {name} does not exist")
@@ -2108,7 +3010,14 @@ class AlphaLab:
             return pickle.load(f)
 
     def remove_model(self, name: str) -> bool:
-        """Delete a model."""
+        """删除指定模型的 pickle 文件。
+
+        Args:
+            name: 模型名称（不含扩展名）。
+
+        Returns:
+            ``True`` 表示成功删除；``False`` 表示文件本不存在。
+        """
         file_path: Path = self.model_path / f"{name}.pkl"
         if not file_path.exists():
             return False
@@ -2116,16 +3025,32 @@ class AlphaLab:
         return True
 
     def list_all_models(self) -> list[str]:
-        """List all model names."""
+        """列出 model 目录下所有已保存的模型名称。
+
+        Returns:
+            模型名称列表（文件名去掉 ``.pkl`` 后缀）；无模型时返回空列表。
+        """
         return [f.stem for f in self.model_path.glob("*.pkl")]
 
     def save_signal(self, name: str, signal: pl.DataFrame) -> None:
-        """Save signal to parquet."""
+        """将信号 DataFrame 保存为 parquet 文件到 signal 目录。
+
+        Args:
+            name: 信号名称（不含扩展名）。
+            signal: 待保存的 polars DataFrame（通常含 ``datetime``/``vt_symbol``/信号值列）。
+        """
         file_path: Path = self.signal_path / f"{name}.parquet"
         signal.write_parquet(file_path)
 
     def load_signal(self, name: str) -> Optional[pl.DataFrame]:
-        """Load signal from parquet."""
+        """从 parquet 文件加载信号 DataFrame。
+
+        Args:
+            name: 信号名称（不含扩展名）。
+
+        Returns:
+            信号 DataFrame；文件不存在时记录错误日志并返回 ``None``。
+        """
         file_path: Path = self.signal_path / f"{name}.parquet"
         if not file_path.exists():
             logger.error(f"Signal file {name} does not exist")
@@ -2133,7 +3058,14 @@ class AlphaLab:
         return pl.read_parquet(file_path)
 
     def remove_signal(self, name: str) -> bool:
-        """Delete a signal."""
+        """删除指定信号的 parquet 文件。
+
+        Args:
+            name: 信号名称（不含扩展名）。
+
+        Returns:
+            ``True`` 表示成功删除；``False`` 表示文件本不存在。
+        """
         file_path: Path = self.signal_path / f"{name}.parquet"
         if not file_path.exists():
             return False
@@ -2141,7 +3073,11 @@ class AlphaLab:
         return True
 
     def list_all_signals(self) -> list[str]:
-        """List all signal names."""
+        """列出 signal 目录下所有已保存的信号名称。
+
+        Returns:
+            信号名称列表（文件名去掉 ``.parquet`` 后缀）；无信号时返回空列表。
+        """
         return [f.stem for f in self.signal_path.glob("*.parquet")]
 
     def add_contract_setting(
@@ -2151,26 +3087,63 @@ class AlphaLab:
         short_rate: float,
         size: float,
         pricetick: float,
+        stamp_duty: float | None = None,
+        slippage: float | None = None,
+        limit_ratio: float | None = None,
+        t_plus1: bool | None = None,
     ) -> None:
-        """Add contract trading configuration."""
+        """添加或更新合约的交易参数配置，持久化到 ``contract.json``。
+
+        每次调用读取现有 JSON → 更新对应合约条目 → 整体写回。
+        可选字段（``stamp_duty``/``slippage``/``limit_ratio``/``t_plus1``）
+        传 ``None`` 时不写入，避免以空值覆盖已有配置。
+
+        Args:
+            vt_symbol: 合约代码（写入前自动规范化）。
+            long_rate: 多头手续费率。
+            short_rate: 空头手续费率。
+            size: 合约乘数（股票通常为 1）。
+            pricetick: 最小价格变动单位。
+            stamp_duty: 印花税率（A 股仅卖出方收取）；``None`` 表示不写入。
+            slippage: 滑点（单边，单位与 pricetick 一致）；``None`` 表示不写入。
+            limit_ratio: 涨跌停限制幅度（如 0.1 表示 ±10%）；``None`` 表示不写入。
+            t_plus1: ``True`` 表示 T+1 交割（A 股股票），``False`` 表示 T+0；
+                ``None`` 表示不写入。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         contracts: dict[str, Any] = {}
         if self.contract_path.exists():
             with open(self.contract_path, encoding="utf-8") as f:
                 contracts = json.load(f)
 
-        contracts[vt_symbol] = {
+        entry: dict[str, Any] = {
             "long_rate": long_rate,
             "short_rate": short_rate,
             "size": size,
             "pricetick": pricetick,
         }
+        # 可选字段：仅在明确传值时写入（None 跳过，YAGNI）
+        if stamp_duty is not None:
+            entry["stamp_duty"] = stamp_duty
+        if slippage is not None:
+            entry["slippage"] = slippage
+        if limit_ratio is not None:
+            entry["limit_ratio"] = limit_ratio
+        if t_plus1 is not None:
+            entry["t_plus1"] = t_plus1
+
+        contracts[vt_symbol] = entry
 
         with open(self.contract_path, mode="w+", encoding="utf-8") as f:
             json.dump(contracts, f, indent=4, ensure_ascii=False)
 
     def load_contract_settings(self) -> dict:
-        """Load all contract settings."""
+        """从 ``contract.json`` 加载所有合约交易参数配置。
+
+        Returns:
+            以合约代码为键的配置字典，格式与 ``add_contract_setting`` 写入一致；
+            ``contract.json`` 不存在时返回空字典。
+        """
         if not self.contract_path.exists():
             return {}
         with open(self.contract_path, encoding="utf-8") as f:
@@ -2187,7 +3160,26 @@ class AlphaLab:
         *,
         data_kind: str = "bar",
     ) -> dict[str, str]:
-        """Auto-match CSV columns to standard fields."""
+        """将 CSV 列名自动匹配到标准字段（兼容中英文别名）。
+
+        遍历 ``CSV_FIELD_MAPPING``（K 线）和可选的 ``TICK_FIELD_MAPPING``，
+        将每个标准字段的别名表与 CSV 列名做大小写不敏感比对；
+        ``custom_mapping`` 优先级最高，可覆盖自动匹配结果。
+
+        Args:
+            columns: CSV 文件的列名列表。
+            custom_mapping: 用户自定义的 ``{标准字段: CSV列名}`` 映射；
+                ``None`` 时不做覆盖。
+            data_kind: ``"bar"``（默认）或 ``"tick"``；
+                ``"tick"`` 时额外引入 ``TICK_FIELD_MAPPING`` 别名表。
+
+        Returns:
+            ``{标准字段: CSV列名}`` 字典；未匹配到任何别名的标准字段不出现在结果中。
+
+        Example:
+            >>> lab.parse_csv_mapping(["日期", "收盘价", "成交量"])
+            {"datetime": "日期", "close": "收盘价", "volume": "成交量"}
+        """
         aliases = dict(CSV_FIELD_MAPPING)
         if data_kind == "tick":
             aliases.update(TICK_FIELD_MAPPING)
@@ -2211,12 +3203,28 @@ class AlphaLab:
         *,
         data_kind: str = "bar",
     ) -> dict[str, Any]:
-        """
-        Parse CSV and return preview information without saving.
+        """解析 CSV 内容并返回预览信息，不写入任何文件。
+
+        自动识别列名、检测缺失必填字段、提取时间范围和标的列表，
+        供前端在正式导入前展示映射结果和数据质量摘要。
+
+        Args:
+            csv_content: CSV 文件的原始字节内容（支持任何 polars 可读编码）。
+            custom_mapping: 用户自定义列名映射（覆盖自动匹配），
+                格式 ``{标准字段: CSV列名}``；``None`` 时纯自动匹配。
+            data_kind: ``"bar"``（默认）或 ``"tick"``。
 
         Returns:
-            dict with columns, sample_rows, matched_fields, unmapped_columns,
-            missing_required, total_rows, date_range, symbols
+            包含以下键的字典：
+            - ``data_kind``：数据类型；
+            - ``columns``：展示列（``BAR_PREVIEW_FIELDS``/``TICK_PREVIEW_FIELDS``）；
+            - ``sample_rows``：前 5 行映射后的预览数据（列表）；
+            - ``matched_fields``：自动/自定义列名映射结果；
+            - ``unmapped_columns``：未被任何标准字段引用的多余列；
+            - ``missing_required``：缺失的必填标准字段；
+            - ``total_rows``：总行数；
+            - ``date_range``：``("YYYY-MM-DD", "YYYY-MM-DD")`` 起止日期；
+            - ``symbols``：识别到的规范化合约代码列表。
         """
         df: pl.DataFrame = pl.read_csv(io.BytesIO(csv_content), infer_schema_length=0)
         columns: list[str] = df.columns
@@ -2286,6 +3294,16 @@ class AlphaLab:
         }
 
     def _bar_records_frame(self, bars: list[BarData]) -> pl.DataFrame:
+        """将 BarData 列表转换为标准列的 polars DataFrame。
+
+        时间统一转换为交易所本地裸时间。供 ``save_bar_data`` 和 ``_save_import_batch`` 使用。
+
+        Args:
+            bars: 待转换的 K 线列表。
+
+        Returns:
+            含 ``datetime/open/high/low/close/volume/turnover/open_interest`` 列的 DataFrame。
+        """
         rows: list[dict[str, Any]] = []
         for bar in bars:
             rows.append(
@@ -2303,6 +3321,17 @@ class AlphaLab:
         return pl.DataFrame(rows)
 
     def _tick_records_frame(self, ticks: list[TickData]) -> pl.DataFrame:
+        """将 TickData 列表转换为标准列的 polars DataFrame。
+
+        时间统一转换为交易所本地裸时间。供 ``save_tick_data`` 和 ``_save_import_batch`` 使用。
+
+        Args:
+            ticks: 待转换的历史 Tick 列表。
+
+        Returns:
+            含 ``datetime/last_price/volume/turnover/bid_price_1/ask_price_1/
+            bid_volume_1/ask_volume_1`` 列的 DataFrame。
+        """
         rows: list[dict[str, Any]] = []
         for tick in ticks:
             rows.append(
@@ -2329,7 +3358,27 @@ class AlphaLab:
         file_name: str | None = None,
         adjust_type: str = "none",
         source: str = "upload",
+        extra_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """将 K 线/Tick 记录列表写入 imports 批次层，不进入正式资源。
+
+        生成带时间戳前缀的唯一 ``batch_id``，将 DataFrame 写入
+        ``imports/<data_kind>/<interval>/<vt_symbol>/<batch_id>.parquet``，
+        并写入同名 sidecar 元数据 JSON。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: K 线周期；``data_kind="tick"`` 时固定为 ``"tick"``。
+            records: ``BarData`` 或 ``TickData`` 列表。
+            file_name: 原始文件名，记录在元数据中；``None`` 时留空。
+            adjust_type: 复权口径，默认 ``"none"``。
+            source: 来源标识，默认 ``"upload"``。
+            extra_meta: 额外写入元数据的字段字典。
+
+        Returns:
+            批次摘要字典（同 ``_batch_summary_from_file`` 返回值）。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         batch_id = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{uuid.uuid4().hex[:8]}"
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
@@ -2348,6 +3397,7 @@ class AlphaLab:
             status="pending",
             adjust_type=adjust_type,
             source=source,
+            extra_meta=extra_meta,
         )
         return self._batch_summary_from_file(
             data_kind=data_kind,
@@ -2369,7 +3419,26 @@ class AlphaLab:
         file_name: str | None = None,
         custom_mapping: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Import CSV data and save to parquet files."""
+        """解析 CSV 文件并将数据保存为 parquet（批次模式或直接合并模式）。
+
+        默认使用 ``save_mode="batch"``：将每个合约的数据写入 imports 批次层，
+        待用户手动执行合并；``save_mode="direct"`` 则跳过批次直接写入正式资源
+        （``import_mode="replace"`` 时先删除旧文件）。
+
+        Args:
+            csv_content: CSV 文件的原始字节内容。
+            data_kind: ``"bar"``（默认）或 ``"tick"``。
+            interval: K 线周期，仅 ``data_kind="bar"`` 时使用，默认 ``"d"``。
+            import_mode: 直接模式下的冲突处理策略：``"merge"``（默认，追加去重）
+                或 ``"replace"``（先删除再写入）。
+            save_mode: ``"batch"``（默认）写入批次层；``"direct"`` 直接写入正式资源。
+            file_name: 原始文件名，记录在批次元数据中；``None`` 时留空。
+            custom_mapping: 自定义列名映射，优先级高于自动匹配。
+
+        Returns:
+            包含 ``success``/``message``/``imported_count``/``skipped_count``/
+            ``errors``/``batches``（批次模式下）的结果字典。
+        """
         df: pl.DataFrame = pl.read_csv(io.BytesIO(csv_content), infer_schema_length=0)
         matched = self.parse_csv_mapping(df.columns, custom_mapping, data_kind=data_kind)
         required = set(CSV_REQUIRED_FIELDS if data_kind == "bar" else ["datetime", "last_price"])

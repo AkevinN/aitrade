@@ -17,6 +17,12 @@ const { Text } = Typography
 const { RangePicker } = DatePicker
 const CheckableTag = Tag.CheckableTag
 
+/**
+ * Alpha 模型训练页面：左栏创建数据集 + 配置并启动 LGB/MLP/Lasso 训练，右栏列出已训练模型。
+ *
+ * 数据集创建与模型训练均为异步任务，启动后通过 useTask 轮询进度并由 TaskStatusPanel 展示；
+ * 任务状态变为 completed 时自动刷新对应的数据集 / 模型列表。无 props，路由级页面组件。
+ */
 const ModelTrain: React.FC = () => {
   const [dsName, setDsName] = useState('')
   const [dsSymbolsText, setDsSymbolsText] = useState('')
@@ -77,6 +83,7 @@ const ModelTrain: React.FC = () => {
     }
   }, [trainTask.data?.status, refetchModels])
 
+  // 把证券输入框的多行 / 逗号分隔文本解析为去空后的代码数组（空行与首尾空白丢弃）。
   const datasetSymbols = useMemo(() => (
     dsSymbolsText
       .split(/[\n,]+/)
@@ -84,6 +91,12 @@ const ModelTrain: React.FC = () => {
       .filter((s) => s.length > 0)
   ), [dsSymbolsText])
 
+  /**
+   * 提交创建数据集任务：校验表单后调用后端，并把返回的 task_id 存入 state 以启动进度轮询。
+   *
+   * 数据集名称为空或未填任何证券代码时弹 warning 并直接返回，不发请求。日期范围与训练集
+   * 截止日期统一格式化为 YYYY-MM-DD 字符串提交。请求失败时打印错误并弹 error 提示，不抛出。
+   */
   const handleCreateDataset = async () => {
     if (!dsName || datasetSymbols.length === 0) {
       message.warning('请输入数据集名称和证券代码')
@@ -108,6 +121,13 @@ const ModelTrain: React.FC = () => {
     }
   }
 
+  /**
+   * 提交模型训练任务：按当前模型类型组装超参后调用后端，并把 task_id 存入 state 启动进度轮询。
+   *
+   * 模型名称为空或未选数据集时弹 warning 并直接返回。超参按类型分支组装：lgb / lasso 直接取
+   * 对应 state；mlp 额外把 hidden_sizes 文本解析为正整数数组，且当设备为 "auto" 时删除 device
+   * 字段（交由后端自动选择）。请求失败时打印错误并弹 error 提示，不抛出。
+   */
   const handleTrainModel = async () => {
     if (!modelName || !selectedDataset) {
       message.warning('请输入模型名称并选择数据集')

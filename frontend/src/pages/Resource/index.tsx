@@ -30,6 +30,12 @@ import type { CNNModelInfo } from '../../types/cnn'
 
 const { Title, Text } = Typography
 
+/**
+ * 资源管理页面：统一管理本地数据资源、Alpha 数据集、Alpha 模型、交易信号与 CNN 模型。
+ *
+ * 按标签页分组展示各类资源列表，支持查看详情和删除操作，
+ * 并通过 `location.state.tab` 支持从其他页面跳转时预激活指定标签。
+ */
 const Resource: React.FC = () => {
   const navigate = useNavigate()
   const location = useLocation()
@@ -62,6 +68,7 @@ const Resource: React.FC = () => {
     queryFn: () => cnnService.listModels(),
   })
 
+  // 把原始K线、原始Tick、派生K线三类资源合并成统一的扁平列表，供数据资源标签页与顶部统计卡共用；任一桶缺失时按空数组处理。
   const allDataResources = useMemo(
     () => [
       ...(resources?.raw_bars || []),
@@ -71,6 +78,13 @@ const Resource: React.FC = () => {
     [resources],
   )
 
+  /**
+   * 删除一条本地数据资源，成功后刷新数据资源列表。
+   *
+   * 失败时只弹出错误提示、不抛出（异常被吞掉），调用方无需 try/catch。
+   *
+   * @param resource - 待删除资源；用其 kind 与 key 定位后端记录
+   */
   const deleteResource = async (resource: DataResourceSummary) => {
     try {
       await alphaService.deleteDataResource(resource.kind, resource.key)
@@ -81,6 +95,13 @@ const Resource: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定 Alpha 数据集，成功后刷新数据集列表。
+   *
+   * 失败时只弹出错误提示、不抛出（异常被吞掉）。
+   *
+   * @param name - 数据集名称，作为后端删除接口的唯一标识
+   */
   const deleteDataset = async (name: string) => {
     try {
       await alphaService.deleteDataset(name)
@@ -91,6 +112,13 @@ const Resource: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定 Alpha 模型，成功后刷新 Alpha 模型列表。
+   *
+   * 失败时只弹出错误提示、不抛出（异常被吞掉）。
+   *
+   * @param name - 模型名称，作为后端删除接口的唯一标识
+   */
   const deleteAlphaModel = async (name: string) => {
     try {
       await alphaService.deleteModel(name)
@@ -101,6 +129,13 @@ const Resource: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定交易信号，成功后刷新信号列表。
+   *
+   * 失败时只弹出错误提示、不抛出（异常被吞掉）。
+   *
+   * @param name - 信号名称，作为后端删除接口的唯一标识
+   */
   const deleteSignal = async (name: string) => {
     try {
       await alphaService.deleteSignal(name)
@@ -111,6 +146,13 @@ const Resource: React.FC = () => {
     }
   }
 
+  /**
+   * 删除指定 CNN 模型，成功后刷新 CNN 模型列表。
+   *
+   * 失败时只弹出错误提示、不抛出（异常被吞掉）。
+   *
+   * @param name - 模型名称，作为后端删除接口的唯一标识
+   */
   const deleteCnnModel = async (name: string) => {
     try {
       await cnnService.deleteModel(name)
@@ -121,6 +163,13 @@ const Resource: React.FC = () => {
     }
   }
 
+  /**
+   * 渲染「数据资源」标签页：列出全部 K 线/Tick 资源，附带标的、类型、周期与起止区间等元信息。
+   *
+   * 非 Tick 资源额外提供「用于 CNN 训练」入口；列表为空时渲染占位提示。
+   *
+   * @returns 资源列表或空状态的 React 节点
+   */
   const renderResourceList = () => (
     allDataResources.length > 0 ? (
       <List
@@ -187,6 +236,18 @@ const Resource: React.FC = () => {
     )
   )
 
+  /**
+   * 渲染一个「仅按名称列举」的资源列表，供数据集/Alpha 模型/信号等同构标签页复用。
+   *
+   * 每行提供一个跳转到下一步工作流的按钮和一个带二次确认的删除按钮。
+   *
+   * @param items - 资源名称列表；为 undefined 或空数组时渲染空状态
+   * @param emptyText - 列表为空时的占位文案
+   * @param onDelete - 点击删除并确认后调用，入参为该行资源名
+   * @param actionLabel - 跳转按钮的文案，如「去模型训练」
+   * @param onJump - 点击跳转按钮时调用，入参为该行资源名
+   * @returns 名称列表或空状态的 React 节点
+   */
   const renderNameList = (
     items: string[] | undefined,
     emptyText: string,
@@ -215,6 +276,7 @@ const Resource: React.FC = () => {
     )
   )
 
+  // 「CNN 模型」标签页内容：逐个列出模型的名称、输入周期、分组数、目标证券、最佳验证损失与创建时间，并提供查看训练详情/删除入口；为空时渲染占位提示。
   const renderCnnModels = (
     cnnModels && cnnModels.length > 0 ? (
       <List<CNNModelInfo>

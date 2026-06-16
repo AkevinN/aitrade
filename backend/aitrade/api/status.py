@@ -1,5 +1,7 @@
 """
-System status API — GET /api/status.
+System status API — GET /api/status。
+
+提供系统级健康检查与就绪状态端点，供前端判断各模块可用性与数据源连接状态。
 """
 
 from fastapi import APIRouter

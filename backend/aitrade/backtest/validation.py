@@ -20,7 +20,17 @@ from .scheme import CostConfig
 # 成本敏感性
 # ---------------------------------------------------------------------------
 def default_cost_scenarios(base: CostConfig) -> list[tuple[str, CostConfig]]:
-    """默认压测情景：基准、佣金×2、滑点+5bp。"""
+    """生成三种默认成本压测情景：基准、佣金×2、滑点+5bp。
+
+    Args:
+        base: 基准成本配置。
+
+    Returns:
+        每项为 (情景名称, CostConfig) 的元组列表：
+        - ``"基准"``：原始成本；
+        - ``"佣金×2"``：commission_rate 翻倍；
+        - ``"滑点+5bp"``：slippage 增加 0.0005。
+    """
     return [
         ("基准", base),
         ("佣金×2", base.model_copy(update={"commission_rate": base.commission_rate * 2})),
@@ -63,7 +73,23 @@ def cost_sensitivity_table(
 # 样本外 / walk-forward 切分（按时间顺序，不打乱）
 # ---------------------------------------------------------------------------
 def time_series_holdout(items: list[Any], train_ratio: float) -> tuple[list[Any], list[Any]]:
-    """按时间顺序切分为 (训练, 留出)，保持原始顺序，不打乱。"""
+    """按时间顺序切分为 (训练集, 留出集)，保持原始顺序，不打乱。
+
+    Args:
+        items: 按时间顺序排列的样本列表（如日期列表或 bar 列表）。
+        train_ratio: 训练集比例，必须在 (0, 1) 之间（不含端点）。
+
+    Returns:
+        (train, holdout) 元组，两个子列表均保持原始相对顺序，合并等于 items。
+
+    Raises:
+        ValueError: train_ratio 不在 (0, 1) 开区间内时抛出。
+
+    Example:
+        >>> train, test = time_series_holdout(list(range(10)), 0.8)
+        >>> len(train), len(test)
+        (8, 2)
+    """
     if not 0.0 < train_ratio < 1.0:
         raise ValueError(f"train_ratio 必须在 (0,1) 之间，当前 {train_ratio}")
     split = int(len(items) * train_ratio)
@@ -77,10 +103,31 @@ def walk_forward_windows(
     test_days: int,
     step_days: Optional[int] = None,
 ) -> list[dict[str, tuple[date, date]]]:
-    """生成滚动 walk-forward 窗口。
+    """生成滚动 walk-forward 时间窗口列表（不含未来信息）。
 
-    每个窗口 test 区间紧接 train 区间之后（test_start == train_end），
-    保证样本外不含训练期信息。step_days 缺省等于 test_days（不重叠滚动）。
+    每个窗口的 test 区间紧接 train 区间之后（test_start == train_end），
+    保证样本外验证不混入训练期数据。step_days 控制游标每轮向前移动的天数，
+    缺省等于 test_days（无重叠滚动）；设为小于 test_days 可生成重叠测试窗口。
+
+    Args:
+        start: 整体数据起始日期，首个 train 窗口从此日期开始。
+        end: 整体数据截止日期，test_end > end 时停止生成。
+        train_days: 每个训练窗口的日历天数（必须为正整数）。
+        test_days: 每个测试窗口的日历天数（必须为正整数）。
+        step_days: 游标每轮步进天数；None 时等于 test_days（不重叠）。
+
+    Returns:
+        每元素为 ``{"train": (train_start, train_end), "test": (test_start, test_end)}``
+        的字典列表；若整个区间内无法生成任何完整窗口则返回空列表。
+
+    Raises:
+        ValueError: train_days 或 test_days 不为正数时抛出。
+
+    Example:
+        >>> from datetime import date
+        >>> windows = walk_forward_windows(date(2020,1,1), date(2021,12,31), 180, 60)
+        >>> len(windows) > 0
+        True
     """
     if train_days <= 0 or test_days <= 0:
         raise ValueError("train_days / test_days 必须为正")

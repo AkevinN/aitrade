@@ -10,12 +10,14 @@ import { App as AntApp } from 'antd'
 const listDecisions = vi.fn()
 const getDecision = vi.fn()
 const deleteDecision = vi.fn()
+const batchDeleteDecisions = vi.fn()
 const getDecisionTrace = vi.fn()
 vi.mock('../../api/liveApi', () => ({
   liveService: {
     listDecisions: () => listDecisions(),
     getDecision: (signalId: string) => getDecision(signalId),
     deleteDecision: (signalId: string) => deleteDecision(signalId),
+    batchDeleteDecisions: (signalIds: string[]) => batchDeleteDecisions(signalIds),
     getDecisionTrace: (signalId: string) => getDecisionTrace(signalId),
   },
 }))
@@ -42,6 +44,7 @@ describe('HistoryTable', () => {
     listDecisions.mockReset()
     getDecision.mockReset()
     deleteDecision.mockReset()
+    batchDeleteDecisions.mockReset()
     getDecisionTrace.mockReset()
   })
 
@@ -78,6 +81,44 @@ describe('HistoryTable', () => {
       expect(screen.queryByText(SIGNAL_ID)).not.toBeInTheDocument(),
     )
     // 点删除按钮不应触发行点击（不拉取详情、不开弹窗）。
+    expect(getDecision).not.toHaveBeenCalled()
+  })
+
+  it('未勾选时批量删除按钮禁用', async () => {
+    listDecisions.mockResolvedValue([SIGNAL_ID])
+    renderTable()
+
+    await screen.findByText(SIGNAL_ID)
+    expect(screen.getByRole('button', { name: /批量删除/ })).toBeDisabled()
+  })
+
+  it('勾选多行后批量删除并刷新列表', async () => {
+    const SECOND_ID = '2026-06-10:eod_buy_v1@v3'
+    listDecisions
+      .mockResolvedValueOnce([SIGNAL_ID, SECOND_ID])
+      .mockResolvedValueOnce([])
+    batchDeleteDecisions.mockResolvedValue({
+      deleted: [SIGNAL_ID, SECOND_ID],
+      missing: [],
+    })
+    renderTable()
+
+    await screen.findByText(SIGNAL_ID)
+    // 表头第一个 checkbox 为全选。
+    await userEvent.click(screen.getAllByRole('checkbox')[0])
+    expect(screen.getByRole('button', { name: /批量删除 \(2\)/ })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: /批量删除/ }))
+    await userEvent.click(await screen.findByRole('button', { name: '确认删除' }))
+
+    await waitFor(() =>
+      expect(batchDeleteDecisions).toHaveBeenCalledWith([SIGNAL_ID, SECOND_ID]),
+    )
+    await waitFor(() => expect(listDecisions).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      expect(screen.queryByText(SIGNAL_ID)).not.toBeInTheDocument(),
+    )
+    // 勾选 checkbox 不应触发行点击（不开详情弹窗）。
     expect(getDecision).not.toHaveBeenCalled()
   })
 

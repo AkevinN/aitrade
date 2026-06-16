@@ -24,11 +24,18 @@ def save_cnn_model(
     save_data: dict[str, Any],
     history: list[dict],
 ) -> tuple[Path, Path]:
-    """
-    保存 CNN 模型 checkpoint 和训练历史。
+    """保存 CNN 模型 checkpoint 和训练历史到 CNN_MODEL_DIR。
+
+    checkpoint 以 torch.save 格式（.pt）持久化，训练历史以 JSON 格式（_history.json）持久化。
+
+    Args:
+        name: 模型名称（不含后缀），文件保存为 {name}.pt 和 {name}_history.json。
+        save_data: 待持久化的 checkpoint 字典，含 model_state_dict/model_config/
+            train_config/normalization/dataset_info/best_epoch 等键。
+        history: 训练历史列表，每项为一个 epoch 的指标字典。
 
     Returns:
-        (model_path, history_path)
+        (model_path, history_path)：.pt 文件路径和 _history.json 文件路径的二元组。
     """
     import torch
 
@@ -44,7 +51,16 @@ def save_cnn_model(
 
 
 def list_cnn_models() -> list[dict]:
-    """列出已保存的 CNN 模型"""
+    """列出 CNN_MODEL_DIR 中所有已保存的模型摘要信息。
+
+    逐个加载 .pt checkpoint 并提取元数据；加载失败的文件不会抛错，
+    仅返回空 checkpoint 对应的默认值。
+
+    Returns:
+        字典列表，每项含 name/size_mb/created_at/modified/best_epoch/best_val_loss/
+        target_symbol/input_data_kind/input_interval/objective/group_count/
+        observation_groups 等键，按文件系统枚举顺序排列。
+    """
     import torch
 
     models: list[dict] = []
@@ -82,10 +98,22 @@ def list_cnn_models() -> list[dict]:
 
 
 def checkpoint_input_interval(model_path: Path) -> str:
-    """读 checkpoint 文件的训练输入周期（`train_config.input_interval`，默认 "d"）。
+    """读 checkpoint 文件中记录的训练输入周期（`train_config.input_interval`）。
 
-    供 API 层做「间隔锁定」校验（计划/手动决策的 bar_freq 必须与模型训练间隔一致）。
-    文件不存在抛 `FileNotFoundError`；不可读（损坏/非 checkpoint）由 torch 抛原始异常。
+    供 API 层做「间隔锁定」校验（计划 / 手动决策的 bar_freq 必须与模型训练间隔
+    一致），避免用日线模型去跑分钟级决策这类口径错配。
+
+    Args:
+        model_path: checkpoint 的 .pt 文件绝对/相对路径。
+
+    Returns:
+        训练时的输入周期字符串，如 "d" / "1m" / "30m"；checkpoint 缺该字段时
+        回退默认 "d"。
+
+    Raises:
+        FileNotFoundError: 文件不存在时抛出。
+        Exception: 文件损坏或非合法 checkpoint 时，由 torch.load 抛出原始异常
+            （不在此层吞掉）。
     """
     import torch
 
@@ -96,12 +124,35 @@ def checkpoint_input_interval(model_path: Path) -> str:
 
 
 def model_input_interval(name: str) -> str:
-    """按模型名读训练输入周期（默认模型库目录）。"""
+    """按模型名（在默认模型库目录 CNN_MODEL_DIR 下）读取其训练输入周期。
+
+    是 ``checkpoint_input_interval`` 的便捷封装，把模型名拼成 ``{name}.pt`` 路径。
+
+    Args:
+        name: 模型名称（不含 .pt 后缀）。
+
+    Returns:
+        训练时的输入周期字符串，如 "d" / "1m"；checkpoint 缺该字段时回退 "d"。
+
+    Raises:
+        FileNotFoundError: 对应 .pt 文件不存在时抛出（由底层透传）。
+    """
     return checkpoint_input_interval(CNN_MODEL_DIR / f"{name}.pt")
 
 
 def get_cnn_model_detail(name: str) -> dict:
-    """获取模型详情"""
+    """获取指定模型的完整详情（含训练配置、归一化参数和逐 epoch 历史）。
+
+    Args:
+        name: 模型名称（不含 .pt 后缀）。
+
+    Returns:
+        字典，含 name/created_at/train_config/model_config/normalization/
+        dataset_info/best_epoch/best_val_loss/history 等键。
+
+    Raises:
+        FileNotFoundError: 模型文件不存在时抛出。
+    """
     import torch
 
     model_path = CNN_MODEL_DIR / f"{name}.pt"
@@ -129,7 +180,14 @@ def get_cnn_model_detail(name: str) -> dict:
 
 
 def delete_cnn_model(name: str) -> bool:
-    """删除 CNN 模型"""
+    """删除 CNN 模型文件（.pt 和 _history.json）。
+
+    Args:
+        name: 模型名称（不含后缀）。
+
+    Returns:
+        True 表示 .pt 文件已删除；False 表示模型文件本不存在（_history.json 的删除不影响返回值）。
+    """
     model_path = CNN_MODEL_DIR / f"{name}.pt"
     history_path = CNN_MODEL_DIR / f"{name}_history.json"
     deleted = False

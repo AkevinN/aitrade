@@ -370,3 +370,91 @@ def test_on_progress_callback_invoked(tmp_path, monkeypatch) -> None:
     assert max(pcts) == 100  # 完成
     assert any(p == 80 for p in pcts)  # 编排段
     assert all(0 <= p <= 100 for p in pcts)
+
+
+# ---------------------------------------------------------------------------
+# 任务 1.3：signal_fn 注入 — 自定义信号源参数化
+# ---------------------------------------------------------------------------
+def test_custom_signal_fn_is_called_and_predict_cnn_signals_is_not(
+    tmp_path, monkeypatch
+) -> None:
+    """注入 signal_fn 时：自定义函数被调用，模块全局 predict_cnn_signals 不被调用。
+
+    哨兵断言：把 orchestrator.predict_cnn_signals 替换为会报错的哨兵，确认注入路径
+    完全绕过默认 CNN 推理。
+    """
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_close_price",
+        lambda vt_symbol, instant: (10.0, "d"),
+    )
+
+    # 哨兵：一旦被调用就 raise，保证注入路径不触碰全局 predict_cnn_signals。
+    def _sentinel(**kwargs):
+        raise AssertionError("注入 signal_fn 后不应调用全局 predict_cnn_signals")
+
+    monkeypatch.setattr(orchestrator, "predict_cnn_signals", _sentinel)
+
+    custom_called_with: list[dict] = []
+
+    def _custom_signal_fn(**kwargs):
+        custom_called_with.append(kwargs)
+        return _signal_frame(0.75)
+
+    store = DecisionStore(tmp_path)
+    notifier = LogNotifier()
+    pf = PortfolioSnapshot(portfolio_value=100000, current_position=0)
+
+    result = run_live_decision(
+        model_name=MODEL,
+        vt_symbol=VT_SYMBOL,
+        scheme_name=SCHEME,
+        instant=INSTANT,
+        portfolio=pf,
+        buy_threshold=0.6,
+        risk_config=RiskConfig(max_total_position_ratio=0.95, max_single_position_ratio=0.95),
+        store=store,
+        notifier=notifier,
+        model_version="v3",
+        signal_fn=_custom_signal_fn,
+    )
+
+    # 自定义函数被调用一次，且以正确的 kwargs 调用（含 model_name/start/end）。
+    assert len(custom_called_with) == 1
+    call_kwargs = custom_called_with[0]
+    assert call_kwargs["model_name"] == MODEL
+    assert "start" in call_kwargs
+    assert "end" in call_kwargs
+
+    # 决策结果正常产出（signal=0.75 > threshold=0.6 → buy）。
+    assert result["decision"]["action"] == "buy"
+    assert result["decision"]["signal"] == 0.75
+
+
+def test_default_path_unaffected_when_signal_fn_is_none(tmp_path, monkeypatch) -> None:
+    """不注入 signal_fn（或显式传 None）时，默认路径（monkeypatched predict_cnn_signals）照常。
+
+    确认：signal_fn=None 与不传 signal_fn 均走模块全局 predict_cnn_signals（已由
+    monkeypatch 桩化），与任务 1.3 前的行为完全一致。
+    """
+    _stub_io(monkeypatch, signal=0.72, price=10.0)
+    store = DecisionStore(tmp_path)
+    notifier = LogNotifier()
+    pf = PortfolioSnapshot(portfolio_value=100000, current_position=0)
+
+    # 显式传 signal_fn=None
+    result = run_live_decision(
+        model_name=MODEL,
+        vt_symbol=VT_SYMBOL,
+        scheme_name=SCHEME,
+        instant=INSTANT,
+        portfolio=pf,
+        buy_threshold=0.6,
+        risk_config=RiskConfig(max_total_position_ratio=0.95, max_single_position_ratio=0.95),
+        store=store,
+        notifier=notifier,
+        model_version="v3",
+        signal_fn=None,
+    )
+    assert result["decision"]["action"] == "buy"
+    assert result["idempotent_hit"] is False

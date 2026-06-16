@@ -66,4 +66,23 @@ describe('PlanList', () => {
     fireEvent.click(screen.getByText('编辑'))
     expect(props.onEdit).toHaveBeenCalledWith('plan-1')
   })
+
+  it('last_triggered 有值时展示日期', () => {
+    render(
+      <PlanList
+        {...baseProps({ plans: [makePlanSummary({ last_triggered: '2026-06-12' })] })}
+      />,
+    )
+    expect(screen.getByText('2026-06-12')).toBeInTheDocument()
+  })
+
+  it('last_triggered 为 null 时展示"—"占位', () => {
+    render(
+      <PlanList
+        {...baseProps({ plans: [makePlanSummary({ last_triggered: null })] })}
+      />,
+    )
+    // antd Table 单元格内 Text 渲染 "—"
+    expect(screen.getByText('—')).toBeInTheDocument()
+  })
 })

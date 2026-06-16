@@ -1,3 +1,7 @@
+/**
+ * 应用入口：初始化全局 QueryClient、Ant Design 暗色主题（中文语言包）、React Router，
+ * 并将根组件挂载到 `#root`。dayjs 语言包在此处统一设置为 `zh-cn`。
+ */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
