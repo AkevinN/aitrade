@@ -322,8 +322,8 @@ class QmtBridgeProvider(BaseProvider):
 
         Example:
             >>> recs = provider.get_fundamental("600000", "SSE", "20240101", "20240331")
-            >>> recs[0].extra["table"]
-            'income'
+            >>> recs[0].extra["table"]  # QMT 报表名首字母大写
+            'Balance'
         """
         resp = self._http.get(
             "/fundamental",
