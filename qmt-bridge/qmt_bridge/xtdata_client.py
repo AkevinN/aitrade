@@ -12,8 +12,10 @@ from typing import Any
 from .contract import (
     XTDATA_BAR_FIELDS,
     to_qmt_code,
+    from_qmt_code,
     to_qmt_period,
     to_dividend_type,
+    exchange_to_market,
 )
 
 # A 股交易时间按东八区
@@ -127,6 +129,135 @@ class XtdataClient:
             })
         rows.sort(key=lambda r: r["datetime"])
         return rows
+
+    def get_contracts(self, *, include_bse: bool = False) -> list[dict]:
+        """枚举沪深(可含北交所)A股并补详情，归一为 ContractInfo 形状的 list[dict]。
+
+        先下载板块数据，再逐只查合约细节与类型，统一归一化为 aitrade 契约字段。
+        产品类型根据 get_instrument_type 返回的 stock/index/fund 键推断。
+
+        Args:
+            include_bse: 为 True 时包含北交所（沪深京A股），默认 False（沪深A股）。
+
+        Returns:
+            list[dict]，每条含 symbol/exchange/name/product_type/size/pricetick/
+            list_date/delist_date/extra 键。
+
+        Example:
+            >>> client = XtdataClient(xtdata=fake_xt)
+            >>> rows = client.get_contracts(include_bse=False)
+            >>> rows[0]["exchange"]
+            'SSE'
+        """
+        self.xt.download_sector_data()
+        sector = "沪深京A股" if include_bse else "沪深A股"
+        codes = self.xt.get_stock_list_in_sector(sector) or []
+        out: list[dict] = []
+        for code in codes:
+            symbol, exchange = from_qmt_code(code)
+            detail = self.xt.get_instrument_detail(code, False) or {}
+            types = self.xt.get_instrument_type(code) or {}
+            product = "股票" if types.get("stock") else (
+                "指数" if types.get("index") else ("基金" if types.get("fund") else ""))
+            out.append({
+                "symbol": symbol,
+                "exchange": exchange,
+                "name": detail.get("InstrumentName", ""),
+                "product_type": product,
+                "size": float(detail.get("VolumeMultiple", 1) or 1),
+                "pricetick": float(detail.get("PriceTick", 0.01) or 0.01),
+                "list_date": str(detail.get("OpenDate", "") or ""),
+                "delist_date": str(detail.get("ExpireDate", "") or ""),
+                "extra": {
+                    "instrument_status": detail.get("InstrumentStatus"),
+                    "is_trading": detail.get("IsTrading"),
+                },
+            })
+        return out
+
+    def get_trade_calendar(self, exchange: str, start: str, end: str) -> list[dict]:
+        """交易日历，归一为 CalendarDay 形状的 list[dict]（仅含交易日，is_open=True）。
+
+        先下载节假日数据，再查询指定市场的交易日列表并归一化。
+
+        Args:
+            exchange: aitrade 交易所标识，如 "SSE"/"SZSE"。
+            start: 起始日期，格式 "YYYYMMDD"。
+            end: 结束日期，格式 "YYYYMMDD"。
+
+        Returns:
+            list[dict]，每条含 date/exchange/is_open 键；is_open 恒为 True（只返回交易日）。
+
+        Example:
+            >>> client = XtdataClient(xtdata=fake_xt)
+            >>> rows = client.get_trade_calendar("SSE", "20240101", "20240105")
+            >>> rows[0]
+            {'date': '20240102', 'exchange': 'SSE', 'is_open': True}
+        """
+        self.xt.download_holiday_data()
+        market = exchange_to_market(exchange)
+        days = self.xt.get_trading_calendar(market, start, end) or []
+        return [{"date": str(d), "exchange": exchange, "is_open": True} for d in days]
+
+    def get_fundamental(self, symbol: str, exchange: str, start: str, end: str) -> list[dict]:
+        """财务数据，report_type 固定 announce_time 防未来函数。
+
+        先 download 落地，再用 announce_time（按公告日）读取，展开所有表、
+        所有行为扁平 list[dict]，字段中剔除 m_timetag/m_anntime（提升为顶层键）。
+
+        Args:
+            symbol: aitrade 股票代码，如 "600000"。
+            exchange: aitrade 交易所标识，如 "SSE"/"SZSE"。
+            start: 起始日期，格式 "YYYYMMDD"。
+            end: 结束日期，格式 "YYYYMMDD"。
+
+        Returns:
+            list[dict]，每条形如
+            {'symbol','exchange','table','report_period','ann_date','fields': {...}}；
+            空表或 None 跳过。
+
+        Example:
+            >>> client = XtdataClient(xtdata=fake_xt)
+            >>> rows = client.get_fundamental("600000", "SSE", "20230101", "20240401")
+            >>> rows[0]["table"]
+            'Balance'
+        """
+        code = to_qmt_code(symbol, exchange)
+        self.xt.download_financial_data2([code], start_time=start, end_time=end)
+        data = self.xt.get_financial_data([code], start_time=start, end_time=end,
+                                          report_type="announce_time")
+        tables = data.get(code, {})
+        out: list[dict] = []
+        for table_name, df in tables.items():
+            if df is None or len(df) == 0:
+                continue
+            for rec in df.to_dict(orient="records"):
+                fields = {k: v for k, v in rec.items() if k not in ("m_timetag", "m_anntime")}
+                out.append({
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "table": table_name,
+                    "report_period": str(rec.get("m_timetag", "")),
+                    "ann_date": str(rec.get("m_anntime", "")),
+                    "fields": fields,
+                })
+        return out
+
+    def is_connected(self) -> bool:
+        """QMT/xtdata 连接是否在线（驱动 /health）。
+
+        Returns:
+            True 表示 QMT 客户端已连接；连接失败或抛异常均返回 False。
+
+        Example:
+            >>> client = XtdataClient(xtdata=fake_xt)
+            >>> client.is_connected()
+            False
+        """
+        try:
+            return bool(self.xt.get_client().is_connected())
+        except Exception:
+            return False
 
     def get_adj_factor(self, symbol: str, exchange: str,
                        start: str = "", end: str = "") -> list[dict]:

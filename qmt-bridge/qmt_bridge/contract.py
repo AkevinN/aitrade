@@ -101,6 +101,28 @@ def to_qmt_period(interval: str) -> str:
     return period
 
 
+def exchange_to_market(exchange: str) -> str:
+    """aitrade 交易所 -> xtdata 日历/市场码，如 'SSE'->'SH'。
+
+    Args:
+        exchange: aitrade 交易所标识，支持 "SSE"/"SZSE"/"BSE"。
+
+    Returns:
+        xtdata 市场码，如 "SH"/"SZ"/"BJ"。
+
+    Raises:
+        ValueError: exchange 不在支持列表时抛出。
+
+    Example:
+        >>> exchange_to_market("SSE")
+        'SH'
+    """
+    m = _EXCHANGE_TO_QMT.get(exchange)
+    if m is None:
+        raise ValueError(f"不支持的交易所: {exchange}")
+    return m
+
+
 def to_dividend_type(adjust_type: str, *, ratio: bool = False) -> str:
     """adjust_type(none/qfq/hfq) -> xtdata dividend_type 字符串。
 
