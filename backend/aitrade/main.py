@@ -17,11 +17,13 @@ from .config import (
     API_CORS_ORIGINS,
     API_HOST,
     API_PORT,
+    QMT_BRIDGE_TOKEN,
+    QMT_BRIDGE_URL,
     SCHEDULER_ENABLED,
     SCHEDULER_LOCK_PATH,
     SCHEDULER_TICK_SECONDS,
 )
-from .datasource import AkshareProvider, MockProvider, TushareProvider, datasource_manager
+from .datasource import AkshareProvider, MockProvider, QmtBridgeProvider, TushareProvider, datasource_manager
 from .api import alpha_router, cnn_router, live_router, status_router, strategy_router
 from .api.live import build_plan_scheduler, register_scheduler
 from .api.ws import ws_manager
@@ -91,6 +93,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Yields:
         None。yield 处即应用就绪、开始处理请求；控制权交回框架直至关闭。
     """
+    qmt_provider = QmtBridgeProvider(url=QMT_BRIDGE_URL, token=QMT_BRIDGE_TOKEN)
+    datasource_manager.register(qmt_provider, priority=-10)
+
     tushare_provider = TushareProvider()
     datasource_manager.register(tushare_provider, priority=0)
 

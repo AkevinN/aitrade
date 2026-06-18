@@ -90,6 +90,13 @@ AKSHARE_MAX_RETRIES: int = max(int(os.getenv("AKSHARE_MAX_RETRIES", "3")), 1)
 AKSHARE_RETRY_DELAY_SEC: float = max(float(os.getenv("AKSHARE_RETRY_DELAY_SEC", "0.8")), 0.0)
 
 # =============================================================================
+# QMT 数据桥（Mac↔Windows）
+# =============================================================================
+
+QMT_BRIDGE_URL: str = os.getenv("QMT_BRIDGE_URL", "")
+QMT_BRIDGE_TOKEN: str = os.getenv("QMT_BRIDGE_TOKEN", "")
+
+# =============================================================================
 # Alpha research
 # =============================================================================
 
