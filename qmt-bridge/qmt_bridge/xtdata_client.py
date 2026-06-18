@@ -127,3 +127,38 @@ class XtdataClient:
             })
         rows.sort(key=lambda r: r["datetime"])
         return rows
+
+    def get_adj_factor(self, symbol: str, exchange: str,
+                       start: str = "", end: str = "") -> list[dict]:
+        """用 get_divid_factors 的 dr 累乘出后复权累积因子。
+
+        每个除权日的复权因子 = 前一日累积因子 × 当日 dr，从 1.0 起单调递增。
+        常用于将历史价格还原为后复权序列：price_hfq = price_raw × adj_factor。
+
+        Args:
+            symbol: aitrade 股票代码，如 "600000"。
+            exchange: aitrade 交易所标识，如 "SSE"/"SZSE"。
+            start: 起始日期，格式 "YYYYMMDD"；空字符串表示不限。
+            end: 结束日期，格式 "YYYYMMDD"；空字符串表示不限。
+
+        Returns:
+            list[{'trade_date': 'YYYYMMDD', 'adj_factor': float}]，按除权日升序；
+            adj_factor 从 1.0 起、每个除权日乘当日 dr，单调 >=1。无除权返回 []。
+
+        Example:
+            >>> client = XtdataClient(xtdata=fake_xt)
+            >>> rows = client.get_adj_factor("600000", "SSE", "20240101", "20241231")
+            >>> rows[0]
+            {'trade_date': '20240110', 'adj_factor': 1.1}
+        """
+        code = to_qmt_code(symbol, exchange)
+        df = self.xt.get_divid_factors(code, start, end)
+        if df is None or len(df) == 0:
+            return []
+
+        out: list[dict] = []
+        factor = 1.0
+        for trade_date, rec in df.sort_index().iterrows():
+            factor = round(factor * float(rec["dr"]), 6)
+            out.append({"trade_date": str(trade_date), "adj_factor": factor})
+        return out
