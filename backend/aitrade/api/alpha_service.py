@@ -230,7 +230,7 @@ def _pick_bar_provider(preferred: str = "", asset_class: str = "stock") -> str:
         if _is_usable_bar_provider("akshare"):
             return "akshare"
         return ""
-    for name in ("tushare", "akshare", "gateway"):
+    for name in ("qmt", "tushare", "akshare", "gateway"):
         if name == "akshare" and asset_class == "etf":
             continue
         if _is_usable_bar_provider(name):
