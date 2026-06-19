@@ -580,6 +580,53 @@ export interface DataResourceMergeResponse extends DataResourceMergePreview {
   end?: string
 }
 
+// Parquet Import types
+
+/**
+ * 单个 Parquet 文件的暂存预览（`POST /api/alpha/parquet/stage` 响应中的元素）。
+ *
+ * 后端解析每个上传文件的列与时间范围后给出可导入判定，供前端在正式导入前
+ * 渲染逐文件汇总表。
+ */
+export interface ParquetFilePreview {
+  /** 原始上传文件名。 */
+  file_name: string
+  /** 推断出的合约代码；按文件内代码列分组或无法识别时为空字符串 `""`。 */
+  vt_symbol: string
+  /** 该文件的数据行数。 */
+  row_count: number
+  /** 数据日期范围 `[起始, 结束]`，格式为 `YYYY-MM-DD`。 */
+  date_range: [string, string]
+  /** 文件包含的列名列表。 */
+  columns: string[]
+  /** 缺失的必填列名列表；非空通常意味着无法导入。 */
+  missing_required: string[]
+  /** 是否可被导入。 */
+  importable: boolean
+  /** 不可导入的原因，或类似「按文件内代码列分组导入」的提示说明。 */
+  reason: string
+}
+
+/** Parquet 文件暂存结果（`POST /api/alpha/parquet/stage` 响应体）。 */
+export interface ParquetStageResult {
+  /** 本批暂存会话 ID；正式导入与取消暂存均以此寻址。 */
+  session_id: string
+  /** 逐文件预览列表。 */
+  files: ParquetFilePreview[]
+}
+
+/** Parquet 正式导入请求（`POST /api/alpha/parquet/import` 请求体）。 */
+export interface ParquetImportRequest {
+  /** 暂存会话 ID，由 {@link ParquetStageResult} 返回。 */
+  session_id: string
+  /** 数据类型：`bar` K线；`tick` 逐笔。 */
+  data_kind: 'bar' | 'tick'
+  /** 目标 K 线周期（如 `d` / `1m`）；tick 导入时通常忽略，传任意占位值即可。 */
+  interval: string
+  /** 导入模式：`merge` 合并保留旧数据；`replace` 全量覆盖。 */
+  import_mode: CsvImportMode
+}
+
 /**
  * CNN 训练的观测分组（`target` 目标股、`market` 大盘、`sector` 板块等）。
  *

@@ -39,6 +39,7 @@ import dayjs from 'dayjs'
 import { alphaService } from '../../api/alpha'
 import { statusService } from '../../api/status'
 import AggregationWorkspace from './AggregationWorkspace'
+import ParquetUploadPanel from './ParquetUploadPanel'
 import DateRangeSelector from '../../components/DateRangeSelector'
 import TaskStatusPanel from '../../components/TaskStatusPanel'
 import { useTask } from '../../hooks/useTask'
@@ -468,6 +469,9 @@ const DataPrepare: React.FC = () => {
   const [selectedResource, setSelectedResource] = useState<DataResourceSummary | null>(null)
   const [barCsvFile, setBarCsvFile] = useState<UploadFile[]>([])
   const [tickCsvFile, setTickCsvFile] = useState<UploadFile[]>([])
+  // 收集到的待暂存 Parquet 文件（与 CSV 单文件流程互斥），交给 ParquetUploadPanel 处理。
+  const [barParquetFiles, setBarParquetFiles] = useState<File[]>([])
+  const [tickParquetFiles, setTickParquetFiles] = useState<File[]>([])
   const [barPreview, setBarPreview] = useState<CsvPreviewResult | null>(null)
   const [tickPreview, setTickPreview] = useState<CsvPreviewResult | null>(null)
   const [previewLoading, setPreviewLoading] = useState<'bar' | 'tick' | null>(null)
@@ -641,24 +645,59 @@ const DataPrepare: React.FC = () => {
   }
 
   /**
-   * 生成 antd Dragger 的受控上传配置：仅接受单个 CSV，选中即触发预览而不真正上传。
+   * 生成 antd Dragger 的受控上传配置：支持 CSV 单文件预览与 Parquet 批量暂存两条路径。
    *
-   * beforeUpload 返回 false 阻止默认上传，改由 previewCsv 处理；非 .csv 文件直接拒绝。
+   * beforeUpload 按文件类型分流并一律返回 false 阻止自动上传：
+   * - 单个 `.csv`（且整批只有它一个）走原有 {@link previewCsv} 单文件预览流程；
+   * - 一个或多个 `.parquet`（或一次选了多个文件）收集到对应的 Parquet 文件态，交给
+   *   {@link ParquetUploadPanel} 暂存与预览；选中 Parquet 时会清空该路 CSV 单文件态。
+   * 其它扩展名直接拒绝。Parquet 文件按整批的第二个参数 `fileList` 一次性收集，避免逐文件回调
+   * 造成的覆盖丢失。
    *
    * @param kind - "bar" 或 "tick"，决定绑定到哪一套文件列表与预览态
    * @returns 可直接展开到 Dragger 上的 UploadProps
    */
   const buildUploadProps = (kind: 'bar' | 'tick'): UploadProps => ({
-    beforeUpload: (file) => {
-      if (!file.name.toLowerCase().endsWith('.csv')) {
-        message.error('仅支持 CSV 文件')
+    beforeUpload: (file, batch) => {
+      const lower = file.name.toLowerCase()
+      const isCsv = lower.endsWith('.csv')
+      const isParquet = lower.endsWith('.parquet')
+      if (!isCsv && !isParquet) {
+        message.error('仅支持 CSV 或 Parquet 文件')
         return Upload.LIST_IGNORE
       }
+      // 整批含 Parquet，或一次选了多个文件 → 走批量 Parquet 暂存（按整批收集一次）。
+      const batchHasParquet = batch.some((f) => f.name.toLowerCase().endsWith('.parquet'))
+      if (isParquet || batchHasParquet || batch.length > 1) {
+        // beforeUpload 对每个文件各调一次；仅在批内首个文件触发收集，避免重复 setState。
+        if (file === batch[0]) {
+          const parquetFiles = batch.filter((f) => f.name.toLowerCase().endsWith('.parquet'))
+          if (parquetFiles.length === 0) {
+            message.error('批量上传仅支持 Parquet 文件')
+          } else {
+            if (parquetFiles.length !== batch.length) {
+              message.warning('已忽略非 Parquet 文件，仅暂存 Parquet')
+            }
+            if (kind === 'bar') {
+              setBarCsvFile([])
+              setBarPreview(null)
+              setBarParquetFiles(parquetFiles as unknown as File[])
+            } else {
+              setTickCsvFile([])
+              setTickPreview(null)
+              setTickParquetFiles(parquetFiles as unknown as File[])
+            }
+          }
+        }
+        return false
+      }
+      // 单个 CSV → 保持原有预览流程不变。
       void previewCsv(kind, file)
       return false
     },
     fileList: kind === 'bar' ? barCsvFile : tickCsvFile,
     onChange: ({ fileList }) => {
+      // 仅维护 CSV 单文件的受控列表；Parquet 不进此列表（fileList 在 maxCount=1 下只留一项）。
       if (kind === 'bar') {
         setBarCsvFile(fileList)
       } else {
@@ -674,8 +713,11 @@ const DataPrepare: React.FC = () => {
         setTickPreview(null)
       }
     },
-    accept: '.csv',
+    accept: '.csv,.parquet',
+    multiple: true,
     maxCount: 1,
+    // 仅按本 kind 自己的 Parquet 态隐藏列表，避免另一上传区的状态串扰。
+    showUploadList: (kind === 'bar' ? barParquetFiles.length : tickParquetFiles.length) ? false : undefined,
   })
 
   /**
@@ -1018,40 +1060,50 @@ const DataPrepare: React.FC = () => {
                       <Space direction="vertical" style={{ width: '100%' }} size={12}>
                         <Dragger {...buildUploadProps('bar')}>
                           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-                          <p className="ant-upload-text">上传 K线 CSV 文件</p>
-                          <p className="ant-upload-hint">支持 d / 1m / 5m / 15m / 30m / 60m</p>
+                          <p className="ant-upload-text">上传 K线 CSV / Parquet 文件</p>
+                          <p className="ant-upload-hint">CSV 支持 d / 1m / 5m / 15m / 30m / 60m；Parquet 可一次多选批量导入</p>
                         </Dragger>
-                        <Form form={barImportForm} layout="vertical">
-                          <Form.Item
-                            label="导入周期"
-                            name="interval"
-                            rules={[{ required: true, message: '请选择导入周期' }]}
-                          >
-                            <Select options={BAR_INTERVAL_OPTIONS} />
-                          </Form.Item>
-                        </Form>
-                        <Alert
-                          type="info"
-                          showIcon
-                          message="CSV 将保存为待合并批次，不会直接覆盖正式行情。"
-                        />
-                        {previewLoading === 'bar' ? <Alert type="info" showIcon message="正在解析 K线 CSV..." /> : null}
-                        {barPreview ? (
-                          <Descriptions size="small" bordered column={1}>
-                            <Descriptions.Item label="识别证券">{barPreview.symbols.join(', ') || '无'}</Descriptions.Item>
-                            <Descriptions.Item label="日期范围">{barPreview.date_range[0]} ~ {barPreview.date_range[1]}</Descriptions.Item>
-                            <Descriptions.Item label="缺失字段">{barPreview.missing_required.join(', ') || '无'}</Descriptions.Item>
-                          </Descriptions>
-                        ) : null}
-                        <Button
-                          type="primary"
-                          onClick={() => void handleImport('bar')}
-                          loading={importingKind === 'bar'}
-                          disabled={!barPreview}
-                          block
-                        >
-                          保存为待合并批次
-                        </Button>
+                        {barParquetFiles.length ? (
+                          <ParquetUploadPanel
+                            files={barParquetFiles}
+                            kind="bar"
+                            onClear={() => setBarParquetFiles([])}
+                          />
+                        ) : (
+                          <>
+                            <Form form={barImportForm} layout="vertical">
+                              <Form.Item
+                                label="导入周期"
+                                name="interval"
+                                rules={[{ required: true, message: '请选择导入周期' }]}
+                              >
+                                <Select options={BAR_INTERVAL_OPTIONS} />
+                              </Form.Item>
+                            </Form>
+                            <Alert
+                              type="info"
+                              showIcon
+                              message="CSV 将保存为待合并批次，不会直接覆盖正式行情。"
+                            />
+                            {previewLoading === 'bar' ? <Alert type="info" showIcon message="正在解析 K线 CSV..." /> : null}
+                            {barPreview ? (
+                              <Descriptions size="small" bordered column={1}>
+                                <Descriptions.Item label="识别证券">{barPreview.symbols.join(', ') || '无'}</Descriptions.Item>
+                                <Descriptions.Item label="日期范围">{barPreview.date_range[0]} ~ {barPreview.date_range[1]}</Descriptions.Item>
+                                <Descriptions.Item label="缺失字段">{barPreview.missing_required.join(', ') || '无'}</Descriptions.Item>
+                              </Descriptions>
+                            ) : null}
+                            <Button
+                              type="primary"
+                              onClick={() => void handleImport('bar')}
+                              loading={importingKind === 'bar'}
+                              disabled={!barPreview}
+                              block
+                            >
+                              保存为待合并批次
+                            </Button>
+                          </>
+                        )}
                       </Space>
                     ),
                   },
@@ -1062,35 +1114,45 @@ const DataPrepare: React.FC = () => {
                       <Space direction="vertical" style={{ width: '100%' }} size={12}>
                         <Dragger {...buildUploadProps('tick')}>
                           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-                          <p className="ant-upload-text">上传历史 Tick CSV 文件</p>
-                          <p className="ant-upload-hint">导入后可本地聚合出任意分钟周期</p>
+                          <p className="ant-upload-text">上传历史 Tick CSV / Parquet 文件</p>
+                          <p className="ant-upload-hint">导入后可本地聚合出任意分钟周期；Parquet 可一次多选批量导入</p>
                         </Dragger>
-                        {previewLoading === 'tick' ? <Alert type="info" showIcon message="正在解析 Tick CSV..." /> : null}
-                        {tickPreview ? (
+                        {tickParquetFiles.length ? (
+                          <ParquetUploadPanel
+                            files={tickParquetFiles}
+                            kind="tick"
+                            onClear={() => setTickParquetFiles([])}
+                          />
+                        ) : (
                           <>
-                            <Descriptions size="small" bordered column={1}>
-                              <Descriptions.Item label="识别证券">{tickPreview.symbols.join(', ') || '无'}</Descriptions.Item>
-                              <Descriptions.Item label="日期范围">{tickPreview.date_range[0]} ~ {tickPreview.date_range[1]}</Descriptions.Item>
-                              <Descriptions.Item label="缺失字段">{tickPreview.missing_required.join(', ') || '无'}</Descriptions.Item>
-                            </Descriptions>
-                            {tickPreview.missing_required.length > 0 ? (
-                              <Alert
-                                type="warning"
-                                showIcon
-                                message={`缺少字段: ${tickPreview.missing_required.join(', ')}`}
-                              />
+                            {previewLoading === 'tick' ? <Alert type="info" showIcon message="正在解析 Tick CSV..." /> : null}
+                            {tickPreview ? (
+                              <>
+                                <Descriptions size="small" bordered column={1}>
+                                  <Descriptions.Item label="识别证券">{tickPreview.symbols.join(', ') || '无'}</Descriptions.Item>
+                                  <Descriptions.Item label="日期范围">{tickPreview.date_range[0]} ~ {tickPreview.date_range[1]}</Descriptions.Item>
+                                  <Descriptions.Item label="缺失字段">{tickPreview.missing_required.join(', ') || '无'}</Descriptions.Item>
+                                </Descriptions>
+                                {tickPreview.missing_required.length > 0 ? (
+                                  <Alert
+                                    type="warning"
+                                    showIcon
+                                    message={`缺少字段: ${tickPreview.missing_required.join(', ')}`}
+                                  />
+                                ) : null}
+                              </>
                             ) : null}
+                            <Button
+                              type="primary"
+                              onClick={() => void handleImport('tick')}
+                              loading={importingKind === 'tick'}
+                              disabled={!tickPreview}
+                              block
+                            >
+                              保存为待合并批次
+                            </Button>
                           </>
-                        ) : null}
-                        <Button
-                          type="primary"
-                          onClick={() => void handleImport('tick')}
-                          loading={importingKind === 'tick'}
-                          disabled={!tickPreview}
-                          block
-                        >
-                          保存为待合并批次
-                        </Button>
+                        )}
                       </Space>
                     ),
                   },
