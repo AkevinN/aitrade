@@ -116,6 +116,43 @@ def _to_exchange_naive(dt: datetime | None) -> datetime | None:
 # 模块级纯函数已迁移至 lab_utils.py（interval / vt_symbol / 日期边界辅助），
 # 上方通过 re-export 保持 `from aitrade.alpha.lab import normalize_vt_symbol` 等向后兼容。
 
+# 正式存储 / 批次的规范列顺序（与 _bar_records_frame / _tick_records_frame 一致）。
+_BAR_FRAME_COLUMNS: list[str] = ["datetime", "open", "high", "low", "close", "volume", "turnover", "open_interest"]
+_TICK_FRAME_COLUMNS: list[str] = [
+    "datetime", "last_price", "volume", "turnover",
+    "bid_price_1", "ask_price_1", "bid_volume_1", "ask_volume_1",
+]
+
+
+def _coerce_datetime_frame_column(df: pl.DataFrame, col: str = "datetime") -> pl.DataFrame:
+    """把 DataFrame 的时间列统一为无时区的交易所本地 datetime（polars 帧级）。
+
+    是 ``_to_exchange_naive`` 的帧级等价：
+    - ``Datetime`` 带时区：转 ``Asia/Shanghai`` 后去时区；不带时区原样保留；
+    - ``Date``：转 ``Datetime``；
+    - 整数：按毫秒 epoch 解释（best-effort，见 design 已知缺口）；
+    - 字符串：``str.to_datetime(strict=False)`` 解析，失败置 null。
+
+    Args:
+        df: 待处理 DataFrame，须含 ``col`` 列。
+        col: 时间列名，默认 ``"datetime"``。
+
+    Returns:
+        ``col`` 列已规范化为无时区 ``Datetime`` 的新 DataFrame。
+    """
+    dtype = df.schema[col]
+    if isinstance(dtype, pl.Datetime):
+        if dtype.time_zone is not None:
+            return df.with_columns(
+                pl.col(col).dt.convert_time_zone("Asia/Shanghai").dt.replace_time_zone(None)
+            )
+        return df
+    if dtype == pl.Date:
+        return df.with_columns(pl.col(col).cast(pl.Datetime))
+    if dtype.is_integer():
+        return df.with_columns(pl.col(col).cast(pl.Datetime(time_unit="ms")))
+    return df.with_columns(pl.col(col).cast(pl.String).str.to_datetime(strict=False))
+
 
 class BarData:
     """独立 K 线数据类（不依赖 vnpy）。
@@ -3452,6 +3489,248 @@ class AlphaLab:
             file_path=file_path,
             metadata=metadata,
         )
+
+    def _normalize_uploaded_frame(
+        self,
+        df: pl.DataFrame,
+        *,
+        data_kind: str = "bar",
+        custom_mapping: dict[str, str] | None = None,
+    ) -> tuple[pl.DataFrame, list[str], dict[str, str]]:
+        """把任意来源的上传 parquet 帧映射并规范化为 Bar_Frame/Tick_Frame。
+
+        复用 ``parse_csv_mapping`` 做列名匹配（兼容中英文别名）；按 ``data_kind``
+        选必填字段（bar=``CSV_REQUIRED_FIELDS``，tick=``[datetime, last_price]``）；
+        时间列经 ``_coerce_datetime_frame_column`` 统一为交易所裸时间；缺失的可选列
+        补 ``0.0``，其余数值列转 ``Float64``；最后按规范列顺序 ``select``。
+
+        Args:
+            df: 原始上传 parquet 读出的 DataFrame。
+            data_kind: ``"bar"``（默认）或 ``"tick"``。
+            custom_mapping: 自定义 ``{标准字段: 源列名}`` 映射，优先于自动匹配。
+
+        Returns:
+            ``(规范化帧, missing_required, matched_mapping)``。``missing_required``
+            非空时返回原始 ``df`` 不做规范化（该文件不可导入）。
+
+        Example:
+            >>> out, missing, _ = lab._normalize_uploaded_frame(df, data_kind="bar")
+            >>> missing == [] and out.columns == _BAR_FRAME_COLUMNS
+            True
+        """
+        matched = self.parse_csv_mapping(df.columns, custom_mapping, data_kind=data_kind)
+        required = CSV_REQUIRED_FIELDS if data_kind == "bar" else ["datetime", "last_price"]
+        missing = [field for field in required if field not in matched]
+        if missing:
+            return df, missing, matched
+
+        target = _BAR_FRAME_COLUMNS if data_kind == "bar" else _TICK_FRAME_COLUMNS
+        rename_map = {
+            matched[std]: std
+            for std in matched
+            if std in target and matched[std] != std
+        }
+        out = df.rename(rename_map) if rename_map else df
+        out = _coerce_datetime_frame_column(out, "datetime")
+        for col in target:
+            if col == "datetime":
+                continue
+            if col not in out.columns:
+                out = out.with_columns(pl.lit(0.0).alias(col))
+            else:
+                out = out.with_columns(pl.col(col).cast(pl.Float64, strict=False))
+        return out.select(target), [], matched
+
+    @staticmethod
+    def _uploaded_symbol_column(matched: dict[str, str]) -> str | None:
+        """返回上传帧中可用于分组的代码列源名：优先 ``vt_symbol``，其次 ``symbol``。
+
+        Args:
+            matched: ``parse_csv_mapping`` 的结果（``{标准字段: 源列名}``）。
+
+        Returns:
+            源列名；既无 ``vt_symbol`` 也无 ``symbol`` 列时返回 ``None``（走文件名模式）。
+        """
+        return matched.get("vt_symbol") or matched.get("symbol")
+
+    @staticmethod
+    def _uploaded_symbol_tag(df: pl.DataFrame, matched: dict[str, str]) -> pl.Series:
+        """从原始上传帧取与行 1:1 对齐的 vt_symbol 字符串列（未规范化）。
+
+        ``vt_symbol`` 列优先直接取用；否则用 ``symbol``(+``exchange``) 组合。
+
+        Args:
+            df: 原始上传 DataFrame。
+            matched: ``parse_csv_mapping`` 的结果，须含 ``vt_symbol`` 或 ``symbol``。
+
+        Returns:
+            长度等于 ``df`` 行数的 Utf8 Series。
+        """
+        if matched.get("vt_symbol"):
+            return df.get_column(matched["vt_symbol"]).cast(pl.String)
+        sym = pl.col(matched["symbol"]).cast(pl.String)
+        if matched.get("exchange"):
+            expr = sym + pl.lit(".") + pl.col(matched["exchange"]).cast(pl.String)
+        else:
+            expr = sym
+        return df.select(expr.alias("__sym__")).get_column("__sym__")
+
+    @staticmethod
+    def _normalize_symbol_token(value: str) -> str:
+        """把单个代码原始值规范化为 ``symbol.EXCHANGE``（纯数字短码补零到 6 位）。
+
+        Args:
+            value: 代码原始值，如 ``"000001.SZSE"``、``"1"``、``"sh600000"``。
+
+        Returns:
+            规范化的 vt_symbol。
+        """
+        token = str(value)
+        if token.isdigit() and len(token) < 6:
+            token = token.zfill(6)
+        return normalize_vt_symbol(token)
+
+    def preview_parquet_path(self, path: Path, *, data_kind: str = "bar") -> dict[str, Any]:
+        """轻量预览单个上传 parquet：只读 schema/行数 + datetime 列，不全表加载。
+
+        用 ``scan_parquet`` 取列名与行数（仅元数据），按 ``parse_csv_mapping`` 匹配并
+        检测缺失必填字段；代码识别遵循「列优先、否则文件名」（``canonical_vt_symbol_from_stem``，
+        裸码补交易所）；可导入时再只读 datetime 单列求起止日期。任何读失败都返回
+        ``importable=False`` 并带原因，不抛错。
+
+        Args:
+            path: 暂存的 parquet 文件路径。
+            data_kind: ``"bar"``（默认）或 ``"tick"``。
+
+        Returns:
+            含 ``file_name``/``vt_symbol``/``row_count``/``date_range``/``columns``/
+            ``missing_required``/``importable``/``reason`` 的字典。
+        """
+        file_name = Path(path).name
+        result: dict[str, Any] = {
+            "file_name": file_name, "vt_symbol": "", "row_count": 0,
+            "date_range": ("", ""), "columns": [], "missing_required": [],
+            "importable": False, "reason": "",
+        }
+        try:
+            names = pl.scan_parquet(path).collect_schema().names()
+        except Exception as exc:
+            result["reason"] = f"无法读取 parquet: {exc}"
+            return result
+        result["columns"] = names
+
+        matched = self.parse_csv_mapping(names, data_kind=data_kind)
+        required = CSV_REQUIRED_FIELDS if data_kind == "bar" else ["datetime", "last_price"]
+        missing = [field for field in required if field not in matched]
+        result["missing_required"] = missing
+
+        symbol_ok = True
+        if self._uploaded_symbol_column(matched):
+            result["reason"] = "按文件内代码列分组导入"
+        else:
+            vt_symbol = canonical_vt_symbol_from_stem(Path(file_name).stem)
+            _symbol, exchange = _parse_vt_symbol(vt_symbol)
+            symbol_ok = bool(exchange)
+            result["vt_symbol"] = vt_symbol if symbol_ok else ""
+            if not symbol_ok:
+                result["reason"] = "无法从文件名识别证券代码"
+
+        try:
+            result["row_count"] = int(pl.scan_parquet(path).select(pl.len()).collect().item())
+        except Exception:
+            pass
+
+        if not missing and "datetime" in matched:
+            try:
+                dt_col = matched["datetime"]
+                sub = pl.read_parquet(path, columns=[dt_col])
+                if dt_col != "datetime":
+                    sub = sub.rename({dt_col: "datetime"})
+                sub = _coerce_datetime_frame_column(sub, "datetime")
+                mn, mx = sub["datetime"].min(), sub["datetime"].max()
+                result["date_range"] = (
+                    mn.strftime("%Y-%m-%d") if mn is not None else "",
+                    mx.strftime("%Y-%m-%d") if mx is not None else "",
+                )
+            except Exception:
+                pass
+
+        if missing and not result["reason"]:
+            result["reason"] = f"缺少必填列: {', '.join(missing)}"
+        result["importable"] = (not missing) and symbol_ok
+        return result
+
+    def import_parquet_path(
+        self,
+        path: Path,
+        *,
+        data_kind: str,
+        interval: str,
+        file_name: str | None = None,
+        custom_mapping: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """读取单个上传 parquet，规范化后按代码分组写入待合并批次。
+
+        读 parquet → ``_normalize_uploaded_frame`` → 代码识别（列优先：含 ``vt_symbol``/
+        ``symbol`` 列则按列分组成多支；否则整文件用文件名 ``canonical_vt_symbol_from_stem``）
+        → 逐组 ``_save_import_batch_frame``。坏文件/缺列/无法识别代码均返回 ``success=False``，
+        不写任何批次（供上层计入 failed_files）。
+
+        Args:
+            path: 暂存的 parquet 文件路径。
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            interval: K 线周期；``data_kind="tick"`` 时忽略（归一为 ``"tick"``）。
+            file_name: 原始文件名（决定文件名模式下的代码与批次元数据）；``None`` 用 ``path.name``。
+            custom_mapping: 自定义列名映射，透传给 ``_normalize_uploaded_frame``。
+
+        Returns:
+            ``{success, vt_symbols, row_count, batches, error?}``。
+        """
+        file_name = file_name or Path(path).name
+
+        def _fail(message: str) -> dict[str, Any]:
+            return {"success": False, "error": message, "vt_symbols": [], "row_count": 0, "batches": []}
+
+        try:
+            df = pl.read_parquet(path)
+        except Exception as exc:
+            return _fail(f"无法读取 parquet: {exc}")
+
+        norm, missing, matched = self._normalize_uploaded_frame(
+            df, data_kind=data_kind, custom_mapping=custom_mapping
+        )
+        if missing:
+            return _fail(f"缺少必填列: {', '.join(missing)}")
+
+        batches: list[dict[str, Any]] = []
+        vt_symbols: list[str] = []
+
+        if self._uploaded_symbol_column(matched):
+            tagged = norm.with_columns(self._uploaded_symbol_tag(df, matched).alias("__vt_raw__"))
+            for (raw_value,), group in tagged.group_by(["__vt_raw__"], maintain_order=True):
+                vt_symbol = self._normalize_symbol_token(str(raw_value))
+                _symbol, exchange = _parse_vt_symbol(vt_symbol)
+                if not exchange:
+                    continue
+                batches.append(self._save_import_batch_frame(
+                    data_kind=data_kind, vt_symbol=vt_symbol, interval=interval,
+                    df=group.drop("__vt_raw__"), file_name=file_name, source="upload",
+                ))
+                vt_symbols.append(vt_symbol)
+            if not batches:
+                return _fail("未从代码列识别到任何有效证券代码")
+        else:
+            vt_symbol = canonical_vt_symbol_from_stem(Path(file_name).stem)
+            _symbol, exchange = _parse_vt_symbol(vt_symbol)
+            if not exchange:
+                return _fail("无法从文件名识别证券代码")
+            batches.append(self._save_import_batch_frame(
+                data_kind=data_kind, vt_symbol=vt_symbol, interval=interval,
+                df=norm, file_name=file_name, source="upload",
+            ))
+            vt_symbols.append(vt_symbol)
+
+        return {"success": True, "vt_symbols": vt_symbols, "row_count": norm.height, "batches": batches}
 
     def import_csv(
         self,
