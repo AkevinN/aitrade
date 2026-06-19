@@ -124,6 +124,21 @@ _TICK_FRAME_COLUMNS: list[str] = [
 ]
 
 
+def _is_safe_path_token(value: str) -> bool:
+    """判断字符串能否安全用作单层路径组件（无路径穿越）。
+
+    用于把（来自文件内容/文件名、可能被污染的）vt_symbol 当作目录名落盘前的校验，
+    守住「只写 imports/ 层」红线：含 ``/``、``\\``、``..`` 或为空/纯 ``.`` 一律视为不安全。
+
+    Args:
+        value: 待校验的路径组件（通常是规范化后的 vt_symbol）。
+
+    Returns:
+        安全返回 True；否则 False。
+    """
+    return bool(value) and value not in (".", "..") and "/" not in value and "\\" not in value and ".." not in value
+
+
 def _coerce_datetime_frame_column(df: pl.DataFrame, col: str = "datetime") -> pl.DataFrame:
     """把 DataFrame 的时间列统一为无时区的交易所本地 datetime（polars 帧级）。
 
@@ -1839,6 +1854,9 @@ class AlphaLab:
             ``imports/<data_kind>/<interval>/<vt_symbol>/`` 的 ``Path`` 对象。
         """
         vt_symbol = normalize_vt_symbol(vt_symbol)
+        # 安全红线：vt_symbol 直接用作目录名，含路径分隔符/.. 时拒绝，防止批次写出 imports/ 之外。
+        if not _is_safe_path_token(vt_symbol):
+            raise ValueError(f"非法的合约代码（含路径分隔符或 ..）: {vt_symbol!r}")
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
         return self.imports_path / data_kind / canonical / vt_symbol
 
@@ -3710,7 +3728,8 @@ class AlphaLab:
             for (raw_value,), group in tagged.group_by(["__vt_raw__"], maintain_order=True):
                 vt_symbol = self._normalize_symbol_token(str(raw_value))
                 _symbol, exchange = _parse_vt_symbol(vt_symbol)
-                if not exchange:
+                # 跳过无效或不安全（含路径穿越）的代码：安全红线，绝不据此落盘到 imports/ 之外。
+                if not exchange or not _is_safe_path_token(vt_symbol):
                     continue
                 batches.append(self._save_import_batch_frame(
                     data_kind=data_kind, vt_symbol=vt_symbol, interval=interval,
@@ -3722,7 +3741,7 @@ class AlphaLab:
         else:
             vt_symbol = canonical_vt_symbol_from_stem(Path(file_name).stem)
             _symbol, exchange = _parse_vt_symbol(vt_symbol)
-            if not exchange:
+            if not exchange or not _is_safe_path_token(vt_symbol):
                 return _fail("无法从文件名识别证券代码")
             batches.append(self._save_import_batch_frame(
                 data_kind=data_kind, vt_symbol=vt_symbol, interval=interval,

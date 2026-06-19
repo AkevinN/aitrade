@@ -304,6 +304,37 @@ def test_stage_list_and_discard(tmp_path) -> None:
     assert staging.list_files("s") == []
 
 
+def test_stage_rejects_traversal_session_id(tmp_path) -> None:
+    """安全：session_id 含路径穿越时，list_files/discard 绝不触达暂存目录之外。"""
+    staging = ParquetUploadStaging(tmp_path / "stage")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.parquet").write_bytes(b"real-data")
+
+    # list_files 不得读到暂存目录之外的内容
+    assert staging.list_files("../outside") == []
+    # discard 不得删除暂存目录之外的目录
+    staging.discard("../outside")
+    assert outside.exists()
+    assert (outside / "x.parquet").exists()
+    # stage_stream 对非法 session_id 直接拒绝
+    with pytest.raises(ValueError):
+        staging.stage_stream("../outside", "a.parquet", io.BytesIO(b"a"), max_file_bytes=100)
+    assert (outside / "x.parquet").read_bytes() == b"real-data"
+
+
+def test_stage_duplicate_basenames_both_kept(tmp_path) -> None:
+    """数据安全：同名文件（文件夹批量常见）各自保留，不互相覆盖，且保留原始文件名。"""
+    staging = ParquetUploadStaging(tmp_path / "stage")
+    staging.stage_stream("s", "000001.parquet", io.BytesIO(b"AAAA"), max_file_bytes=100)
+    staging.stage_stream("s", "000001.parquet", io.BytesIO(b"BBBB"), max_file_bytes=100)
+
+    files = staging.list_files("s")
+    assert len(files) == 2
+    assert all(f.file_name == "000001.parquet" for f in files)  # 原始名保留（供按文件名识别代码）
+    assert sorted(f.path.read_bytes() for f in files) == [b"AAAA", b"BBBB"]
+
+
 def test_stage_cleanup_expired(tmp_path) -> None:
     """cleanup_expired 回收超 TTL 的历史会话（注入 now 保证确定性）。"""
     staging = ParquetUploadStaging(tmp_path / "stage")
@@ -433,6 +464,194 @@ def test_parquet_import_missing_session_404(monkeypatch, tmp_path) -> None:
         )
         assert resp.status_code == 404
         assert "会话" in resp.json()["detail"]  # 确为"会话不存在"，而非路由未注册
+
+
+def _tick_frame() -> pl.DataFrame:
+    """构造规范 Tick schema 的两行 DataFrame。"""
+    return pl.DataFrame(
+        {
+            "datetime": [datetime(2024, 1, 2, 9, 30), datetime(2024, 1, 2, 9, 31)],
+            "last_price": [10.0, 10.1],
+            "volume": [100.0, 110.0],
+        }
+    )
+
+
+def test_import_parquet_tick_creates_batch(tmp_path) -> None:
+    """tick parquet 导入：必填仅 datetime+last_price，落 raw_tick_batches，不进正式 tick。"""
+    lab = AlphaLab(tmp_path)
+    path = tmp_path / "600000.parquet"
+    _tick_frame().write_parquet(path)
+
+    res = lab.import_parquet_path(path, data_kind="tick", interval="tick")
+
+    assert res["success"] is True
+    assert res["vt_symbols"] == ["600000.SSE"]
+    resources = lab.list_data_resources()
+    assert len(resources["raw_tick_batches"]) == 1
+    assert resources["raw_ticks"] == []
+
+
+def test_preview_parquet_tick_missing_last_price(tmp_path) -> None:
+    """tick 预览：缺 last_price → 不可导入。"""
+    lab = AlphaLab(tmp_path)
+    path = tmp_path / "000001.parquet"
+    pl.DataFrame({"datetime": [datetime(2024, 1, 2, 9, 30)], "volume": [100.0]}).write_parquet(path)
+
+    preview = lab.preview_parquet_path(path, data_kind="tick")
+
+    assert preview["importable"] is False
+    assert "last_price" in preview["missing_required"]
+
+
+def test_import_parquet_session_replace_mode_stays_batch_only(tmp_path, monkeypatch) -> None:
+    """import_mode='replace' 在导入阶段是 no-op：仍只落待合并批次，不碰正式资源。"""
+    monkeypatch.setattr(alpha_api, "ALPHA_LAB_PATH", tmp_path / "lab")
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_STAGING_PATH", tmp_path / "stage")
+    staging = ParquetUploadStaging(tmp_path / "stage")
+    _stage_frame(staging, "s", "600000.parquet", _bar_frame())
+
+    res = alpha_service._import_parquet_session("s", data_kind="bar", interval="d", import_mode="replace")
+
+    assert res["success"] == 1
+    resources = AlphaLab(tmp_path / "lab").list_data_resources()
+    assert resources["raw_bars"] == []
+    assert len(resources["raw_bar_batches"]) == 1
+
+
+def _parquet_app(monkeypatch, tmp_path):
+    """构造一个把 lab/暂存路径隔离到 tmp 的 TestClient（端点测试公共夹具）。"""
+    from fastapi.testclient import TestClient
+
+    from aitrade.main import create_app
+
+    monkeypatch.setattr(alpha_api, "ALPHA_LAB_PATH", tmp_path / "lab")
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_STAGING_PATH", tmp_path / "stage")
+    return TestClient(create_app())
+
+
+def test_parquet_tick_endpoint_flow(monkeypatch, tmp_path) -> None:
+    """tick 端到端：stage(data_kind=tick)→import（interval 被改写为 tick）→ raw_tick_batches。"""
+    with _parquet_app(monkeypatch, tmp_path) as client:
+        stage_resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "tick"},
+            files=[("files", ("600000.parquet", _parquet_bytes(_tick_frame()), "application/octet-stream"))],
+        )
+        assert stage_resp.status_code == 200
+        session_id = stage_resp.json()["session_id"]
+
+        import_resp = client.post(
+            "/api/alpha/parquet/import",
+            json={"session_id": session_id, "data_kind": "tick", "interval": "d", "import_mode": "merge"},
+        )
+        assert import_resp.status_code == 200
+        task = _poll_task(client, import_resp.json()["task_id"])
+        assert task["status"] == "completed"
+        assert task["result"]["success"] == 1
+
+        resources = client.get("/api/alpha/data/resources").json()
+        assert len(resources["raw_tick_batches"]) == 1
+        assert resources["raw_ticks"] == []
+
+
+def test_parquet_stage_total_size_413(monkeypatch, tmp_path) -> None:
+    """单次总量超 PARQUET_UPLOAD_MAX_TOTAL_BYTES → 413 且不留暂存会话。"""
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_MAX_TOTAL_BYTES", 10)
+    with _parquet_app(monkeypatch, tmp_path) as client:
+        resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "bar"},
+            files=[
+                ("files", ("600000.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream")),
+                ("files", ("000001.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream")),
+            ],
+        )
+        assert resp.status_code == 413
+    assert list((tmp_path / "stage").iterdir()) == []  # 会话已清理，无残留
+
+
+def test_parquet_stage_single_file_400(monkeypatch, tmp_path) -> None:
+    """单文件超 PARQUET_UPLOAD_MAX_FILE_BYTES → 400 且不留暂存会话。"""
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_MAX_FILE_BYTES", 10)
+    with _parquet_app(monkeypatch, tmp_path) as client:
+        resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "bar"},
+            files=[("files", ("600000.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream"))],
+        )
+        assert resp.status_code == 400
+    assert list((tmp_path / "stage").iterdir()) == []
+
+
+def test_parquet_cancel_endpoint(monkeypatch, tmp_path) -> None:
+    """取消端点：删除会话暂存目录（幂等），删后该会话导入返回 404。"""
+    with _parquet_app(monkeypatch, tmp_path) as client:
+        stage_resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "bar"},
+            files=[("files", ("600000.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream"))],
+        )
+        session_id = stage_resp.json()["session_id"]
+
+        del_resp = client.delete(f"/api/alpha/parquet/stage/{session_id}")
+        assert del_resp.status_code == 200
+        assert del_resp.json()["success"] is True
+
+        # 删后会话不存在 → 导入 404
+        import_resp = client.post(
+            "/api/alpha/parquet/import",
+            json={"session_id": session_id, "data_kind": "bar", "interval": "d", "import_mode": "merge"},
+        )
+        assert import_resp.status_code == 404
+        # 幂等：再删一次仍 200
+        assert client.delete(f"/api/alpha/parquet/stage/{session_id}").status_code == 200
+
+
+def test_parquet_stage_mixed_non_parquet(monkeypatch, tmp_path) -> None:
+    """混入非 parquet 文件：该文件 importable=false 且原因含 parquet，parquet 文件不受影响。"""
+    with _parquet_app(monkeypatch, tmp_path) as client:
+        resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "bar"},
+            files=[
+                ("files", ("600000.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream")),
+                ("files", ("notes.txt", b"not parquet", "text/plain")),
+            ],
+        )
+        assert resp.status_code == 200
+        by_name = {f["file_name"]: f for f in resp.json()["files"]}
+        assert by_name["600000.parquet"]["importable"] is True
+        assert by_name["notes.txt"]["importable"] is False
+        assert "parquet" in by_name["notes.txt"]["reason"]
+
+
+def test_import_parquet_symbol_column_traversal_blocked(tmp_path) -> None:
+    """安全：symbol/vt_symbol 列含路径穿越值 → 跳过，绝不在 imports/ 之外落盘。"""
+    lab = AlphaLab(tmp_path / "lab")
+    df = pl.DataFrame(
+        {
+            "vt_symbol": ["../../../../tmp/evil.SSE", "../../../../tmp/evil.SSE"],
+            "datetime": [datetime(2024, 1, 2), datetime(2024, 1, 3)],
+            "open": [1.0, 1.1], "high": [1.2, 1.3], "low": [0.9, 1.0], "close": [1.1, 1.2],
+        }
+    )
+    path = tmp_path / "mixed.parquet"
+    df.write_parquet(path)
+
+    res = lab.import_parquet_path(path, data_kind="bar", interval="d")
+
+    # 恶意代码被跳过：未生成批次，未在任何位置创建 evil.SSE 目录。
+    assert all("evil" not in s and "/" not in s for s in res["vt_symbols"])
+    assert lab.list_data_resources()["raw_bar_batches"] == []
+    assert list(tmp_path.rglob("evil.SSE")) == []
+
+
+def test_batch_dir_rejects_unsafe_symbol(tmp_path) -> None:
+    """安全：_batch_dir 对含分隔符/.. 的代码直接拒绝（保护 CSV 与 parquet 共用的落盘 sink）。"""
+    lab = AlphaLab(tmp_path)
+    with pytest.raises(ValueError):
+        lab._batch_dir("bar", "d", "../../evil.SSE")
 
 
 def test_import_parquet_unrecognized_filename_no_batch(tmp_path) -> None:

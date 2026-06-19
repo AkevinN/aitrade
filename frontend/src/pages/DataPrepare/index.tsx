@@ -716,7 +716,8 @@ const DataPrepare: React.FC = () => {
     accept: '.csv,.parquet',
     multiple: true,
     maxCount: 1,
-    showUploadList: barParquetFiles.length || tickParquetFiles.length ? false : undefined,
+    // 仅按本 kind 自己的 Parquet 态隐藏列表，避免另一上传区的状态串扰。
+    showUploadList: (kind === 'bar' ? barParquetFiles.length : tickParquetFiles.length) ? false : undefined,
   })
 
   /**

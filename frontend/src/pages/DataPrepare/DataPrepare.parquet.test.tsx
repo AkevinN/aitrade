@@ -194,6 +194,30 @@ describe('DataPrepare Parquet 上传导入', () => {
     })
   })
 
+  it('点击取消会调用 cancelParquetStage 清理服务端暂存会话', async () => {
+    const { container } = renderPage()
+
+    fireEvent.click(await screen.findByText('K线CSV'))
+    const barUploadInput = container.querySelector<HTMLInputElement>('input[type="file"]')
+    const parquetFile = new File([new Uint8Array([1, 2, 3])], 'good.parquet', {
+      type: 'application/octet-stream',
+    })
+    selectFiles(barUploadInput!, [parquetFile])
+
+    await waitFor(() => {
+      expect(mocks.stageParquetMock).toHaveBeenCalledTimes(1)
+    })
+    await screen.findByText('000001.SZSE')
+
+    // antd 会在两个 CJK 字符间插入空格，按钮可访问名为「取 消」。
+    fireEvent.click(screen.getByRole('button', { name: /取\s*消/ }))
+
+    await waitFor(() => {
+      expect(mocks.cancelParquetStageMock).toHaveBeenCalledWith('sess-abc')
+    })
+    expect(mocks.importParquetMock).not.toHaveBeenCalled()
+  })
+
   it('单个 .csv 文件仍走原有 previewCsv 流程而非 parquet 暂存', async () => {
     const { container } = renderPage()
 

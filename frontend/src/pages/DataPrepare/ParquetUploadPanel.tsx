@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   App,
@@ -84,6 +84,8 @@ const ParquetUploadPanel: React.FC<ParquetUploadPanelProps> = ({ files, kind, on
   const [taskId, setTaskId] = useState<string | null>(null)
   const [interval, setIntervalValue] = useState<string>('d')
   const [importMode, setImportMode] = useState<CsvImportMode>('merge')
+  // 当前已暂存且尚未被导入消费的服务端会话；用于重新选择文件/取消时主动清理暂存目录。
+  const stagedSessionRef = useRef<string | null>(null)
 
   const task = useTask(taskId)
 
@@ -94,13 +96,22 @@ const ParquetUploadPanel: React.FC<ParquetUploadPanelProps> = ({ files, kind, on
       setStage(null)
       return
     }
+    // 重新选择文件 → 先丢弃上一会话的服务端暂存（best-effort），再暂存新一批，避免泄漏。
+    if (stagedSessionRef.current) {
+      void alphaService.cancelParquetStage(stagedSessionRef.current).catch(() => {})
+      stagedSessionRef.current = null
+    }
     setStaging(true)
     setStage(null)
     alphaService
       .stageParquet(files, kind)
       .then((result) => {
         if (!cancelled) {
+          stagedSessionRef.current = result.session_id
           setStage(result)
+        } else {
+          // 暂存返回时组件已切走/文件已变 → 丢弃这次刚建的会话，避免遗留。
+          void alphaService.cancelParquetStage(result.session_id).catch(() => {})
         }
       })
       .catch((error) => {
@@ -129,6 +140,8 @@ const ParquetUploadPanel: React.FC<ParquetUploadPanelProps> = ({ files, kind, on
       const failed = result?.failed ?? 0
       message.success(`Parquet 导入完成：成功 ${success} 个${failed ? `，失败 ${failed} 个` : ''}`)
       queryClient.invalidateQueries({ queryKey: ['alpha-data-resources'] })
+      // 会话已被导入任务消费并在服务端清理，无需再 cancel；仅清空本地引用。
+      stagedSessionRef.current = null
       setStage(null)
       setTaskId(null)
       onClear()
@@ -166,6 +179,22 @@ const ParquetUploadPanel: React.FC<ParquetUploadPanelProps> = ({ files, kind, on
     } finally {
       setImporting(false)
     }
+  }
+
+  /**
+   * 取消本次上传：主动调用 cancelParquetStage 清理服务端暂存目录，再清空本地已收集文件。
+   */
+  const handleCancel = async () => {
+    const sessionId = stagedSessionRef.current
+    if (sessionId) {
+      try {
+        await alphaService.cancelParquetStage(sessionId)
+      } catch {
+        // best-effort：清理失败也不阻塞用户取消，TTL 兜底回收。
+      }
+      stagedSessionRef.current = null
+    }
+    onClear()
   }
 
   const columns: ColumnsType<ParquetFilePreview> = [
@@ -282,11 +311,11 @@ const ParquetUploadPanel: React.FC<ParquetUploadPanelProps> = ({ files, kind, on
               type="primary"
               onClick={() => void handleImport()}
               loading={importing || running}
-              disabled={importableCount === 0}
+              disabled={importableCount === 0 || importing || !!taskId}
             >
               确认导入
             </Button>
-            <Button onClick={onClear} disabled={importing || running}>
+            <Button onClick={() => void handleCancel()} disabled={importing || running}>
               取消
             </Button>
           </Space>

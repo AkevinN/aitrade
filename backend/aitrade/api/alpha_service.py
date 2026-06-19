@@ -513,7 +513,7 @@ def _import_parquet_session(
         session_id: 上传会话标识（由 stage 端点生成）。
         data_kind: ``"bar"`` 或 ``"tick"``。
         interval: K 线周期；``data_kind="tick"`` 时由底层归一为 ``"tick"``。
-        import_mode: 仅记录透传；批次默认 pending，合并/替换语义在「批次合并」环节生效。
+        import_mode: 导入阶段忽略（批次一律 pending）；合并/替换语义在后续「批次合并」环节再选择。
         on_progress: 可选进度回调 ``(progress: float, message: str)``。
 
     Returns:

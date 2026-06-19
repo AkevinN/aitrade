@@ -10,11 +10,28 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+
+# 合法 session_id 仅允许字母/数字/下划线/连字符——足以匹配 uuid4().hex，又能挡住
+# 含路径分隔符或 ".." 的穿越值（安全红线：discard/list_files 绝不触达暂存目录之外）。
+_SESSION_ID_RE = re.compile(r"^[0-9A-Za-z_-]+$")
+
+
+def _is_valid_session_id(session_id: str) -> bool:
+    """判断 session_id 是否为安全的单层目录名（无路径穿越）。
+
+    Args:
+        session_id: 待校验的会话标识。
+
+    Returns:
+        仅含字母/数字/下划线/连字符时返回 True；含 ``/``、``\\``、``..`` 等返回 False。
+    """
+    return bool(session_id) and _SESSION_ID_RE.match(session_id) is not None
 
 
 @dataclass
@@ -88,10 +105,17 @@ class ParquetUploadStaging:
         Raises:
             ValueError: 累计写入超过 ``max_file_bytes`` 时抛出。
         """
+        if not _is_valid_session_id(session_id):
+            raise ValueError(f"非法的 session_id: {session_id!r}")
         session_dir = self._session_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = Path(file_name).name
-        dest = session_dir / safe_name
+        safe_name = Path(file_name).name or "unnamed"
+        # 每个文件独占一个序号子目录：文件夹批量上传里不同子目录可能有同名文件
+        # （如 2024/000001.parquet 与 2025/000001.parquet），平铺会互相覆盖、静默丢数据。
+        seq = sum(1 for entry in session_dir.iterdir() if entry.is_dir())
+        file_dir = session_dir / f"{seq:06d}"
+        file_dir.mkdir(parents=True, exist_ok=True)
+        dest = file_dir / safe_name
         is_parquet = safe_name.lower().endswith(".parquet")
 
         size = 0
@@ -106,7 +130,7 @@ class ParquetUploadStaging:
                         raise ValueError(f"文件 {safe_name} 超过单文件大小上限 {max_file_bytes} 字节")
                     out.write(chunk)
         except Exception:
-            dest.unlink(missing_ok=True)
+            shutil.rmtree(file_dir, ignore_errors=True)
             raise
 
         return StagedFile(file_name=safe_name, path=dest, size_bytes=size, is_parquet=is_parquet)
@@ -120,28 +144,36 @@ class ParquetUploadStaging:
         Returns:
             ``StagedFile`` 列表；会话目录不存在时返回空列表。
         """
+        if not _is_valid_session_id(session_id):
+            return []
         session_dir = self._session_dir(session_id)
         if not session_dir.is_dir():
             return []
         files: list[StagedFile] = []
-        for path in sorted(session_dir.iterdir()):
-            if path.is_file():
-                files.append(
-                    StagedFile(
-                        file_name=path.name,
-                        path=path,
-                        size_bytes=path.stat().st_size,
-                        is_parquet=path.suffix.lower() == ".parquet",
+        # 布局为 <session>/<seq>/<原始文件名>：逐个序号子目录取其唯一文件。
+        for seq_dir in sorted(session_dir.iterdir()):
+            if not seq_dir.is_dir():
+                continue
+            for path in sorted(seq_dir.iterdir()):
+                if path.is_file():
+                    files.append(
+                        StagedFile(
+                            file_name=path.name,
+                            path=path,
+                            size_bytes=path.stat().st_size,
+                            is_parquet=path.suffix.lower() == ".parquet",
+                        )
                     )
-                )
         return files
 
     def discard(self, session_id: str) -> None:
         """删除整个会话目录（导入成功或用户取消时调用）。
 
         Args:
-            session_id: 会话标识；目录不存在时静默跳过。
+            session_id: 会话标识；目录不存在或 session_id 非法时静默跳过（绝不触达暂存目录之外）。
         """
+        if not _is_valid_session_id(session_id):
+            return
         shutil.rmtree(self._session_dir(session_id), ignore_errors=True)
 
     def cleanup_expired(self, ttl_seconds: int, *, now: float | None = None) -> int:

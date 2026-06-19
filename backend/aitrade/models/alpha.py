@@ -144,7 +144,7 @@ class ParquetImportRequest(BaseModel):
     session_id: str = Field(description="stage 端点返回的会话标识")
     data_kind: Literal["bar", "tick"] = Field(default="bar", description="数据类型")
     interval: str = Field(default="d", description="K 线周期，归一化后须属于 d/1m/5m/15m/30m/60m；data_kind=tick 时忽略")
-    import_mode: Literal["merge", "replace"] = Field(default="merge", description="仅记录透传；批次默认 pending，合并/替换在「批次合并」环节生效")
+    import_mode: Literal["merge", "replace"] = Field(default="merge", description="导入阶段忽略（批次一律存为 pending）；合并/替换语义在后续「批次合并」环节再选择")
 
 
 class DatasetCreateRequest(BaseModel):
