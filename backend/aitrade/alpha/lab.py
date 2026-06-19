@@ -3379,10 +3379,55 @@ class AlphaLab:
         Returns:
             批次摘要字典（同 ``_batch_summary_from_file`` 返回值）。
         """
+        df = self._tick_records_frame(records) if data_kind == "tick" else self._bar_records_frame(records)
+        return self._save_import_batch_frame(
+            data_kind=data_kind,
+            vt_symbol=vt_symbol,
+            interval=interval,
+            df=df,
+            file_name=file_name,
+            adjust_type=adjust_type,
+            source=source,
+            extra_meta=extra_meta,
+        )
+
+    def _save_import_batch_frame(
+        self,
+        *,
+        data_kind: str,
+        vt_symbol: str,
+        interval: str,
+        df: pl.DataFrame,
+        file_name: str | None = None,
+        adjust_type: str = "none",
+        source: str = "upload",
+        extra_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """将一张已规范化的 DataFrame 写入 imports 批次层并返回批次摘要。
+
+        承接 ``_save_import_batch``（records 路径）与 parquet 帧导入路径
+        （``import_parquet_path``）的共用写入逻辑：生成带时间戳前缀的唯一
+        ``batch_id``，将 ``df`` 写入
+        ``imports/<data_kind>/<interval>/<vt_symbol>/<batch_id>.parquet``，
+        并写入同名 sidecar 元数据 JSON。``df`` 必须已是规范 Bar_Frame/Tick_Frame
+        schema（列与 ``_bar_records_frame``/``_tick_records_frame`` 一致）。
+
+        Args:
+            data_kind: ``"bar"`` 或 ``"tick"``。
+            vt_symbol: 合约代码（内部自动规范化）。
+            interval: K 线周期；``data_kind="tick"`` 时固定归一为 ``"tick"``。
+            df: 已规范化的 polars DataFrame。
+            file_name: 原始文件名，记录在元数据中；``None`` 时留空。
+            adjust_type: 复权口径，默认 ``"none"``。
+            source: 来源标识，默认 ``"upload"``。
+            extra_meta: 额外写入元数据的字段字典。
+
+        Returns:
+            批次摘要字典（同 ``_batch_summary_from_file`` 返回值）。
+        """
         vt_symbol = normalize_vt_symbol(vt_symbol)
         batch_id = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{uuid.uuid4().hex[:8]}"
         canonical = "tick" if data_kind == "tick" else _canonical_bar_interval(interval)
-        df = self._tick_records_frame(records) if data_kind == "tick" else self._bar_records_frame(records)
         # 上传/下载批次先落在 imports 层；只有用户手动合并后才进入 bars/ticks 正式数据层。
         file_path = self._batch_file_path(data_kind, canonical, vt_symbol, batch_id)
         file_path.parent.mkdir(parents=True, exist_ok=True)
