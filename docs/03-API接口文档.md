@@ -324,6 +324,28 @@
 #### `POST /api/alpha/ticks/import`
 > 执行 Tick CSV 导入。
 
+#### `POST /api/alpha/parquet/stage`
+> 多文件（支持整文件夹批量）上传 parquet 暂存并轻量预览，不立即入库。文件流式分块落盘
+> （内存恒定），仅读元数据生成逐文件预览，便于"先看后导"。
+
+**Content-Type**: `multipart/form-data`
+- `data_kind`: `bar` / `tick`
+- `files`: 一个或多个 parquet 文件（重复字段）
+
+**返回**：`{ session_id, files: ParquetFilePreview[] }`，每项含
+`file_name / vt_symbol / row_count / date_range / columns / missing_required / importable / reason`。
+单文件超 `PARQUET_UPLOAD_MAX_FILE_BYTES` → 400；单次总量超 `PARQUET_UPLOAD_MAX_TOTAL_BYTES` → 413（均清理本会话）。
+
+#### `POST /api/alpha/parquet/import`
+> 就既有暂存会话异步导入（逐文件落为待合并批次），立即返回任务 ID。
+
+**JSON 参数**: `{ session_id, data_kind: bar|tick, interval, import_mode }`
+（`import_mode` 在导入阶段忽略，合并/替换在「批次合并」环节再选；`interval` 仅 bar 用）。
+**返回**：`{ task_id, message }`，经 `GET /api/alpha/tasks/{task_id}` 轮询进度；会话不存在/已过期 → 404。
+
+#### `DELETE /api/alpha/parquet/stage/{session_id}`
+> 取消上传：删除该会话暂存目录（幂等）。
+
 ### 2.12 K 线数据 (兼容旧前端)
 
 #### `GET /api/alpha/bar-data`
@@ -752,6 +774,9 @@ const ws = new WebSocket('ws://localhost:8000/ws')
 | POST | `/api/alpha/bar-data/import` | CSV导入 |
 | POST | `/api/alpha/ticks/import/preview` | Tick预览 |
 | POST | `/api/alpha/ticks/import` | Tick导入 |
+| POST | `/api/alpha/parquet/stage` | Parquet 多文件暂存+预览 |
+| POST | `/api/alpha/parquet/import` | Parquet 确认导入（异步任务） |
+| DELETE | `/api/alpha/parquet/stage/{session_id}` | 取消 Parquet 上传 |
 | GET | `/api/cnn/status` | CNN 状态 |
 | POST | `/api/cnn/train` | CNN 训练 |
 | GET | `/api/cnn/models` | CNN 模型列表 |
