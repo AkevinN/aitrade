@@ -121,6 +121,32 @@ class DataResourceMergeRequest(BaseModel):
     keys: list[str] = Field(description="上传批次 key 列表")
 
 
+class ParquetFilePreview(BaseModel):
+    """单个上传 parquet 文件的轻量预览（只读元数据 + 时间列得出）。"""
+    file_name: str = Field(description="原始文件名")
+    vt_symbol: str = Field(default="", description="按文件名推断的证券代码；按列分组或无法识别时为空")
+    row_count: int = Field(default=0, description="总行数")
+    date_range: tuple[str, str] = Field(default=("", ""), description="起止日期 (YYYY-MM-DD)")
+    columns: list[str] = Field(default_factory=list, description="文件列名")
+    missing_required: list[str] = Field(default_factory=list, description="按字段映射后仍缺失的必填标准字段")
+    importable: bool = Field(default=True, description="是否可导入")
+    reason: str = Field(default="", description="不可导入或特殊情况（如按代码列分组）的说明")
+
+
+class ParquetStageResult(BaseModel):
+    """parquet 多文件暂存上传的结果：会话标识 + 逐文件预览。"""
+    session_id: str = Field(description="上传会话标识，用于后续确认导入或取消")
+    files: list[ParquetFilePreview] = Field(default_factory=list, description="逐文件预览列表")
+
+
+class ParquetImportRequest(BaseModel):
+    """确认导入某暂存会话的请求体。"""
+    session_id: str = Field(description="stage 端点返回的会话标识")
+    data_kind: Literal["bar", "tick"] = Field(default="bar", description="数据类型")
+    interval: str = Field(default="d", description="K 线周期，归一化后须属于 d/1m/5m/15m/30m/60m；data_kind=tick 时忽略")
+    import_mode: Literal["merge", "replace"] = Field(default="merge", description="仅记录透传；批次默认 pending，合并/替换在「批次合并」环节生效")
+
+
 class DatasetCreateRequest(BaseModel):
     """传统因子数据集创建请求体。
 

@@ -18,6 +18,16 @@ import pytest
 
 from aitrade.alpha.lab import AlphaLab
 from aitrade.alpha.parquet_upload import ParquetUploadStaging
+from aitrade.api import alpha as alpha_api
+from aitrade.api import alpha_service
+
+
+def _stage_frame(staging: ParquetUploadStaging, session_id: str, name: str, df: pl.DataFrame) -> None:
+    """把一张 DataFrame 写成 parquet 字节并经暂存层落盘（测试辅助）。"""
+    buf = io.BytesIO()
+    df.write_parquet(buf)
+    buf.seek(0)
+    staging.stage_stream(session_id, name, buf, max_file_bytes=50_000_000)
 
 
 def _bar_frame() -> pl.DataFrame:
@@ -303,6 +313,126 @@ def test_stage_cleanup_expired(tmp_path) -> None:
 
     assert removed == 1
     assert staging.list_files("old") == []
+
+
+# --- _import_parquet_session（服务编排）---------------------------------------
+
+
+def test_import_parquet_session_isolates_failures(tmp_path, monkeypatch) -> None:
+    """混合会话：好文件入批次，坏文件计入 failed_files，正式资源不动，会话清理。"""
+    lab_dir = tmp_path / "lab"
+    stage_dir = tmp_path / "stage"
+    monkeypatch.setattr(alpha_api, "ALPHA_LAB_PATH", lab_dir)
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_STAGING_PATH", stage_dir)
+
+    staging = ParquetUploadStaging(stage_dir)
+    session = "sess-x"
+    _stage_frame(staging, session, "600000.parquet", _bar_frame())          # 正常
+    _stage_frame(staging, session, "000001.parquet", _bar_frame().drop("close"))  # 缺列
+
+    progress: list[tuple[float, str]] = []
+    res = alpha_service._import_parquet_session(
+        session, data_kind="bar", interval="d", import_mode="merge",
+        on_progress=lambda p, m: progress.append((p, m)),
+    )
+
+    assert res["total"] == 2
+    assert res["success"] == 1
+    assert res["failed"] == 1
+    assert len(res["failed_files"]) == 1
+    assert res["failed_files"][0]["file"] == "000001.parquet"
+
+    resources = AlphaLab(lab_dir).list_data_resources()
+    assert resources["raw_bars"] == []                       # 正式资源未动
+    assert len(resources["raw_bar_batches"]) == 1            # 仅好文件入批次
+
+    assert staging.list_files(session) == []                 # 会话已清理
+    assert progress[-1][0] == 100
+
+
+# --- API 端点（stage / import / cancel）---------------------------------------
+
+
+def _parquet_bytes(df: pl.DataFrame) -> bytes:
+    """把 DataFrame 序列化为 parquet 字节（测试辅助）。"""
+    buf = io.BytesIO()
+    df.write_parquet(buf)
+    return buf.getvalue()
+
+
+def _poll_task(client, task_id: str, timeout: float = 15.0) -> dict:
+    """轮询任务状态直到 completed/failed（仿既有集成测试）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get(f"/api/alpha/tasks/{task_id}")
+        task = resp.json()
+        if task["status"] in ("completed", "failed"):
+            return task
+        time.sleep(0.05)
+    raise AssertionError(f"任务 {task_id} 未在 {timeout}s 内完成")
+
+
+def test_parquet_stage_and_import_endpoints(monkeypatch, tmp_path) -> None:
+    """stage 多文件→预览；import→异步任务→批次落地；正式资源未动。"""
+    from fastapi.testclient import TestClient
+
+    from aitrade.main import create_app
+
+    monkeypatch.setattr(alpha_api, "ALPHA_LAB_PATH", tmp_path / "lab")
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_STAGING_PATH", tmp_path / "stage")
+
+    app = create_app()
+    with TestClient(app) as client:
+        stage_resp = client.post(
+            "/api/alpha/parquet/stage",
+            data={"data_kind": "bar"},
+            files=[
+                ("files", ("600000.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream")),
+                ("files", ("000001.parquet", _parquet_bytes(_bar_frame()), "application/octet-stream")),
+            ],
+        )
+        assert stage_resp.status_code == 200
+        stage_payload = stage_resp.json()
+        session_id = stage_payload["session_id"]
+        assert len(stage_payload["files"]) == 2
+        symbols = {f["vt_symbol"] for f in stage_payload["files"]}
+        assert symbols == {"600000.SSE", "000001.SZSE"}
+        assert all(f["importable"] for f in stage_payload["files"])
+
+        import_resp = client.post(
+            "/api/alpha/parquet/import",
+            json={"session_id": session_id, "data_kind": "bar", "interval": "d", "import_mode": "merge"},
+        )
+        assert import_resp.status_code == 200
+        task_id = import_resp.json()["task_id"]
+
+        task = _poll_task(client, task_id)
+        assert task["status"] == "completed"
+        assert task["result"]["success"] == 2
+        assert task["result"]["failed"] == 0
+
+        resources = client.get("/api/alpha/data/resources").json()
+        assert len(resources["raw_bar_batches"]) == 2
+        assert resources["raw_bars"] == []
+
+
+def test_parquet_import_missing_session_404(monkeypatch, tmp_path) -> None:
+    """对不存在的会话发起导入 → 404。"""
+    from fastapi.testclient import TestClient
+
+    from aitrade.main import create_app
+
+    monkeypatch.setattr(alpha_api, "ALPHA_LAB_PATH", tmp_path / "lab")
+    monkeypatch.setattr(alpha_api, "PARQUET_UPLOAD_STAGING_PATH", tmp_path / "stage")
+
+    app = create_app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/alpha/parquet/import",
+            json={"session_id": "nope", "data_kind": "bar", "interval": "d"},
+        )
+        assert resp.status_code == 404
+        assert "会话" in resp.json()["detail"]  # 确为"会话不存在"，而非路由未注册
 
 
 def test_import_parquet_unrecognized_filename_no_batch(tmp_path) -> None:

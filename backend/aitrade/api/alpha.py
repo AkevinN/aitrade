@@ -21,6 +21,7 @@ API 分类：
 """
 
 import logging
+import uuid
 from datetime import date, datetime
 from typing import Any
 
@@ -30,7 +31,15 @@ from pydantic import ValidationError
 
 from .. import __version__
 from ..alpha.lab_utils import normalize_vt_symbol
-from ..config import ALPHA_LAB_PATH
+from ..alpha.parquet_upload import ParquetUploadStaging
+from ..config import (
+    ALPHA_LAB_PATH,
+    PARQUET_UPLOAD_CHUNK_BYTES,
+    PARQUET_UPLOAD_MAX_FILE_BYTES,
+    PARQUET_UPLOAD_MAX_TOTAL_BYTES,
+    PARQUET_UPLOAD_STAGING_PATH,
+    PARQUET_UPLOAD_TTL,
+)
 from ..models import (
     TaskType,
     DataAggregateRequest,
@@ -38,6 +47,9 @@ from ..models import (
     DataResourceMergeRequest,
     DatasetCreateRequest,
     ModelTrainRequest,
+    ParquetImportRequest,
+    ParquetStageResult,
+    ParquetFilePreview,
     RelocateBarIntervalRequest,
     SignalGenerateRequest,
     BacktestRunRequest,
@@ -84,6 +96,18 @@ def _get_alpha_lab():
     """
     from ..alpha import AlphaLab
     return AlphaLab(ALPHA_LAB_PATH)
+
+
+def _get_staging() -> ParquetUploadStaging:
+    """构造绑定到默认暂存目录的 parquet 上传暂存器。
+
+    每次调用都新建实例，根目录取模块级 ``PARQUET_UPLOAD_STAGING_PATH``（测试可
+    monkeypatch 该模块属性以重定向到临时目录），与 ``_get_alpha_lab`` 同一范式。
+
+    Returns:
+        指向 ``PARQUET_UPLOAD_STAGING_PATH`` 的 ``ParquetUploadStaging`` 实例。
+    """
+    return ParquetUploadStaging(PARQUET_UPLOAD_STAGING_PATH)
 
 
 # 业务逻辑已迁移至 alpha_service.py：
@@ -1297,6 +1321,145 @@ async def import_tick_csv_data(
     if not result.get("success") and result.get("imported_count", 0) == 0:
         raise HTTPException(400, result.get("message") or "Tick CSV 导入失败")
     return result
+
+
+# =============================================================================
+# Parquet 上传（文件夹批量 → 暂存 → 预览 → 异步入批次）
+# =============================================================================
+
+def _preview_staged_file(lab, staged, data_kind: str) -> ParquetFilePreview:
+    """对单个已暂存文件生成预览：非 parquet 直接判不可导入，否则走 lab 元数据预览。
+
+    Args:
+        lab: AlphaLab 实例。
+        staged: ``StagedFile``，暂存层返回的落盘文件信息。
+        data_kind: ``"bar"`` 或 ``"tick"``。
+
+    Returns:
+        ``ParquetFilePreview``。
+    """
+    if not staged.is_parquet:
+        return ParquetFilePreview(file_name=staged.file_name, importable=False, reason="非 parquet 文件")
+    return ParquetFilePreview(**lab.preview_parquet_path(staged.path, data_kind=data_kind))
+
+
+@router.post("/parquet/stage")
+async def stage_parquet(
+    data_kind: str = Form(default="bar", description="bar 或 tick"),
+    files: list[UploadFile] = File(..., description="一个或多个 parquet 文件（可来自文件夹）"),
+) -> ParquetStageResult:
+    """把上传的多个 parquet 文件流式落盘到新会话，并逐文件轻量预览。
+
+    内存恒定地分块落盘（不一次性读入），新会话创建前回收过期暂存会话；超单文件或
+    单次总量上限时清理本会话并报错。预览只读元数据，不全表加载。
+
+    Args:
+        data_kind: ``"bar"``（默认）或 ``"tick"``。
+        files: 上传的 parquet 文件列表（HTML 多选或文件夹）。
+
+    Returns:
+        ``ParquetStageResult``：会话标识 + 逐文件预览。
+
+    Raises:
+        HTTPException: Alpha 未安装 503；data_kind 非法 400；单文件超限 400；单次总量超限 413。
+    """
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    if data_kind not in {"bar", "tick"}:
+        raise HTTPException(400, "data_kind 仅支持 bar 或 tick")
+
+    staging = _get_staging()
+    staging.cleanup_expired(PARQUET_UPLOAD_TTL)
+    session_id = uuid.uuid4().hex[:12]
+    lab = _get_alpha_lab()
+
+    previews: list[ParquetFilePreview] = []
+    total_bytes = 0
+    try:
+        for upload in files:
+            staged = staging.stage_stream(
+                session_id,
+                upload.filename or "unnamed",
+                upload.file,
+                max_file_bytes=PARQUET_UPLOAD_MAX_FILE_BYTES,
+                chunk_bytes=PARQUET_UPLOAD_CHUNK_BYTES,
+            )
+            total_bytes += staged.size_bytes
+            if total_bytes > PARQUET_UPLOAD_MAX_TOTAL_BYTES:
+                raise HTTPException(413, "本次上传总量超过上限")
+            previews.append(_preview_staged_file(lab, staged, data_kind))
+    except HTTPException:
+        staging.discard(session_id)
+        raise
+    except ValueError as exc:
+        staging.discard(session_id)
+        raise HTTPException(400, str(exc))
+
+    return ParquetStageResult(session_id=session_id, files=previews)
+
+
+@router.post("/parquet/import")
+async def import_parquet_data(req: ParquetImportRequest) -> dict[str, Any]:
+    """就既有上传会话创建异步导入任务（落为待合并批次），立即返回 task_id。
+
+    Args:
+        req: 含 session_id / data_kind / interval / import_mode。
+
+    Returns:
+        ``{task_id, message}``。
+
+    Raises:
+        HTTPException: Alpha 未安装 503；data_kind 或 interval 非法 400；会话不存在/已过期 404。
+    """
+    if not _check_alpha_installed():
+        raise HTTPException(503, "Alpha 模块未安装")
+    if req.data_kind not in {"bar", "tick"}:
+        raise HTTPException(400, "data_kind 仅支持 bar 或 tick")
+
+    staging = _get_staging()
+    if not staging.list_files(req.session_id):
+        raise HTTPException(404, "上传会话不存在或已过期，请重新上传")
+
+    if req.data_kind == "bar":
+        interval = _normalize_market_interval(req.interval)
+        if interval not in {"d", "1m", "5m", "15m", "30m", "60m"}:
+            raise HTTPException(400, "interval 仅支持 d/1m/5m/15m/30m/60m")
+    else:
+        interval = "tick"
+
+    task_id = task_manager.create_task(
+        TaskType.DATA_IMPORT,
+        req.model_dump(),
+        title="导入 Parquet 数据",
+        entity_type="data",
+    )
+
+    def execute(on_progress=None):
+        """后台任务体：逐文件把暂存 parquet 导入为待合并批次，上报进度。"""
+        return alpha_service._import_parquet_session(
+            req.session_id,
+            data_kind=req.data_kind,
+            interval=interval,
+            import_mode=req.import_mode,
+            on_progress=on_progress,
+        )
+
+    task_manager.run_async(task_id, execute, enable_progress=True)
+    return {"task_id": task_id, "message": "导入任务已启动"}
+
+
+@router.delete("/parquet/stage/{session_id}")
+async def cancel_parquet_stage(session_id: str) -> dict[str, Any]:
+    """取消上传：删除该会话的暂存目录（幂等）。
+
+    Args:
+        session_id: stage 端点返回的会话标识。
+
+    Returns:
+        ``{success, message}``。
+    """
+    _get_staging().discard(session_id)
+    return {"success": True, "message": "已取消上传"}
 
 
 # =============================================================================

@@ -494,6 +494,79 @@ def _aggregate_data(
     return result
 
 
+def _import_parquet_session(
+    session_id: str,
+    *,
+    data_kind: str,
+    interval: str,
+    import_mode: str = "merge",
+    on_progress: Optional[Callable[[float, str], None]] = None,
+) -> dict[str, Any]:
+    """逐个导入某上传会话的暂存 parquet 文件为待合并批次，并报进度。
+
+    遍历 ``_get_staging().list_files(session_id)``，对每个文件调
+    ``AlphaLab.import_parquet_path`` 落为待合并批次；单文件失败（非 parquet / 坏文件 /
+    缺列 / 代码无法识别）被捕获并计入 ``failed_files``，不影响其余文件。进度照
+    ``_download_bar_data`` 的 ``(i+1)/total*100`` 范式上报。全部处理完后删除该会话暂存目录。
+
+    Args:
+        session_id: 上传会话标识（由 stage 端点生成）。
+        data_kind: ``"bar"`` 或 ``"tick"``。
+        interval: K 线周期；``data_kind="tick"`` 时由底层归一为 ``"tick"``。
+        import_mode: 仅记录透传；批次默认 pending，合并/替换语义在「批次合并」环节生效。
+        on_progress: 可选进度回调 ``(progress: float, message: str)``。
+
+    Returns:
+        dict，含 ``total``/``success``/``failed``/``failed_files``/``batches``/``saved_as``。
+    """
+    from .alpha import _get_alpha_lab, _get_staging
+
+    lab = _get_alpha_lab()
+    staging = _get_staging()
+    files = staging.list_files(session_id)
+    total = max(len(files), 1)
+
+    success = 0
+    batches: list[dict[str, Any]] = []
+    failed_files: list[dict[str, str]] = []
+
+    for i, staged in enumerate(files):
+        try:
+            if not staged.is_parquet:
+                raise ValueError("非 parquet 文件")
+            result = lab.import_parquet_path(
+                staged.path, data_kind=data_kind, interval=interval, file_name=staged.file_name
+            )
+            if result.get("success"):
+                success += 1
+                batches.extend(result.get("batches", []))
+            else:
+                failed_files.append({"file": staged.file_name, "reason": result.get("error", "导入失败")})
+        except Exception as exc:
+            failed_files.append({"file": staged.file_name, "reason": str(exc)})
+
+        if on_progress:
+            on_progress((i + 1) / total * 100, f"已导入 {staged.file_name} ({i + 1}/{len(files)})")
+
+    staging.discard(session_id)
+
+    if on_progress:
+        on_progress(
+            100,
+            f"导入完成：成功 {success}/{len(files)}，失败 {len(failed_files)} —— "
+            "数据已存为待合并批次，请在「批次」中合并到正式资源",
+        )
+
+    return {
+        "total": len(files),
+        "success": success,
+        "failed": len(failed_files),
+        "failed_files": failed_files,
+        "batches": batches,
+        "saved_as": "import_batch",
+    }
+
+
 def _create_dataset(
     req: DatasetCreateRequest,
     on_progress: Optional[Callable[[float, str], None]] = None
