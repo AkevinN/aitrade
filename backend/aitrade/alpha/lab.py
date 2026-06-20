@@ -169,6 +169,82 @@ def _coerce_datetime_frame_column(df: pl.DataFrame, col: str = "datetime") -> pl
     return df.with_columns(pl.col(col).cast(pl.String).str.to_datetime(strict=False))
 
 
+def _count_value_conflicts(combined: pl.DataFrame, value_columns: list[str]) -> int:
+    """统计「同一 datetime 下值列不完全一致」的时间点个数（向量化）。
+
+    等价于逐组 ``group.select(value_columns).unique().height > 1`` 计数：一个时间点
+    冲突当且仅当某个值列在该组里出现了 >1 个不同取值（组内行全等 ⟺ 每个值列
+    ``n_unique == 1``）。供 ``_build_merge_plan`` 的重叠区一致性校验使用。
+
+    Args:
+        combined: 含 ``datetime`` 与 ``value_columns`` 的纵向拼接帧（多参与方）。
+        value_columns: 参与比对的值列（不含 ``datetime``/``_batch_order``）。
+
+    Returns:
+        冲突时间点个数；``value_columns`` 为空时返回 0。
+    """
+    if not value_columns:
+        return 0
+    agg = combined.group_by("datetime").agg([pl.col(col).n_unique().alias(col) for col in value_columns])
+    return int(
+        agg.select(pl.any_horizontal([pl.col(col) > 1 for col in value_columns]).alias("_conflict"))[
+            "_conflict"
+        ].sum()
+    )
+
+
+def _session_gap(sorted_datetimes: list[datetime], interval: str) -> tuple[datetime, datetime] | None:
+    """向量化返回首个「同日同小节内间隔≠周期」的相邻断档，无则 ``None``。
+
+    与 ``_batch_minutes_expected`` 的规则逐项等价：跨日、跨小节（午休）、任一端在盘外
+    （``[09:30,11:30)`` / ``[13:00,15:00)`` 之外，含 ``11:30``/``15:00`` 边界点）均视为合法；
+    另与参考一致地，把「同日且 ``curr <= prev``」（如重复时间点）也判为断档。取首个断档
+    以与逐根循环「首个即停」对齐（用于错误文案）。
+
+    Args:
+        sorted_datetimes: 已升序的时间戳列表。
+        interval: 分钟周期，如 ``"1m"``/``"5m"``。
+
+    Returns:
+        ``(prev_dt, curr_dt)`` 首个断档对；无断档返回 ``None``。
+    """
+    if len(sorted_datetimes) < 2:
+        return None
+    minutes = _interval_minutes(interval)
+    df = pl.DataFrame({"dt": sorted_datetimes})
+    # 关键：dt.hour() 是 Int8，*60 会静默溢出（570→58），必须先 cast(Int32)。
+    tod = pl.col("dt").dt.hour().cast(pl.Int32) * 60 + pl.col("dt").dt.minute().cast(pl.Int32)
+    session = (
+        pl.when((tod >= 570) & (tod < 690)).then(pl.lit("m"))
+        .when((tod >= 780) & (tod < 900)).then(pl.lit("a"))
+        .otherwise(pl.lit(None))
+    )
+    df = df.with_columns([session.alias("s"), pl.col("dt").dt.date().alias("d")])
+    df = df.with_columns(
+        [
+            pl.col("d").shift(1).alias("pd"),
+            pl.col("s").shift(1).alias("ps"),
+            pl.col("dt").diff().dt.total_minutes().alias("dm"),
+        ]
+    ).with_row_index("i")
+    gaps = df.filter(
+        (pl.col("d") == pl.col("pd"))
+        & (
+            (pl.col("dm") <= 0)
+            | (
+                pl.col("s").is_not_null()
+                & pl.col("ps").is_not_null()
+                & (pl.col("s") == pl.col("ps"))
+                & (pl.col("dm") != minutes)
+            )
+        )
+    )
+    if gaps.height == 0:
+        return None
+    idx = int(gaps["i"][0])
+    return (sorted_datetimes[idx - 1], sorted_datetimes[idx])
+
+
 class BarData:
     """独立 K 线数据类（不依赖 vnpy）。
 
@@ -2591,13 +2667,11 @@ class AlphaLab:
 
         # Tick 不强制固定频率；分钟 K 线只在同一交易小节内要求周期连续。
         if data_kind == "bar" and _is_minute_interval(interval):
-            sorted_datetimes = sorted(datetimes)
-            for prev_dt, curr_dt in zip(sorted_datetimes, sorted_datetimes[1:]):
-                if not self._batch_minutes_expected(prev_dt, curr_dt, interval):
-                    errors.append(
-                        f"批次分钟线存在断档: {prev_dt.isoformat(sep=' ')} -> {curr_dt.isoformat(sep=' ')}"
-                    )
-                    break
+            gap = _session_gap(sorted(datetimes), interval)
+            if gap is not None:
+                errors.append(
+                    f"批次分钟线存在断档: {gap[0].isoformat(sep=' ')} -> {gap[1].isoformat(sep=' ')}"
+                )
         return errors
 
     def _load_official_raw_frame(
@@ -2727,12 +2801,8 @@ class AlphaLab:
             how="vertical_relaxed",
         )
         value_columns = [col for col in combined.columns if col not in {"_batch_order", "datetime"}]
-        conflict_count = 0
-        for _, group in combined.group_by("datetime", maintain_order=True):
-            if len(group) <= 1:
-                continue
-            if group.select(value_columns).unique().height > 1:
-                conflict_count += 1
+        # 向量化冲突计数；participants<2 时无重叠对象，冲突恒 0，跳过计算（结果等价）。
+        conflict_count = _count_value_conflicts(combined, value_columns) if len(participants) >= 2 else 0
         if conflict_count > 0:
             errors.append(
                 f"重叠区存在 {conflict_count} 个时间点数据不一致，拒绝合并"
@@ -2750,13 +2820,11 @@ class AlphaLab:
 
         # 分钟线：校验合并结果在交易小节内连续（满足「合并要校验是否连续」）。
         if kind == "raw_bar" and interval and _is_minute_interval(interval):
-            merged_dts = merged_df["datetime"].to_list()
-            for prev_dt, curr_dt in zip(merged_dts, merged_dts[1:]):
-                if not self._batch_minutes_expected(prev_dt, curr_dt, interval):
-                    errors.append(
-                        f"合并后分钟线存在断档: {prev_dt.isoformat(sep=' ')} -> {curr_dt.isoformat(sep=' ')}"
-                    )
-                    break
+            gap = _session_gap(merged_df["datetime"].to_list(), interval)
+            if gap is not None:
+                errors.append(
+                    f"合并后分钟线存在断档: {gap[0].isoformat(sep=' ')} -> {gap[1].isoformat(sep=' ')}"
+                )
 
         result.update(
             {
