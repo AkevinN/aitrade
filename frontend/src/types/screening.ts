@@ -6,6 +6,8 @@
  * 前端仅消费，不做写入，因此所有字段均为只读语义。
  */
 
+import type { LabelSpec } from './alpha'
+
 /** CNN 适配度评分维度的置信度等级（由后端 ConfidenceLevel 字面量对齐）。 */
 export type ConfidenceLevel = 'insufficient' | 'low' | 'medium' | 'high'
 
@@ -157,6 +159,13 @@ export interface CNNScreeningRequest {
   run_tier2: boolean
   /** CNN 训练目标，供 Tier-2 构造 CNNWalkForwardRequest 使用 */
   objective: ObjectiveType
+  /**
+   * Tier-2 标签配置；不传时后端用 ScreeningRules 默认（next_bar，与改造前等价）。
+   * `objective='path_class'` 时必须传 `{ mode: 'oco', take_profit, stop_loss, max_hold }`
+   * （止盈/止损为收益率小数，如 0.03=+3%），否则后端入口返回 400——路径四分类标签
+   * 依赖 OCO 三重障碍判定。
+   */
+  label_spec?: LabelSpec
   /** 是否将 ScreeningResult 写入磁盘；false 时仅内存返回 */
   persist?: boolean
 

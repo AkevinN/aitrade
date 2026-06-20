@@ -393,12 +393,31 @@ async def start_cnn_screening(req: CNNScreeningRequest) -> dict:
     Args:
         req: CNN 选股请求，含 universe 过滤参数（as_of/exchange/include|exclude_symbols/
             min_bar_count）、漏斗配置（top_k/run_tier2/min_confidence）、Tier-2 超参
-            （objective/eval_start）与持久化开关（persist）。
+            （objective/label_spec/eval_start）与持久化开关（persist）。
             注意：as_of 为必填，无任何隐式"全量"默认（Requirement 9.1）。
 
     Returns:
         含 task_id（任务 ID，用于轮询）与 name（选股任务名称）的字典。
+
+    Raises:
+        HTTPException: objective="path_class" 却未配 oco 标签（或 oco 缺正的
+            take_profit/stop_loss）时返回 400——路径四分类标签依赖三重障碍判定。
+            此入口校验做快速失败与友好提示，与数据集层 (dataset.py) 的同口径
+            ValueError 构成双层守护；文案与直训接口 /api/cnn/train 一致。
     """
+    # path_class↔oco 前置校验：选股入口没有这层时，path_class 会一路落到 Tier-2
+    # 才因标签不匹配逐只失败（note="Tier-2 失败: ..."），难以定位。在此快速拦截。
+    if req.objective == "path_class":
+        ls = req.label_spec.model_dump() if req.label_spec is not None else {}
+        if ls.get("mode") != "oco":
+            raise HTTPException(
+                400, "objective=path_class 需要 label_spec.mode=oco（路径标签依赖三重障碍判定）"
+            )
+        if not ls.get("take_profit") or not ls.get("stop_loss"):
+            raise HTTPException(
+                400, "oco 模式必须提供正的 take_profit 与 stop_loss（如 0.03 表示 3%）"
+            )
+
     task_id = task_manager.create_task(
         TaskType.CNN_SCREENING,
         params=req.model_dump(mode="json"),

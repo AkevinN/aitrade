@@ -16,6 +16,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from aitrade.models.alpha import LabelSpec
 from aitrade.screening.rules import ConfidenceLevel, ObjectiveType
 
 
@@ -56,6 +57,12 @@ class CNNScreeningRequest(BaseModel):
     # ---- Tier-2 默认超参（偏快，可由 ScreeningRules 覆盖）----
     # CNN 训练目标（分类 / 回归 / 路径分类），供 Tier-2 构造 CNNWalkForwardRequest 使用
     objective: ObjectiveType = "classification"
+    # Tier-2 标签配置（透传给 CNNWalkForwardRequest 用于 OCO/路径标签）。
+    # None = 用 ScreeningRules.label_spec 默认（next_bar），与改造前行为等价。
+    # 当 objective="path_class" 时必须显式提供 mode="oco" 的 LabelSpec（含正的
+    # take_profit/stop_loss），否则选股入口 (POST /api/cnn/screening/batch) 返回 400
+    # ——路径四分类标签依赖三重障碍判定，详见 cnn-screening-path-class spec。
+    label_spec: Optional[LabelSpec] = None
     # Tier-2 评估区间起点（可选）；缺省时由 as_of 与 ScreeningRules 推导，强制 end <= as_of
     eval_start: Optional[date] = None
 

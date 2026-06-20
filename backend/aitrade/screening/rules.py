@@ -18,6 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from aitrade.models.alpha import LabelSpec
+
 # ---------------------------------------------------------------------------
 # 共享字面量类型别名（与 aitrade/models/screening.py 保持一致）
 # ---------------------------------------------------------------------------
@@ -86,6 +88,10 @@ class ScreeningRules(BaseModel):
 
     # ---- Tier-2 默认超参（偏保守快速，design.md 3.3）----
     objective: ObjectiveType = "classification"  # CNN 训练目标，传给 CNNWalkForwardRequest
+    # Tier-2 默认标签配置；请求未显式提供 label_spec 时回退到此。默认 LabelSpec()
+    # 即 mode=next_bar，与改造前 CNNWalkForwardRequest 的默认 label_spec 等价
+    # （保证 classification/regression 选股行为零变更）。path_class 需在请求级传 oco。
+    label_spec: LabelSpec = Field(default_factory=LabelSpec)
     n_seeds: int = Field(default=1, ge=1)  # 每折训练种子数；偏少以控制算力
     epochs: int = Field(default=30, ge=1)  # 每次训练最大 epoch 数；偏小以加快速度
 

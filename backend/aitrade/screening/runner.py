@@ -475,9 +475,13 @@ class ScreeningRunner:
         取所有入围标的 ``start``（最小）/ ``end``（最大）的并集——各标的因本地
         范围差异可能有轻微偏移，包络覆盖其余标的 ``end <= as_of`` 红线仍成立。
 
+        标签配置 ``label_spec`` 也在此透传：取请求级 ``req.label_spec``（非 None 时），
+        否则回退 ``self.rules.label_spec`` 默认（next_bar）。这让 ``objective="path_class"``
+        能携带 oco 三重障碍标签进 Tier-2；缺省时与改造前行为逐字段一致。
+
         Args:
             vt_symbol: 入围标的代码，作为 ``target_symbol``。
-            req: 选股请求，提供 ``interval``/``objective``。
+            req: 选股请求，提供 ``interval``/``objective``/``label_spec``。
             window: 已解析并夹取过的 Tier-2 窗口与超参。
 
         Returns:
@@ -494,6 +498,11 @@ class ScreeningRunner:
             step_days=window.step_days,
             n_seeds=window.n_seeds,
             objective=req.objective,
+            # 透传请求级标签配置（如 path_class 的 oco 三重障碍标签）至 Tier-2；
+            # 请求未显式提供时回退 ScreeningRules 默认（next_bar），保持既有行为。
+            # run_walk_forward_evaluate 会把它带入训练，回测侧 exit_mode="auto"
+            # 再据训练用 label_spec 反推出场，训练↔回测口径自动一致。
+            label_spec=req.label_spec if req.label_spec is not None else self.rules.label_spec,
             training_params=CNNTrainingParams(epochs=window.epochs),
         )
 

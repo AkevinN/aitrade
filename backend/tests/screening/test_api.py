@@ -147,3 +147,77 @@ class TestStartCnnScreeningValidation:
         assert resp.status_code == 422, (
             f"期望 422（缺 name），实际: {resp.status_code} {resp.text}"
         )
+
+
+# ---------------------------------------------------------------------------
+# path_class ↔ oco 入口校验（400）
+# Feature: cnn-screening-path-class, Property 2（Requirements 2.1/2.2/2.3/2.4）
+# ---------------------------------------------------------------------------
+
+
+class TestPathClassOcoValidation:
+    """objective="path_class" 必须配 oco 标签，否则入口快速失败返回 400。
+
+    这层校验与数据集层 (dataset.py) 的同口径 ValueError 构成双层守护：入口做
+    友好提示、不创建任务；数据集层做最终兜底。文案与直训接口 /api/cnn/train 一致。
+    """
+
+    def test_path_class_without_label_spec_returns_400(self, client: TestClient) -> None:
+        """path_class 未提供 label_spec → 400（路径标签依赖三重障碍）。"""
+        payload = {**_VALID_PAYLOAD, "objective": "path_class"}
+        with patch("aitrade.api.cnn.task_manager.create_task", return_value="tid") as mc:
+            resp = client.post(_ENDPOINT, json=payload)
+        assert resp.status_code == 400, f"期望 400，实际: {resp.status_code} {resp.text}"
+        assert "label_spec.mode=oco" in resp.json()["detail"]
+        mc.assert_not_called()  # 校验失败时不应创建任务
+
+    def test_path_class_with_non_oco_label_returns_400(self, client: TestClient) -> None:
+        """path_class 配了非 oco 标签（next_bar）→ 400。"""
+        payload = {
+            **_VALID_PAYLOAD,
+            "objective": "path_class",
+            "label_spec": {"mode": "next_bar"},
+        }
+        with patch("aitrade.api.cnn.task_manager.create_task", return_value="tid") as mc:
+            resp = client.post(_ENDPOINT, json=payload)
+        assert resp.status_code == 400, f"期望 400，实际: {resp.status_code} {resp.text}"
+        assert "label_spec.mode=oco" in resp.json()["detail"]
+        mc.assert_not_called()
+
+    def test_path_class_oco_missing_take_profit_returns_400(self, client: TestClient) -> None:
+        """path_class + oco 但缺 take_profit → 400（要求正的止盈/止损）。"""
+        payload = {
+            **_VALID_PAYLOAD,
+            "objective": "path_class",
+            "label_spec": {"mode": "oco", "stop_loss": 0.02},
+        }
+        with patch("aitrade.api.cnn.task_manager.create_task", return_value="tid") as mc:
+            resp = client.post(_ENDPOINT, json=payload)
+        assert resp.status_code == 400, f"期望 400，实际: {resp.status_code} {resp.text}"
+        assert "take_profit" in resp.json()["detail"]
+        mc.assert_not_called()
+
+    def test_path_class_with_valid_oco_passes(self, client: TestClient) -> None:
+        """path_class + 合法 oco（正的 tp/sl）→ 放行，照常创建任务返回 200。"""
+        payload = {
+            **_VALID_PAYLOAD,
+            "objective": "path_class",
+            "label_spec": {
+                "mode": "oco",
+                "take_profit": 0.03,
+                "stop_loss": 0.02,
+                "max_hold": 10,
+            },
+        }
+        with patch("aitrade.api.cnn.task_manager.create_task", return_value="tid") as mc:
+            resp = client.post(_ENDPOINT, json=payload)
+        assert resp.status_code == 200, f"期望 200，实际: {resp.status_code} {resp.text}"
+        mc.assert_called_once()
+
+    def test_classification_without_label_spec_passes(self, client: TestClient) -> None:
+        """classification 不携带 label_spec → 不被 path_class 校验拦截，照常 200。"""
+        payload = {**_VALID_PAYLOAD, "objective": "classification"}
+        with patch("aitrade.api.cnn.task_manager.create_task", return_value="tid") as mc:
+            resp = client.post(_ENDPOINT, json=payload)
+        assert resp.status_code == 200, f"期望 200，实际: {resp.status_code} {resp.text}"
+        mc.assert_called_once()

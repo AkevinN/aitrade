@@ -138,6 +138,18 @@ const CNNScreening: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
+
+      // path_class（路径形态分类）依赖 OCO 三重障碍标签：提交前确保止盈/止损为正，
+      // 否则后端入口会返回 400（路径四分类标签依赖三重障碍判定）。在此先友好拦截。
+      if (values.objective === 'path_class') {
+        const tp = values.oco_take_profit_pct
+        const sl = values.oco_stop_loss_pct
+        if (!tp || tp <= 0 || !sl || sl <= 0) {
+          message.warning('路径形态分类（path_class）需配置正的止盈与止损幅度')
+          return
+        }
+      }
+
       setSubmitting(true)
 
       const parseSymbolList = (raw?: string): string[] => {
@@ -161,6 +173,18 @@ const CNNScreening: React.FC = () => {
         run_tier2: values.run_tier2 ?? true,
         objective: values.objective,
         persist: false,
+        // path_class 时把 OCO 参数组装为 label_spec（% → 收益率小数，如 3% → 0.03）；
+        // 非 path_class 不写 label_spec，保持 classification/regression 请求体与改造前一致。
+        ...(values.objective === 'path_class'
+          ? {
+              label_spec: {
+                mode: 'oco' as const,
+                take_profit: Math.max(0, (values.oco_take_profit_pct || 0) / 100),
+                stop_loss: Math.max(0, (values.oco_stop_loss_pct || 0) / 100),
+                max_hold: values.oco_max_hold,
+              },
+            }
+          : {}),
         // Tier-2 高级覆盖参数：仅在用户填写时传入，空（undefined/null）则后端使用规则默认值
         ...(values.eval_window_days != null ? { eval_window_days: values.eval_window_days } : {}),
         ...(values.train_days != null ? { train_days: values.train_days } : {}),
@@ -434,8 +458,9 @@ function ScreeningForm({
   /** 当前任务进度百分比（0-100，来自 Task.progress） */
   taskProgress?: number
 }) {
-  // 监听 run_tier2 开关与 Tier-2 高级字段，用于条件渲染和历史需求实时计算
+  // 监听 run_tier2 开关、目标函数与 Tier-2 高级字段，用于条件渲染和历史需求实时计算
   const runTier2 = Form.useWatch('run_tier2', form)
+  const objective = Form.useWatch('objective', form)
   const evalWindowDays = Form.useWatch('eval_window_days', form)
   const trainDays = Form.useWatch('train_days', form)
   const foldTestDays = Form.useWatch('fold_test_days', form)
@@ -459,6 +484,10 @@ function ScreeningForm({
           top_k: 15,
           run_tier2: true,
           objective: 'classification',
+          // OCO 标签默认值（仅 objective=path_class 时生效；百分比，提交时 /100 转收益率）
+          oco_take_profit_pct: 3,
+          oco_stop_loss_pct: 2,
+          oco_max_hold: 10,
         }}
       >
         <Form.Item label="任务名称" name="name" rules={[{ required: true, message: '请填写任务名称' }]}>
@@ -587,6 +616,61 @@ function ScreeningForm({
                 label: 'Tier-2 高级设置（不填用默认）',
                 children: (
                   <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                    {/* path_class（路径形态分类）依赖 OCO 三重障碍标签：选中时配置止盈/止损/最大持有 */}
+                    {objective === 'path_class' && (
+                      <>
+                        <Alert
+                          type="info"
+                          showIcon
+                          style={{ marginBottom: 8, fontSize: 12 }}
+                          message="路径形态分类依赖 OCO 三重障碍标签：用下方止盈/止损/最大持有定义路径，Tier-2 据此训练与评估。"
+                        />
+                        <Row gutter={8}>
+                          <Col span={8}>
+                            <Form.Item
+                              label="止盈幅度 (%)"
+                              name="oco_take_profit_pct"
+                              rules={[{ required: true, message: '请填写止盈幅度' }]}
+                              tooltip="触及该涨幅即先触止盈（如 3 表示 +3%）。"
+                            >
+                              <InputNumber
+                                min={0.1}
+                                max={50}
+                                step={0.1}
+                                addonAfter="%"
+                                style={{ width: '100%' }}
+                              />
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item
+                              label="止损幅度 (%)"
+                              name="oco_stop_loss_pct"
+                              rules={[{ required: true, message: '请填写止损幅度' }]}
+                              tooltip="触及该跌幅即先触止损（如 2 表示 -2%）。"
+                            >
+                              <InputNumber
+                                min={0.1}
+                                max={50}
+                                step={0.1}
+                                addonAfter="%"
+                                style={{ width: '100%' }}
+                              />
+                            </Form.Item>
+                          </Col>
+                          <Col span={8}>
+                            <Form.Item
+                              label="最大持有 (bar)"
+                              name="oco_max_hold"
+                              rules={[{ required: true, message: '请填写最大持有 bar 数' }]}
+                              tooltip="持有期内都不触发时，到期按时间止损平仓。"
+                            >
+                              <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                      </>
+                    )}
                     <Row gutter={8}>
                       <Col span={12}>
                         <Form.Item

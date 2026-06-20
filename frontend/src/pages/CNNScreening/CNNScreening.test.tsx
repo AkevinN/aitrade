@@ -575,4 +575,110 @@ describe('CNNScreening 页面', () => {
     // note 不含"数据不足" → Tag 文案为"跳过"
     expect(screen.getByText('跳过')).toBeInTheDocument()
   })
+
+  // ── 15~17. path_class（OCO 标签）高级设置 ──────────────────────────────────
+  // Feature: cnn-screening-path-class, Requirement 4
+
+  /**
+   * 把「Tier-2 目标函数」Select 从当前值切到指定选项标签（antd Select 交互）。
+   *
+   * 用 `.ant-select-selection-item[title=...]` 精确定位当前选中项（避免与下拉里
+   * 同名 option 文本冲突），点开后再点目标选项。
+   */
+  async function pickObjective(
+    user: ReturnType<typeof userEvent.setup>,
+    fromLabel: string,
+    toLabel: string,
+  ) {
+    const selectionItem = document.querySelector(
+      `.ant-select-selection-item[title="${fromLabel}"]`,
+    ) as HTMLElement
+    await user.click(selectionItem) // 打开下拉
+    // 下拉选项用 .ant-select-item-option-content 承载文本，精确点中目标项。
+    const options = Array.from(
+      document.querySelectorAll('.ant-select-item-option-content'),
+    ) as HTMLElement[]
+    const target = options.find((el) => el.textContent === toLabel)!
+    await user.click(target)
+  }
+
+  it('选择 path_class 时高级设置内显示 OCO 子表单，切回分类后隐藏', async () => {
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    // 展开 Tier-2 高级设置；默认 classification → 无 OCO 字段
+    await user.click(await screen.findByText(/Tier-2 高级设置/))
+    expect(screen.queryByText('止盈幅度 (%)')).not.toBeInTheDocument()
+
+    // 切到「路径形态分类」→ OCO 子表单出现
+    await pickObjective(user, '方向分类', '路径形态分类')
+    expect(await screen.findByText('止盈幅度 (%)')).toBeInTheDocument()
+    expect(screen.getByText('止损幅度 (%)')).toBeInTheDocument()
+    expect(screen.getByText('最大持有 (bar)')).toBeInTheDocument()
+
+    // 切回「方向分类」→ OCO 子表单隐藏
+    await pickObjective(user, '路径形态分类', '方向分类')
+    expect(screen.queryByText('止盈幅度 (%)')).not.toBeInTheDocument()
+  })
+
+  it('path_class 提交时 runScreening 收到 oco label_spec（百分比换算为收益率小数）', async () => {
+    mockRunScreening.mockResolvedValueOnce({ task_id: 'tid-pc', name: 'pc' })
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    await pickObjective(user, '方向分类', '路径形态分类')
+    // 展开高级设置（挂载 OCO 字段，取默认 3/2/10）
+    await user.click(await screen.findByText(/Tier-2 高级设置/))
+    await screen.findByText('止盈幅度 (%)')
+
+    const nameInput = screen.getByPlaceholderText('cnn_screen_YYYYMMDD')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'pc_screen')
+    await user.click(screen.getByRole('button', { name: /启动选股/ }))
+
+    await waitFor(() => expect(mockRunScreening).toHaveBeenCalledTimes(1))
+    const req = mockRunScreening.mock.calls[0][0]
+    expect(req.objective).toBe('path_class')
+    expect(req.label_spec).toBeDefined()
+    expect(req.label_spec.mode).toBe('oco')
+    expect(req.label_spec.take_profit).toBeCloseTo(0.03) // 3% → 0.03
+    expect(req.label_spec.stop_loss).toBeCloseTo(0.02) // 2% → 0.02
+    expect(req.label_spec.max_hold).toBe(10)
+  })
+
+  it('非 path_class 提交时请求体不含 label_spec（向后兼容）', async () => {
+    mockRunScreening.mockResolvedValueOnce({ task_id: 'tid-cls', name: 'cls' })
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    const nameInput = screen.getByPlaceholderText('cnn_screen_YYYYMMDD')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'cls_screen')
+    await user.click(screen.getByRole('button', { name: /启动选股/ }))
+
+    await waitFor(() => expect(mockRunScreening).toHaveBeenCalledTimes(1))
+    const req = mockRunScreening.mock.calls[0][0]
+    expect(req.objective).toBe('classification')
+    expect(req.label_spec).toBeUndefined()
+  })
+
+  it('path_class 下清空止盈幅度后提交被拦截，不发起 runScreening', async () => {
+    mockUseTask.mockReturnValue(idleTask())
+    const user = userEvent.setup()
+    renderPage()
+
+    await pickObjective(user, '方向分类', '路径形态分类')
+    await user.click(await screen.findByText(/Tier-2 高级设置/))
+    const tpInput = await screen.findByRole('spinbutton', { name: /止盈幅度/ })
+    await user.clear(tpInput)
+
+    await user.click(screen.getByRole('button', { name: /启动选股/ }))
+
+    // 必填校验拦截 → 字段错误提示出现，且不发起请求（Requirement 4.4）
+    expect(await screen.findByText('请填写止盈幅度')).toBeInTheDocument()
+    expect(mockRunScreening).not.toHaveBeenCalled()
+  })
 })
