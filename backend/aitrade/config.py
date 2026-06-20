@@ -107,6 +107,22 @@ MAX_WORKERS: int = int(os.getenv("AITRADE_MAX_WORKERS", "4"))
 TASK_POLL_INTERVAL: int = 2  # seconds
 
 # =============================================================================
+# Parquet 上传（数据准备页：文件夹批量上传 parquet → 暂存 → 预览 → 异步入批次）
+# =============================================================================
+
+# 上传暂存根目录：每个上传会话一个子目录 <session_id>/。
+# 刻意放在 ALPHA_LAB_PATH 之外，使暂存文件不被数据资源扫描误列为正式资源。
+PARQUET_UPLOAD_STAGING_PATH: Path = AITRADE_HOME / "_uploads"
+# 单个上传文件大小上限（字节），默认 512MB，可经环境变量覆盖（单位 MB）。
+PARQUET_UPLOAD_MAX_FILE_BYTES: int = int(os.getenv("AITRADE_PARQUET_MAX_FILE_MB", "512")) * 1024 * 1024
+# 单次上传总量上限（字节），默认 4GB，可经环境变量覆盖（单位 MB）。
+PARQUET_UPLOAD_MAX_TOTAL_BYTES: int = int(os.getenv("AITRADE_PARQUET_MAX_TOTAL_MB", "4096")) * 1024 * 1024
+# 暂存会话存活时长（秒），超时由 cleanup_expired 回收，默认 24h。
+PARQUET_UPLOAD_TTL: int = int(os.getenv("AITRADE_PARQUET_UPLOAD_TTL", "86400"))
+# 流式落盘的分块大小（字节），决定上传时的常驻内存上限。
+PARQUET_UPLOAD_CHUNK_BYTES: int = 1024 * 1024
+
+# =============================================================================
 # 交易计划自动调度（Plan Scheduler）
 # =============================================================================
 
@@ -148,5 +164,5 @@ CSV_REQUIRED_FIELDS: list[str] = ["datetime", "open", "high", "low", "close"]
 # 规则型信号数据目录（转债条款快照 + 历史溢价率，CBTermsStore 使用）
 RULES_DATA_PATH: Path = AITRADE_HOME / "rules"
 
-for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH, RULES_DATA_PATH, TASK_HISTORY_PATH, SCHEDULER_RUN_LOG_PATH, SCREENING_PATH, SCREENING_GOVERNANCE_PATH]:
+for _dir in [AITRADE_HOME, ALPHA_LAB_PATH, CNN_MODEL_PATH, CNN_GOVERNANCE_PATH, SCHEME_PATH, PROFILE_PATH, RULES_DATA_PATH, TASK_HISTORY_PATH, SCHEDULER_RUN_LOG_PATH, SCREENING_PATH, SCREENING_GOVERNANCE_PATH, PARQUET_UPLOAD_STAGING_PATH]:
     _dir.mkdir(parents=True, exist_ok=True)

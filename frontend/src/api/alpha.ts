@@ -38,6 +38,8 @@ import type {
   CsvInterval,
   SymbolProfileRequest,
   SymbolProfileResponse,
+  ParquetStageResult,
+  ParquetImportRequest,
 } from '../types/alpha'
 
 export const alphaService = {
@@ -447,4 +449,46 @@ export const alphaService = {
       .post<CsvImportResponse>('/api/alpha/ticks/import', formData)
       .then((r) => r.data)
   },
+
+  // Parquet Import
+  /**
+   * 上传一个或多个 Parquet 文件做暂存与解析预览，不落盘。
+   *
+   * 以 multipart/form-data 提交：每个文件追加到重复字段 `files`，外加一个
+   * `data_kind` 字段。后端解析后返回会话 ID 与逐文件预览，供用户确认后再正式导入。
+   *
+   * @param files - 待暂存的 Parquet 文件数组（支持一次多选）。
+   * @param data_kind - `bar` 解析为 K线；`tick` 解析为逐笔。
+   * @returns 暂存结果，含 `session_id` 与逐文件 {@link ParquetStageResult.files} 预览。
+   */
+  stageParquet: (files: File[], data_kind: 'bar' | 'tick') => {
+    const formData = new FormData()
+    formData.append('data_kind', data_kind)
+    files.forEach((file) => formData.append('files', file))
+    return api
+      .post<ParquetStageResult>('/api/alpha/parquet/stage', formData)
+      .then((r) => r.data)
+  },
+
+  /**
+   * 基于已暂存会话提交 Parquet 正式导入任务（异步执行）。
+   *
+   * @param req - 导入配置，含 `session_id`、`data_kind`、`interval` 与 `import_mode`。
+   * @returns 任务启动响应，含可用于轮询的 `task_id`。
+   */
+  importParquet: (req: ParquetImportRequest) =>
+    api.post<TaskStartResponse>('/api/alpha/parquet/import', req).then((r) => r.data),
+
+  /**
+   * 取消一个 Parquet 暂存会话并清理其临时文件。
+   *
+   * @param session_id - 待取消的暂存会话 ID；内部会做 URL 编码。
+   * @returns 操作结果，`success` 标识是否清理成功，`message` 为说明文案。
+   */
+  cancelParquetStage: (session_id: string) =>
+    api
+      .delete<{ success: boolean; message?: string }>(
+        `/api/alpha/parquet/stage/${encodeURIComponent(session_id)}`,
+      )
+      .then((r) => r.data),
 }
