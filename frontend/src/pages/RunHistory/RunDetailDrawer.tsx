@@ -1,9 +1,10 @@
 import React from 'react'
 import { Alert, Collapse, Descriptions, Drawer, Empty, Tag, Typography } from 'antd'
 
-import type { BacktestStatistics, Task } from '../../types/alpha'
+import type { BacktestResultPayload, BacktestStatistics, Task } from '../../types/alpha'
 import type { ScreeningResult } from '../../types/screening'
 import BacktestResults from '../Backtest/BacktestResults'
+import BacktestCharts from '../Backtest/BacktestCharts'
 import ScreeningRunResult from './ScreeningRunResult'
 import { runCategory, runCategoryLabel } from './runTypes'
 
@@ -90,10 +91,32 @@ const RunDetailDrawer: React.FC<RunDetailDrawerProps> = ({ task, onClose }) => {
     }
     if (category === 'backtest') {
       const statistics = result?.statistics as BacktestStatistics | undefined
+      const payload = result as unknown as BacktestResultPayload | undefined
       const capital =
         (result?.capital as number | undefined) ??
         ((task.params?.capital as number | undefined) || 1_000_000)
-      return <BacktestResults statistics={statistics} capital={capital} />
+      // 净值曲线/成交标记所需的窗口：优先取 params，回退用 equity_curve 首尾日期推断，
+      // 让历史回测详情"像刚跑完一样"——统计面板 + 净值曲线 + K线买卖点。
+      const equity = payload?.equity_curve ?? []
+      const start =
+        (task.params?.start as string | undefined) ?? equity[0]?.date ?? ''
+      const end =
+        (task.params?.end as string | undefined) ?? equity[equity.length - 1]?.date ?? ''
+      const interval =
+        (task.params?.interval as string | undefined) ??
+        (task.params?.input_interval as string | undefined) ??
+        'd'
+      const hasChartData = equity.length > 0 || (payload?.trades?.length ?? 0) > 0
+      return (
+        <>
+          <BacktestResults statistics={statistics} capital={capital} />
+          {payload && hasChartData ? (
+            <div style={{ marginTop: 16 }}>
+              <BacktestCharts result={payload} interval={interval} start={start} end={end} />
+            </div>
+          ) : null}
+        </>
+      )
     }
     return <Empty description="暂不支持该类型运行的详情展示" />
   }

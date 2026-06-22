@@ -235,3 +235,70 @@ class JsonlDayStore:
                 if limit is not None and len(results) >= limit:
                     return results
         return results
+
+    # ------------------------------------------------------------------
+    # 删（重写当日文件去掉命中记录）
+    # ------------------------------------------------------------------
+
+    def delete_where(self, day: date, predicate: Callable[[dict[str, Any]], bool]) -> int:
+        """删除当日文件中满足 ``predicate`` 的记录，重写文件，返回删除条数。
+
+        用于"运行历史"删除一条记录等管理操作。``predicate`` 接收**已剥离 ``_dedup``**
+        的业务字典（与 :meth:`read_day` 投影一致）。重写时保留未命中记录的原始对象（含
+        ``_dedup`` 字段），并从内存去重集合移除被删记录的 ``_dedup`` 键（使该键之后可重新
+        写入）。坏行无法解析时原样保留（不丢用户数据）。最佳努力：文件不存在或 IO 异常时
+        记 warning 并返回 0。
+
+        Args:
+            day: 目标日期（对应一个 JSONL 文件）。
+            predicate: 命中判定；对投影后的业务字典返回 True 表示删除该条。
+
+        Returns:
+            实际删除的记录条数（0 表示无命中或文件不存在）。
+        """
+        with self._lock:
+            path = self._day_path(day)
+            if not path.exists():
+                return 0
+            try:
+                raw_lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                logger.warning("JsonlDayStore: 读取 %s 失败（删除跳过）: %s", path, exc)
+                return 0
+
+            kept: list[str] = []
+            removed = 0
+            removed_keys: list[str] = []
+            for raw in raw_lines:
+                s = raw.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except json.JSONDecodeError:
+                    kept.append(s)  # 坏行原样保留，不误删
+                    continue
+                projected = {k: v for k, v in obj.items() if k != "_dedup"}
+                if predicate(projected):
+                    removed += 1
+                    dk = obj.get("_dedup")
+                    if dk is not None:
+                        removed_keys.append(dk)
+                else:
+                    kept.append(json.dumps(obj, ensure_ascii=False))
+
+            if removed == 0:
+                return 0
+
+            try:
+                with path.open("w", encoding="utf-8") as f:
+                    for line in kept:
+                        f.write(line + "\n")
+            except OSError as exc:
+                logger.warning("JsonlDayStore: 重写 %s 失败（删除未生效）: %s", path, exc)
+                return 0
+
+            if day in self._dedup:
+                for k in removed_keys:
+                    self._dedup[day].discard(k)
+            return removed

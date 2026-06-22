@@ -96,6 +96,16 @@ export const alphaService = {
   getTask: (taskId: string) =>
     api.get<Task>(`/api/alpha/tasks/${taskId}`).then((r) => r.data),
 
+  /**
+   * 删除一条运行记录（"运行历史"管理删除），从内存与磁盘归档同时移除。
+   *
+   * @param taskId - 待删除的任务 ID
+   * @returns `{ success, task_id }`
+   * @throws 运行中/排队中任务返回 409；不存在返回 404（由全局拦截器透传）
+   */
+  deleteTask: (taskId: string) =>
+    api.delete<{ success: boolean; task_id: string }>(`/api/alpha/tasks/${taskId}`).then((r) => r.data),
+
   // Datasets
   /**
    * 列出所有已生成的数据集名称。

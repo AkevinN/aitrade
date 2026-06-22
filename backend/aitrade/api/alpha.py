@@ -318,6 +318,41 @@ async def get_task(task_id: str) -> dict:
     return task.model_dump()
 
 
+@router.delete("/tasks/{task_id}")
+async def delete_task(request: Request, task_id: str) -> dict:
+    """删除一条运行记录（"运行历史"管理删除），从内存与磁盘归档同时移除。
+
+    DELETE /api/alpha/tasks/{task_id}。纯管理操作：只删任务记录本身，不触碰任何关联产物
+    （如 ScreeningStore / 治理 WF 报告等生产敏感产物——v1 不联动清理，避免误删）。
+    运行中/排队中的任务不可删，须等其到达终态。
+
+    Args:
+        request: FastAPI 请求对象，用于取 app.state.history_store；缺失时回退 task_manager 内置 store。
+        task_id: 待删除的任务 ID。
+
+    Returns:
+        ``{"success": True, "task_id": task_id}``。
+
+    Raises:
+        HTTPException: 任务处于 running/pending 时抛 409；内存与历史均无此任务时抛 404。
+    """
+    task = task_manager.get_task(task_id)
+    if task is not None and task.status.value in {"running", "pending"}:
+        raise HTTPException(409, "运行中或排队中的任务不可删除，请等待其结束后再删")
+
+    removed_mem = task_manager.delete_task(task_id)
+
+    hist_store = getattr(getattr(request, "app", None), "state", None)
+    hist_store = getattr(hist_store, "history_store", None)
+    if hist_store is None:
+        hist_store = task_manager._history_store
+    removed_hist = hist_store.delete_by_task_id(task_id)
+
+    if not removed_mem and not removed_hist:
+        raise HTTPException(404, f"任务 {task_id} 不存在")
+    return {"success": True, "task_id": task_id}
+
+
 # =============================================================================
 # 数据下载
 # =============================================================================

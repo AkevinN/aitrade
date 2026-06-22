@@ -112,6 +112,182 @@ function warningLabel(row: LeaderboardRow): string | null {
 }
 
 /**
+ * 构建选股榜单的表格列定义（可复用于 live 选股页与「运行历史」详情，保证两处展示一致）。
+ *
+ * 与状态解耦：把"查看详情/带入训练"两处交互抽成回调参数，故同一套列既能驱动 live 页
+ * （onDetailOpen=打开 Tier2DetailDrawer、onTrainClick=跳 CNNTrain），也能驱动历史详情。
+ *
+ * @param opts.interval - K 线周期，用于"带入训练"预填；缺省 'd'
+ * @param opts.onDetailOpen - 点"查看详情"回调，传入该行 Tier-2 结论（含 report_id）
+ * @param opts.onTrainClick - 点"带入训练"回调，传入标的代码与周期
+ * @returns 可直接喂给 ScreeningResultPanel 的 antd 列定义数组
+ */
+export function buildLeaderboardColumns(opts: {
+  interval: string
+  onDetailOpen: (verdict: Tier2Verdict | null) => void
+  onTrainClick: (vtSymbol: string, interval: string) => void
+}): any[] {
+  const { interval, onDetailOpen, onTrainClick } = opts
+  return [
+    {
+      title: <MetricLabel metricKey="rank" />,
+      dataIndex: 'rank',
+      width: 70,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => a.rank - b.rank,
+    },
+    {
+      title: <MetricLabel metricKey="vt_symbol" />,
+      key: 'vt_symbol',
+      width: 140,
+      render: (_: unknown, row: LeaderboardRow) => (
+        <Space direction="vertical" size={2}>
+          <Text strong>{row.tier1.vt_symbol}</Text>
+          {!row.tier1.available ? <Tag color="default">不可用</Tag> : null}
+        </Space>
+      ),
+    },
+    {
+      title: <MetricLabel metricKey="fitness_score" />,
+      key: 'fitness_score',
+      width: 180,
+      defaultSortOrder: 'descend' as const,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
+        const sa = a.tier1.fitness_score ?? -1
+        const sb = b.tier1.fitness_score ?? -1
+        return sa - sb
+      },
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.tier1.fitness_score != null ? row.tier1.fitness_score.toFixed(4) : '-',
+    },
+    {
+      title: <MetricLabel metricKey="overall_confidence" />,
+      key: 'overall_confidence',
+      width: 180,
+      render: (_: unknown, row: LeaderboardRow) => {
+        const level = row.tier1.overall_confidence
+        const warn = warningLabel(row)
+        return (
+          <Space size={4} wrap>
+            <Tag color={confidenceColor[level] ?? 'default'}>
+              {confidenceLabel(level)}
+            </Tag>
+            {warn ? <Tag color="orange">{warn}</Tag> : null}
+          </Space>
+        )
+      },
+    },
+    {
+      title: <MetricLabel metricKey="promoted_to_tier2" />,
+      key: 'promoted_to_tier2',
+      width: 160,
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.promoted_to_tier2 ? (
+          <Tag color="blue">已入围</Tag>
+        ) : (
+          <Tag color="default">未入围</Tag>
+        ),
+    },
+    {
+      title: <MetricLabel metricKey="edge_ok" />,
+      key: 'edge_ok',
+      width: 140,
+      render: (_: unknown, row: LeaderboardRow) => {
+        if (!row.tier2) return <Text type="secondary">-</Text>
+        if (!row.tier2.evaluable) {
+          const skipLabel =
+            row.tier2.note && row.tier2.note.includes('数据不足') ? '数据不足' : '跳过'
+          return (
+            <Tooltip title={row.tier2.note ?? '该标的 Tier-2 评估未能完成'}>
+              <Tag color="orange">{skipLabel}</Tag>
+            </Tooltip>
+          )
+        }
+        return row.tier2.edge_ok ? (
+          <Tag color="green">通过</Tag>
+        ) : (
+          <Tag color="red">未通过</Tag>
+        )
+      },
+    },
+    {
+      title: <MetricLabel metricKey="avg_score" />,
+      key: 'avg_score',
+      width: 160,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
+        const sa = a.tier2?.avg_score ?? -Infinity
+        const sb = b.tier2?.avg_score ?? -Infinity
+        return sa - sb
+      },
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.tier2?.avg_score != null ? row.tier2.avg_score.toFixed(4) : '-',
+    },
+    {
+      title: <MetricLabel metricKey="pos_fold_ratio" />,
+      key: 'pos_fold_ratio',
+      width: 165,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
+        const sa = a.tier2?.pos_fold_ratio ?? -Infinity
+        const sb = b.tier2?.pos_fold_ratio ?? -Infinity
+        return sa - sb
+      },
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.tier2?.pos_fold_ratio != null
+          ? `${(row.tier2.pos_fold_ratio * 100).toFixed(1)}%`
+          : '-',
+    },
+    {
+      title: <MetricLabel metricKey="avg_cross_seed_std" />,
+      key: 'avg_cross_seed_std',
+      width: 165,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
+        const sa = a.tier2?.avg_cross_seed_std ?? Infinity
+        const sb = b.tier2?.avg_cross_seed_std ?? Infinity
+        return sa - sb
+      },
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.tier2?.avg_cross_seed_std != null ? row.tier2.avg_cross_seed_std.toFixed(4) : '—',
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 190,
+      render: (_: unknown, row: LeaderboardRow) => {
+        const hasReport = Boolean(row.tier2?.report_id)
+        return (
+          <Space size={4} wrap>
+            <Tooltip
+              title={
+                hasReport
+                  ? '查看 Tier-2 折级实证详情'
+                  : row.tier2?.note ?? '该标的无 Tier-2 实证报告'
+              }
+            >
+              <Button
+                size="small"
+                type="link"
+                disabled={!hasReport}
+                onClick={() => onDetailOpen(row.tier2)}
+              >
+                查看详情
+              </Button>
+            </Tooltip>
+            <Tooltip title="在 CNN 训练页预填该标的与周期，仅预填不提交">
+              <Button
+                size="small"
+                disabled={!row.tier1.available}
+                onClick={() => onTrainClick(row.tier1.vt_symbol, interval)}
+              >
+                带入训练
+              </Button>
+            </Tooltip>
+          </Space>
+        )
+      },
+    },
+  ]
+}
+
+/**
  * CNN 选股页面：配置候选股票池与漏斗参数 → 启动异步选股任务 → 可排序 Tier-1/Tier-2 榜单。
  *
  * 流程：
@@ -230,169 +406,16 @@ const CNNScreening: React.FC = () => {
     })
   }
 
-  /** 榜单表格列定义，numeric 列附带 sorter 以支持客户端排序。 */
-  const leaderboardColumns = [
-    {
-      title: <MetricLabel metricKey="rank" />,
-      dataIndex: 'rank',
-      width: 70,
-      sorter: (a: LeaderboardRow, b: LeaderboardRow) => a.rank - b.rank,
-    },
-    {
-      title: <MetricLabel metricKey="vt_symbol" />,
-      key: 'vt_symbol',
-      width: 140,
-      render: (_: unknown, row: LeaderboardRow) => (
-        <Space direction="vertical" size={2}>
-          <Text strong>{row.tier1.vt_symbol}</Text>
-          {!row.tier1.available ? <Tag color="default">不可用</Tag> : null}
-        </Space>
-      ),
-    },
-    {
-      title: <MetricLabel metricKey="fitness_score" />,
-      key: 'fitness_score',
-      width: 180,
-      defaultSortOrder: 'descend' as const,
-      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
-        const sa = a.tier1.fitness_score ?? -1
-        const sb = b.tier1.fitness_score ?? -1
-        return sa - sb
-      },
-      render: (_: unknown, row: LeaderboardRow) =>
-        row.tier1.fitness_score != null ? row.tier1.fitness_score.toFixed(4) : '-',
-    },
-    {
-      title: <MetricLabel metricKey="overall_confidence" />,
-      key: 'overall_confidence',
-      width: 180,
-      render: (_: unknown, row: LeaderboardRow) => {
-        const level = row.tier1.overall_confidence
-        const warn = warningLabel(row)
-        return (
-          <Space size={4} wrap>
-            <Tag color={confidenceColor[level] ?? 'default'}>
-              {confidenceLabel(level)}
-            </Tag>
-            {warn ? <Tag color="orange">{warn}</Tag> : null}
-          </Space>
-        )
-      },
-    },
-    {
-      title: <MetricLabel metricKey="promoted_to_tier2" />,
-      key: 'promoted_to_tier2',
-      width: 160,
-      render: (_: unknown, row: LeaderboardRow) =>
-        row.promoted_to_tier2 ? (
-          <Tag color="blue">已入围</Tag>
-        ) : (
-          <Tag color="default">未入围</Tag>
-        ),
-    },
-    {
-      title: <MetricLabel metricKey="edge_ok" />,
-      key: 'edge_ok',
-      width: 140,
-      render: (_: unknown, row: LeaderboardRow) => {
-        if (!row.tier2) return <Text type="secondary">-</Text>
-        if (!row.tier2.evaluable) {
-          // 已入围 Tier-2 但无法评估（通常是数据不足导致跳过）
-          const skipLabel =
-            row.tier2.note && row.tier2.note.includes('数据不足') ? '数据不足' : '跳过'
-          return (
-            <Tooltip title={row.tier2.note ?? '该标的 Tier-2 评估未能完成'}>
-              <Tag color="orange">{skipLabel}</Tag>
-            </Tooltip>
-          )
-        }
-        return row.tier2.edge_ok ? (
-          <Tag color="green">通过</Tag>
-        ) : (
-          <Tag color="red">未通过</Tag>
-        )
-      },
-    },
-    {
-      title: <MetricLabel metricKey="avg_score" />,
-      key: 'avg_score',
-      width: 160,
-      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
-        const sa = a.tier2?.avg_score ?? -Infinity
-        const sb = b.tier2?.avg_score ?? -Infinity
-        return sa - sb
-      },
-      render: (_: unknown, row: LeaderboardRow) =>
-        row.tier2?.avg_score != null ? row.tier2.avg_score.toFixed(4) : '-',
-    },
-    {
-      title: <MetricLabel metricKey="pos_fold_ratio" />,
-      key: 'pos_fold_ratio',
-      width: 165,
-      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
-        const sa = a.tier2?.pos_fold_ratio ?? -Infinity
-        const sb = b.tier2?.pos_fold_ratio ?? -Infinity
-        return sa - sb
-      },
-      render: (_: unknown, row: LeaderboardRow) =>
-        row.tier2?.pos_fold_ratio != null
-          ? `${(row.tier2.pos_fold_ratio * 100).toFixed(1)}%`
-          : '-',
-    },
-    {
-      title: <MetricLabel metricKey="avg_cross_seed_std" />,
-      key: 'avg_cross_seed_std',
-      width: 165,
-      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
-        const sa = a.tier2?.avg_cross_seed_std ?? Infinity
-        const sb = b.tier2?.avg_cross_seed_std ?? Infinity
-        return sa - sb
-      },
-      render: (_: unknown, row: LeaderboardRow) =>
-        row.tier2?.avg_cross_seed_std != null ? row.tier2.avg_cross_seed_std.toFixed(4) : '—',
-    },
-    {
-      title: '操作',
-      key: 'actions',
-      width: 190,
-      render: (_: unknown, row: LeaderboardRow) => {
-        const interval =
-          screeningResult?.input?.interval != null
-            ? String(screeningResult.input.interval)
-            : 'd'
-        const hasReport = Boolean(row.tier2?.report_id)
-        return (
-          <Space size={4} wrap>
-            <Tooltip
-              title={
-                hasReport
-                  ? '查看 Tier-2 折级实证详情'
-                  : row.tier2?.note ?? '该标的无 Tier-2 实证报告'
-              }
-            >
-              <Button
-                size="small"
-                type="link"
-                disabled={!hasReport}
-                onClick={() => setDetailVerdict(row.tier2)}
-              >
-                查看详情
-              </Button>
-            </Tooltip>
-            <Tooltip title="在 CNN 训练页预填该标的与周期，仅预填不提交">
-              <Button
-                size="small"
-                disabled={!row.tier1.available}
-                onClick={() => handleGoTrain(row.tier1.vt_symbol, interval)}
-              >
-                带入训练
-              </Button>
-            </Tooltip>
-          </Space>
-        )
-      },
-    },
-  ]
+  // 本次选股的 K 线周期：用于"带入训练"预填与 Tier-2 详情抽屉拉 K 线行情。
+  const screeningInterval =
+    screeningResult?.input?.interval != null ? String(screeningResult.input.interval) : 'd'
+
+  /** 榜单表格列定义（复用 buildLeaderboardColumns，与「运行历史」详情同一套）。 */
+  const leaderboardColumns = buildLeaderboardColumns({
+    interval: screeningInterval,
+    onDetailOpen: setDetailVerdict,
+    onTrainClick: handleGoTrain,
+  })
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -427,6 +450,7 @@ const CNNScreening: React.FC = () => {
       <Tier2DetailDrawer
         open={detailVerdict != null}
         verdict={detailVerdict}
+        interval={screeningInterval}
         onClose={() => setDetailVerdict(null)}
       />
     </Space>
@@ -944,7 +968,7 @@ const contributionColumns = [
  * @param result - 完成的选股结果；null 时展示占位提示
  * @param leaderboardColumns - 父组件传入的表格列定义（含 handler 闭包）
  */
-function ScreeningResultPanel({
+export function ScreeningResultPanel({
   result,
   leaderboardColumns,
 }: {

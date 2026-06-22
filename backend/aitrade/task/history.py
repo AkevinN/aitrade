@@ -115,3 +115,26 @@ class TaskHistoryStore:
             return {k: v for k, v in r.items() if not k.startswith("_") and k != "ts"}
 
         return [_strip_internal(r) for r in results]
+
+    def delete_by_task_id(self, task_id: str, *, days_back: int = 365) -> bool:
+        """从最近 ``days_back`` 天的归档中删除指定 task_id 的记录（"运行历史"管理删除用）。
+
+        逐日扫描窗口内的日期文件，重写去掉该 task_id 的记录（文件不存在的日期为快速空操作）。
+        归档去重键为 ``task:{task_id}``，删除时一并从底座内存去重集合移除，使该 task_id
+        之后可再次归档。
+
+        Args:
+            task_id: 待删除的任务 ID。
+            days_back: 回看窗口天数（含今天），默认 365。
+
+        Returns:
+            是否删掉了至少一条记录。
+        """
+        from datetime import timedelta
+
+        today = date.today()
+        removed = 0
+        for i in range(max(1, days_back)):
+            day = today - timedelta(days=i)
+            removed += self._store.delete_where(day, lambda r: r.get("task_id") == task_id)
+        return removed > 0

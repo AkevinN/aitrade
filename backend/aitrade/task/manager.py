@@ -197,6 +197,24 @@ class TaskManager:
         with self._task_lock:
             return list(self._tasks.values())
 
+    def delete_task(self, task_id: str) -> bool:
+        """从内存任务表删除一个任务（线程安全），用于"运行历史"管理删除。
+
+        仅删内存记录；磁盘归档由 ``TaskHistoryStore.delete_by_task_id`` 单独处理（同一
+        task_id 可能内存与历史都有）。
+
+        Args:
+            task_id: 目标任务 ID。
+
+        Returns:
+            True 表示内存中存在并已删除；False 表示内存中无此任务。
+        """
+        with self._task_lock:
+            if task_id in self._tasks:
+                del self._tasks[task_id]
+                return True
+        return False
+
     def run_async(
         self,
         task_id: str,

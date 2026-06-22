@@ -1,7 +1,9 @@
 import React, { useState } from 'react'
-import { Alert, Empty, Segmented, Space, Table, Tag, Typography } from 'antd'
+import { Alert, Empty, Popconfirm, Segmented, Space, Table, Tag, Typography, message } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 
+import { alphaService } from '../../api/alpha'
 import type { Task } from '../../types/alpha'
 import { useRunHistory, type RunHistoryCategory } from '../../hooks/useRunHistory'
 import RunDetailDrawer from './RunDetailDrawer'
@@ -39,8 +41,23 @@ function formatTime(iso?: string | null): string {
 const RunHistory: React.FC = () => {
   const [category, setCategory] = useState<RunHistoryCategory>('all')
   const [selected, setSelected] = useState<Task | null>(null)
+  const queryClient = useQueryClient()
 
   const { data: runs, isLoading, isError } = useRunHistory(category)
+
+  // 删除一条运行记录（管理操作）：成功后失效列表查询以刷新。
+  const deleteMutation = useMutation({
+    mutationFn: (taskId: string) => alphaService.deleteTask(taskId),
+    onSuccess: () => {
+      message.success('已删除该运行记录')
+      queryClient.invalidateQueries({ queryKey: ['runHistory'] })
+    },
+    onError: (err: unknown) => {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      message.error(detail || '删除失败，请稍后重试')
+    },
+  })
 
   const columns: ColumnsType<Task> = [
     {
@@ -75,17 +92,31 @@ const RunHistory: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 90,
-      render: (_, t) => (
-        <a
-          onClick={(e) => {
-            e.stopPropagation()
-            setSelected(t)
-          }}
-        >
-          查看
-        </a>
-      ),
+      width: 130,
+      render: (_, t) => {
+        const isTerminal = t.status === 'completed' || t.status === 'failed'
+        return (
+          <Space size={8} onClick={(e) => e.stopPropagation()}>
+            <a onClick={() => setSelected(t)}>查看</a>
+            <Popconfirm
+              title="删除该运行记录？"
+              description="仅从历史中移除这条记录，不可恢复（不影响其它运行）。"
+              okText="删除"
+              okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
+              cancelText="取消"
+              disabled={!isTerminal}
+              onConfirm={() => deleteMutation.mutate(t.task_id)}
+            >
+              <a
+                style={{ color: isTerminal ? '#cf1322' : '#bbb' }}
+                title={isTerminal ? undefined : '运行中/排队中的任务不可删除'}
+              >
+                删除
+              </a>
+            </Popconfirm>
+          </Space>
+        )
+      },
     },
   ]
 
