@@ -19,6 +19,7 @@ dist/
 # 本地工具目录与数据包
 .cursor/
 .kiro/
+.superpowers/
 .playwright-cli/
 *.rar
 =*
