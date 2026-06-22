@@ -28,8 +28,15 @@ import { alphaService } from '../../api/alpha'
 import { cnnService } from '../../api/cnn'
 import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import { useTask } from '../../hooks/useTask'
-import type { CNNScreeningRequest, LeaderboardRow, ScreeningResult } from '../../types/screening'
+import type {
+  CNNScreeningRequest,
+  LeaderboardRow,
+  ScreeningResult,
+  Tier2Verdict,
+} from '../../types/screening'
 import { metricMeta } from '../../utils/screening'
+import TaskStatusPanel from '../../components/TaskStatusPanel'
+import Tier2DetailDrawer from './Tier2DetailDrawer'
 
 const { Text } = Typography
 
@@ -120,6 +127,8 @@ const CNNScreening: React.FC = () => {
   const [form] = Form.useForm()
   const [taskId, setTaskId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // 折级详情抽屉的当前结论；非 null 即打开抽屉（按其 report_id 拉 WF 报告）。
+  const [detailVerdict, setDetailVerdict] = useState<Tier2Verdict | null>(null)
   const navigate = useNavigate()
 
   const task = useTask(taskId)
@@ -331,24 +340,55 @@ const CNNScreening: React.FC = () => {
           : '-',
     },
     {
+      title: <MetricLabel metricKey="avg_cross_seed_std" />,
+      key: 'avg_cross_seed_std',
+      width: 165,
+      sorter: (a: LeaderboardRow, b: LeaderboardRow) => {
+        const sa = a.tier2?.avg_cross_seed_std ?? Infinity
+        const sb = b.tier2?.avg_cross_seed_std ?? Infinity
+        return sa - sb
+      },
+      render: (_: unknown, row: LeaderboardRow) =>
+        row.tier2?.avg_cross_seed_std != null ? row.tier2.avg_cross_seed_std.toFixed(4) : '—',
+    },
+    {
       title: '操作',
       key: 'actions',
-      width: 110,
+      width: 190,
       render: (_: unknown, row: LeaderboardRow) => {
         const interval =
           screeningResult?.input?.interval != null
             ? String(screeningResult.input.interval)
             : 'd'
+        const hasReport = Boolean(row.tier2?.report_id)
         return (
-          <Tooltip title="在 CNN 训练页预填该标的与周期，仅预填不提交">
-            <Button
-              size="small"
-              disabled={!row.tier1.available}
-              onClick={() => handleGoTrain(row.tier1.vt_symbol, interval)}
+          <Space size={4} wrap>
+            <Tooltip
+              title={
+                hasReport
+                  ? '查看 Tier-2 折级实证详情'
+                  : row.tier2?.note ?? '该标的无 Tier-2 实证报告'
+              }
             >
-              带入训练
-            </Button>
-          </Tooltip>
+              <Button
+                size="small"
+                type="link"
+                disabled={!hasReport}
+                onClick={() => setDetailVerdict(row.tier2)}
+              >
+                查看详情
+              </Button>
+            </Tooltip>
+            <Tooltip title="在 CNN 训练页预填该标的与周期，仅预填不提交">
+              <Button
+                size="small"
+                disabled={!row.tier1.available}
+                onClick={() => handleGoTrain(row.tier1.vt_symbol, interval)}
+              >
+                带入训练
+              </Button>
+            </Tooltip>
+          </Space>
         )
       },
     },
@@ -365,15 +405,15 @@ const CNNScreening: React.FC = () => {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={8}>
-          <ScreeningForm
-            form={form}
-            onSubmit={handleSubmit}
-            submitting={submitting}
-            isRunning={isRunning}
-            taskMessage={task.data?.message}
-            taskStatus={task.data?.status}
-            taskProgress={task.data?.progress}
-          />
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <ScreeningForm
+              form={form}
+              onSubmit={handleSubmit}
+              submitting={submitting}
+              isRunning={isRunning}
+            />
+            <TaskStatusPanel task={task.data} title="选股任务" />
+          </Space>
         </Col>
 
         <Col xs={24} xl={16}>
@@ -383,6 +423,12 @@ const CNNScreening: React.FC = () => {
           />
         </Col>
       </Row>
+
+      <Tier2DetailDrawer
+        open={detailVerdict != null}
+        verdict={detailVerdict}
+        onClose={() => setDetailVerdict(null)}
+      />
     </Space>
   )
 }
@@ -498,9 +544,6 @@ function ScreeningForm({
   onSubmit,
   submitting,
   isRunning,
-  taskMessage,
-  taskStatus,
-  taskProgress,
 }: {
   /** 受控的 antd FormInstance；由父组件持有以便提交时读取字段值 */
   form: any
@@ -510,12 +553,6 @@ function ScreeningForm({
   submitting: boolean
   /** 是否有任务正在运行（轮询未到终态） */
   isRunning: boolean
-  /** 当前任务状态消息（来自 useTask） */
-  taskMessage?: string
-  /** 当前任务状态（completed/failed/running/pending） */
-  taskStatus?: string
-  /** 当前任务进度百分比（0-100，来自 Task.progress） */
-  taskProgress?: number
 }) {
   // 监听 run_tier2 开关、目标函数、K 线周期与 Tier-2 高级字段，用于条件渲染与候选标的联动
   const runTier2 = Form.useWatch('run_tier2', form)
@@ -842,28 +879,6 @@ function ScreeningForm({
           {isRunning ? '选股任务运行中…' : '启动选股'}
         </Button>
       </Form>
-
-      {taskStatus && (
-        <Alert
-          style={{ marginTop: 12 }}
-          type={
-            taskStatus === 'failed'
-              ? 'error'
-              : taskStatus === 'completed'
-                ? 'success'
-                : 'info'
-          }
-          showIcon
-          message={
-            taskStatus === 'completed'
-              ? '选股任务已完成'
-              : taskStatus === 'failed'
-                ? '选股任务失败'
-                : `运行中… ${taskProgress != null ? `${taskProgress}%` : ''}`
-          }
-          description={taskMessage}
-        />
-      )}
     </section>
   )
 }

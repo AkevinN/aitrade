@@ -77,6 +77,14 @@ vi.mock('react-router-dom', async (importActual) => {
   }
 })
 
+// ── mock screeningService（折级详情抽屉按 report_id 拉 WF 报告）────────────────
+const mockGetScreeningReport = vi.fn()
+vi.mock('../../api/screening', () => ({
+  screeningService: {
+    getScreeningReport: (...args: unknown[]) => mockGetScreeningReport(...args),
+  },
+}))
+
 import CNNScreening from './index'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,6 +240,7 @@ describe('CNNScreening 页面', () => {
     mockNavigate.mockReset()
     mockGetDataResources.mockReset()
     mockGetDataResources.mockResolvedValue(dataResourcesFixture)
+    mockGetScreeningReport.mockReset()
     // 默认无进行中任务
     mockUseTask.mockReturnValue(idleTask())
   })
@@ -769,5 +778,76 @@ describe('CNNScreening 页面', () => {
     await toggleSelect(user, 'include_symbols')
     expect(await screen.findByTitle('300750.SZSE')).toBeInTheDocument()
     expect(screen.queryByTitle('600519.SSE')).not.toBeInTheDocument()
+  })
+
+  // ── 18. 榜单新增「跨种子波动」列头渲染（cnn-screening-tier2-detail R2.1）──────
+  it('榜单渲染 avg_cross_seed_std 列头（"跨种子波动 (Cross-seed Std)"）', async () => {
+    mockUseTask.mockReturnValue(completedTask(syntheticResult))
+    renderPage()
+    await screen.findByText('600030.SSE')
+    expect(screen.getAllByText('跨种子波动 (Cross-seed Std)').length).toBeGreaterThanOrEqual(1)
+  })
+
+  // ── 19. 「查看详情」入口：有 report_id 可用，无 report_id 禁用（R4.7）──────────
+  it('「查看详情」按钮：rank-1（report_id=rpt-1）可用，rank-2（tier2=null）禁用', async () => {
+    mockUseTask.mockReturnValue(completedTask(syntheticResult))
+    renderPage()
+    await screen.findByText('600030.SSE')
+
+    const detailButtons = screen.getAllByRole('button', { name: '查看详情' })
+    expect(detailButtons.length).toBe(2)
+    expect(detailButtons[0]).not.toBeDisabled()
+    expect(detailButtons[1]).toBeDisabled()
+  })
+
+  // ── 20. 点「查看详情」→ 抽屉按 report_id 拉报告并渲染折级表（R4.1 集成）────────
+  it('点 rank-1「查看详情」→ getScreeningReport(rpt-1) 被调用，抽屉渲染门禁头部与折级表', async () => {
+    mockUseTask.mockReturnValue(completedTask(syntheticResult))
+    mockGetScreeningReport.mockResolvedValueOnce({
+      report_id: 'rpt-1',
+      type: 'walk_forward',
+      name: '600030',
+      created_at: '2025-06-22T15:30:12',
+      request: {},
+      production_model: null,
+      folds: [
+        {
+          fold: 0,
+          train: { start: '2024-01-01', end: '2024-05-31' },
+          test: { start: '2024-06-01', end: '2024-08-30' },
+          candidate_model: 'm0',
+          candidate_models: ['m0'],
+          candidate_statistics: { total_return: 5.2, sharpe_ratio: 1.2, start_date: '2024-06-02' },
+          candidate_seed_statistics: [{ total_return: 5.2 }],
+          candidate_seed_scores: [0.6],
+          candidate_score: 0.6,
+          cross_seed: { mean: 0.6, std: 0.04, n: 1 },
+          production_model: null,
+          production_statistics: null,
+          production_score: null,
+          score_delta: null,
+        },
+      ],
+      summary: {
+        fold_count: 1,
+        candidate_win_count: 0,
+        candidate_win_rate: 0,
+        avg_score_delta: null,
+        n_seeds: 1,
+        avg_cross_seed_std: 0.04,
+        passed: false,
+        reasons: [],
+      },
+    })
+
+    renderPage()
+    await screen.findByText('600030.SSE')
+
+    const detailButtons = screen.getAllByRole('button', { name: '查看详情' })
+    await userEvent.click(detailButtons[0])
+
+    await waitFor(() => expect(mockGetScreeningReport).toHaveBeenCalledWith('rpt-1'))
+    expect(await screen.findByText('✓ edge_ok 通过')).toBeInTheDocument()
+    expect(await screen.findByText('#0')).toBeInTheDocument()
   })
 })
