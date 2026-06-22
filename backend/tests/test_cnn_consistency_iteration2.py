@@ -113,3 +113,43 @@ def test_consistency_unknown_exit_mode_raises() -> None:
         check_label_strategy_consistency(
             {"mode": "next_bar"}, exit_mode="weird", hold_days=1, input_interval="d",
         )
+
+
+# ---------------------------------------------------------------------------
+# 4. 分钟线下 label(bar) ↔ 策略(交易日) 单位换算（按天统一，P2）
+# ---------------------------------------------------------------------------
+def test_derive_horizon_bars_minute_converts_to_days() -> None:
+    # 30m 每日 8 根：horizon=10 bar → hold_days = ceil(10/8) = 2 个交易日（非 10）。
+    cfg = derive_strategy_exit_from_label({"mode": "horizon_bars", "horizon": 10}, "30m")
+    assert cfg == {"exit_mode": "fixed_hold", "hold_days": 2}
+
+
+def test_derive_oco_max_hold_minute_converts_to_days() -> None:
+    # OCO max_hold=16 bar @30m → hold_days = ceil(16/8) = 2 个交易日。
+    cfg = derive_strategy_exit_from_label(
+        {"mode": "oco", "take_profit": 0.03, "stop_loss": 0.02, "max_hold": 16}, "30m"
+    )
+    assert cfg["exit_mode"] == "oco"
+    assert cfg["hold_days"] == 2
+
+
+def test_consistency_minute_compares_in_days_not_bars() -> None:
+    # horizon=10 bar @30m = 2 个交易日：hold_days=2 通过，hold_days=10（旧 bar 口径）抛错。
+    warnings = check_label_strategy_consistency(
+        {"mode": "horizon_bars", "horizon": 10, "price_ref": "next_open"},
+        exit_mode="fixed_hold", hold_days=2, input_interval="30m",
+    )
+    assert warnings == []
+
+    with pytest.raises(ValueError, match="label-trade 不一致"):
+        check_label_strategy_consistency(
+            {"mode": "horizon_bars", "horizon": 10, "price_ref": "next_open"},
+            exit_mode="fixed_hold", hold_days=10, input_interval="30m",
+        )
+
+
+def test_daily_behavior_unchanged_after_unit_fix() -> None:
+    # 回归：日线下换算恒等，derive 与既有断言一致。
+    assert derive_strategy_exit_from_label({"mode": "horizon_bars", "horizon": 5}) == {
+        "exit_mode": "fixed_hold", "hold_days": 5,
+    }

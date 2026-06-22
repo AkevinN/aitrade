@@ -14,12 +14,9 @@ from typing import Any, Callable, Optional
 import numpy as np
 import polars as pl
 
-logger = logging.getLogger(__name__)
+from .intervals import BARS_PER_TRADING_DAY as _BARS_PER_DAY
 
-# 各输入周期下每个交易日的 bar 数（A 股 4 小时连续竞价）。
-_BARS_PER_DAY: dict[str, int] = {
-    "d": 1, "60m": 4, "30m": 8, "15m": 16, "10m": 24, "5m": 48, "1m": 240,
-}
+logger = logging.getLogger(__name__)
 
 
 def warmup_days(lookback: int, input_interval: str) -> int:

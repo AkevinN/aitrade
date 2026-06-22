@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .intervals import bars_to_days
+
 
 def label_holding_horizon(label_spec: dict[str, Any] | None, input_interval: str = "d") -> int | None:
     """返回 label 蕴含的固定持有期（bar 数）；无法表达为固定 bar 数时返回 None。
@@ -57,7 +59,8 @@ def derive_strategy_exit_from_label(
 
     - OCO label → 返回 exit_mode=oco，含 take_profit/stop_loss/hold_days。
     - 固定持有 label（next_bar/horizon_bars/日线 next_session_close）→
-      返回 exit_mode=fixed_hold，含 hold_days=持有 bar 数。
+      返回 exit_mode=fixed_hold，含 hold_days=持有**交易日数**
+      （由 label 的 bar 跨度按 input_interval 经 bars_to_days 换算，策略按交易日计）。
     - 持有期不固定（如分钟级 session_close）→ 抛 ValueError。
 
     Args:
@@ -72,14 +75,16 @@ def derive_strategy_exit_from_label(
         ValueError: label 的持有期不是固定 bar 数，且不属于 OCO 模式时抛出。
     """
     mode = (label_spec or {}).get("mode")
-    # OCO 路径依赖标签 → 推导对齐的 OCO 出场（止盈/止损 + 最大持有兜底）
+    # OCO 路径依赖标签 → 推导对齐的 OCO 出场（止盈/止损 + 最大持有兜底）。
+    # max_hold 是 bar 数，策略 hold_days 按交易日计 → 用 bars_to_days 换算（日线恒等）。
     if mode == "oco":
         spec = label_spec or {}
+        max_hold_bars = int(spec.get("max_hold") or spec.get("horizon") or 0)
         return {
             "exit_mode": "oco",
             "take_profit": float(spec.get("take_profit") or 0.0),
             "stop_loss": float(spec.get("stop_loss") or 0.0),
-            "hold_days": int(spec.get("max_hold") or spec.get("horizon") or 0),
+            "hold_days": bars_to_days(max_hold_bars, input_interval),
         }
 
     horizon = label_holding_horizon(label_spec, input_interval)
@@ -89,7 +94,8 @@ def derive_strategy_exit_from_label(
             "该 label 的持有期不是固定 bar 数；请改用固定持有期 label（next_bar/horizon_bars），"
             "或显式指定 exit_mode=threshold。"
         )
-    return {"exit_mode": "fixed_hold", "hold_days": horizon}
+    # horizon 是 bar 数；策略 hold_days 按交易日计，按周期向上取整换算（日线 ÷1 恒等）。
+    return {"exit_mode": "fixed_hold", "hold_days": bars_to_days(horizon, input_interval)}
 
 
 def check_label_strategy_consistency(
@@ -113,7 +119,8 @@ def check_label_strategy_consistency(
     Args:
         label_spec: 训练时的 label 配置字典；None 等价于 mode=next_bar。
         exit_mode: 策略出场模式，"fixed_hold" | "threshold" | "oco" | "auto"。
-        hold_days: 固定持有 bar 数（仅 fixed_hold 模式下与 label 比对）。
+        hold_days: 策略固定持有**交易日数**（仅 fixed_hold 模式下与 label 比对；
+            label 的 bar 跨度会按 input_interval 换算成交易日后再比，日线下恒等）。
         input_interval: K 线周期，如 "d"、"30m"。
 
     Returns:
@@ -133,11 +140,14 @@ def check_label_strategy_consistency(
                 f"label-trade 不一致：exit_mode=fixed_hold 需要固定持有期 label，"
                 f"但 label mode={spec.get('mode')} 在 interval={input_interval} 下持有期不固定。"
             )
-        if int(hold_days) != int(horizon):
+        # label 持有期是 bar 数，策略 hold_days 按交易日计 → 换算到同单位（天）再比对，
+        # 消除分钟线下"bar 数 vs 天数"的口径错配（日线 ÷1 恒等，行为不变）。
+        horizon_days = bars_to_days(horizon, input_interval)
+        if int(hold_days) != horizon_days:
             raise ValueError(
-                f"label-trade 不一致：label 持有期={horizon} 个 bar，"
-                f"但策略 hold_days={hold_days}。请将 hold_days 改为 {horizon}，"
-                "或使用 exit_mode=auto 自动对齐。"
+                f"label-trade 不一致：label 持有期={horizon} 个 bar（={horizon_days} 个交易日"
+                f"@{input_interval}），但策略 hold_days={hold_days} 个交易日。"
+                f"请将 hold_days 改为 {horizon_days}，或使用 exit_mode=auto 自动对齐。"
             )
         if price_ref == "close":
             warnings.append(
