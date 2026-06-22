@@ -100,6 +100,25 @@ export const METRIC_META: Record<string, MetricMeta> = {
     label: '排名 (Rank)',
     tooltip: '按 CNN 适配度（Fitness Score）降序编号，从 1 开始。',
   },
+
+  // ── Tier-2 折级详情列（WF 报告 folds[*]，折级表/抽屉用）────────────────────
+  fold: {
+    label: '折 (Fold)',
+    tooltip: 'walk-forward 第几折，从 0 开始。每折 = 一段训练窗口 + 紧随其后的样本外测试窗口。',
+  },
+  candidate_score: {
+    label: '核心分 (Score)',
+    tooltip:
+      '该折候选模型的核心综合分（跨种子均值）。综合收益/夏普/回撤等，> 0 大致表示该折样本外跑赢。',
+  },
+  production_score: {
+    label: '生产分 (Prod Score)',
+    tooltip: '同折生产模型的核心分，用于对照；选股场景无生产模型时为空。',
+  },
+  score_delta: {
+    label: '分差 (Δ Score)',
+    tooltip: '候选分 − 生产分；选股场景无生产模型时为空。',
+  },
   vt_symbol: {
     label: '标的 (Symbol)',
     tooltip: '标的合约代码，如 "600030.SSE"。',

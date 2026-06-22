@@ -6,7 +6,7 @@
  * 前端仅消费，不做写入，因此所有字段均为只读语义。
  */
 
-import type { LabelSpec } from './alpha'
+import type { BacktestStatistics, LabelSpec } from './alpha'
 
 /** CNN 适配度评分维度的置信度等级（由后端 ConfidenceLevel 字面量对齐）。 */
 export type ConfidenceLevel = 'insufficient' | 'low' | 'medium' | 'high'
@@ -190,4 +190,106 @@ export interface CNNScreeningRequest {
    * 取多个种子并求均值可降低偶然性，但线性增加算力消耗。
    */
   n_seeds?: number
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tier-2 walk-forward 报告（按 Tier2Verdict.report_id 经
+// GET /api/cnn/screening/reports/{report_id} 回读，供折级详情抽屉消费）。
+// 与后端 `run_walk_forward_evaluate` 组装结构对齐
+// （backend/aitrade/cnn/governance.py 的 fold/report 组装）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 单折的跨种子离散度统计（后端 `cross_seed`，由 `_cross_seed_dispersion` 产出）。 */
+export interface ScreeningCrossSeed {
+  /** 该折跨种子 candidate_score 均值，即 fold.candidate_score */
+  mean: number
+  /** 跨种子 candidate_score 标准差；单种子时为 0 */
+  std: number
+  /** 参与的种子数 */
+  n: number
+}
+
+/**
+ * 单折 WF/OOS 实证明细（后端 `folds[*]`）。
+ *
+ * 选股场景无生产模型，`production_*` 系列恒为 null（前端据此隐藏生产对照列）。
+ */
+export interface ScreeningFold {
+  /** 折序号（从 0 开始） */
+  fold: number
+  /** 训练窗口（ISO 日期串） */
+  train: { start: string; end: string }
+  /** 测试窗口（OOS，ISO 日期串） */
+  test: { start: string; end: string }
+  /** 第 0 种子的代表模型名 */
+  candidate_model: string
+  /** 该折全部种子的模型名 */
+  candidate_models: string[]
+  /** 第 0 种子的完整回测统计（口径同 engine.calculate_statistics，可直喂 BacktestResults） */
+  candidate_statistics: BacktestStatistics
+  /** 逐种子的完整回测统计 */
+  candidate_seed_statistics: BacktestStatistics[]
+  /** 逐种子的核心分 */
+  candidate_seed_scores: number[]
+  /** 跨种子均值核心分（晋级真正消费值，= cross_seed.mean） */
+  candidate_score: number
+  /** 跨种子离散度 */
+  cross_seed: ScreeningCrossSeed
+  /** 生产模型名；选股场景为 null */
+  production_model: string | null
+  /** 生产模型回测统计；选股场景为 null */
+  production_statistics: BacktestStatistics | null
+  /** 生产模型核心分；选股场景为 null */
+  production_score: number | null
+  /** candidate_score - production_score；选股场景为 null */
+  score_delta: number | null
+}
+
+/**
+ * WF 报告汇总（后端 `summary`）。
+ *
+ * 注意：`passed`/`reasons` 是**相对生产门禁**结论（无生产模型时恒 false），
+ * 与绝对 edge 无关；前端应以 `Tier2Verdict.edge_ok` 为权威，`reasons` 仅作参考弱化展示。
+ */
+export interface ScreeningWfSummary {
+  /** 折数 */
+  fold_count: number
+  /** 候选跑赢生产的折数（选股场景无生产模型，恒 0） */
+  candidate_win_count: number
+  /** 候选胜率（选股场景恒 0） */
+  candidate_win_rate: number
+  /** 平均分差（选股场景为 null） */
+  avg_score_delta: number | null
+  /** 种子数 */
+  n_seeds: number
+  /** 跨种子标准差的折间均值；无多种子时为 null */
+  avg_cross_seed_std: number | null
+  /** 相对生产门禁是否通过（无生产模型恒 false，与绝对 edge 无关） */
+  passed: boolean
+  /** 相对门禁的原因列表 */
+  reasons: string[]
+}
+
+/**
+ * 一份完整的 Tier-2 WF/OOS 评估报告（后端 `run_walk_forward_evaluate` 的返回结构）。
+ *
+ * 经 `screeningService.getScreeningReport(report_id)` 从隔离 store 回读。
+ */
+export interface ScreeningWfReport {
+  /** 报告 ID（形如 `wf_YYYYMMDDHHMMSS_xxxxxx`） */
+  report_id: string
+  /** 报告类型，恒 "walk_forward" */
+  type: string
+  /** 报告名称 */
+  name: string
+  /** 生成时间（ISO 串） */
+  created_at: string
+  /** 请求回显（CNNWalkForwardRequest.model_dump），用于审计与复现 */
+  request: Record<string, unknown>
+  /** 生产模型名；选股场景为 null */
+  production_model: string | null
+  /** 逐折明细 */
+  folds: ScreeningFold[]
+  /** 汇总 */
+  summary: ScreeningWfSummary
 }
