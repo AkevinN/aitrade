@@ -204,7 +204,7 @@ class CNNBacktestRequest(BaseModel):
     hold_days: int = Field(default=1, ge=1, le=60, description="fixed_hold/oco 的固定/最大持有交易日数（auto 模式下由 label 覆盖）")
     take_profit: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止盈幅度（0.02=+2%），0=不启用")
     stop_loss: float = Field(default=0.0, ge=0, lt=1.0, description="oco 止损幅度（0.03=-3%），0=不启用")
-    t_plus1: bool = Field(default=False, description="是否启用 T+1 卖出限制（当日买入不可当日卖出）")
+    t_plus1: bool = Field(default=True, description="是否启用 T+1 卖出限制（当日买入不可当日卖出）；默认开启，贴近 A 股现实")
     veto_threshold: float = Field(
         default=1.0,
         gt=0.0,

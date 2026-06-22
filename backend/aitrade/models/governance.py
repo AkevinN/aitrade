@@ -75,7 +75,7 @@ class CNNBacktestParams(BaseModel):
     hold_days: int = Field(default=1, ge=1, le=60)
     take_profit: float = Field(default=0.0, ge=0, lt=1)
     stop_loss: float = Field(default=0.0, ge=0, lt=1)
-    t_plus1: bool = False
+    t_plus1: bool = Field(default=True, description="是否启用 T+1 卖出限制；默认开启，贴近 A 股现实")
     veto_threshold: float = Field(
         default=1.0,
         gt=0.0,

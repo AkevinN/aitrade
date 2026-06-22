@@ -22,6 +22,7 @@ from .strategy import BaseStrategy
 from .pnl import PortfolioDailyResult
 from .oco import check_oco_trigger
 from .instrument import infer_limit_ratio, infer_t_plus1
+from .t1 import is_t1_locked
 
 logger = logging.getLogger(__name__)
 
@@ -646,13 +647,12 @@ class BacktestingEngine:
             return bar.close_price
         return bar.open_price
 
-    def _t_plus1_locked(self, vt_symbol: str) -> bool:
-        """判断当前标的是否受 T+1 卖出限制（当根 bar 不可卖出）。
+    def is_t1_locked(self, vt_symbol: str) -> bool:
+        """公开的 T+1 锁定查询：当根 bar 该标的是否因当日买入而不可卖出。
 
-        同时满足以下三个条件才返回 True：
-        1. 全局 self.t_plus1 开关为 True；
-        2. 该标的不在 self.t_plus1_exempt 豁免集合中；
-        3. 今日（self.datetime.date()）已有该标的的买入记录。
+        供策略层（如 :class:`CNNSignalStrategy` 的出场预检）复用同一事实源，
+        避免各路径自造 T+1 判断导致豁免口径漂移。判定委托给
+        :func:`aitrade.backtest.t1.is_t1_locked`。
 
         Args:
             vt_symbol: 待判定的合约代码，如 ``"000001.SZSE"``。
@@ -660,11 +660,18 @@ class BacktestingEngine:
         Returns:
             True 表示当日买入不可当日卖出；False 表示允许卖出。
         """
-        if not self.t_plus1 or vt_symbol in self.t_plus1_exempt:
-            return False
-        if self.datetime is None:
-            return False
-        return self.buy_dates.get(vt_symbol) == self.datetime.date()
+        today = self.datetime.date() if self.datetime is not None else None
+        return is_t1_locked(
+            vt_symbol,
+            self.buy_dates,
+            today,
+            enabled=self.t_plus1,
+            exempt=self.t_plus1_exempt,
+        )
+
+    def _t_plus1_locked(self, vt_symbol: str) -> bool:
+        """内部别名，保留原撮合路径调用点；等价于 :meth:`is_t1_locked`。"""
+        return self.is_t1_locked(vt_symbol)
 
     def cross_order(self) -> None:
         """对活跃订单执行撮合，先处理 OCO 括号单，再处理普通限价单。

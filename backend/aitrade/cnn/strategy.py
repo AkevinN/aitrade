@@ -270,9 +270,10 @@ class CNNSignalStrategy(BaseStrategy):
                 self._hold_count += 1
                 self._last_count_dt = today
 
-            # T+1：当日买入不可当日卖出
-            bought_today = self._entry_fill_dt == today
-            can_sell = not (getattr(engine, "t_plus1", False) and bought_today)
+            # T+1：当日买入不可当日卖出。复用引擎的单一事实源谓词（含 t_plus1_exempt
+            # 豁免集），取代此前策略层自算 bought_today 的第二份实现——避免豁免口径漂移
+            # （旧实现不认豁免集，会对可转债等 T+0 品种当日建仓过度拦截）。
+            can_sell = not engine.is_t1_locked(vt_symbol)
 
             tp_price = self._entry_price * (1 + self.take_profit)
             sl_price = self._entry_price * (1 - self.stop_loss)

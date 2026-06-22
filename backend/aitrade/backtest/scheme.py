@@ -30,7 +30,7 @@ class CostConfig(BaseModel):
     commission_rate: float = Field(default=0.0003, description="单边佣金率")
     stamp_duty: float = Field(default=0.0005, description="卖出印花税率")
     slippage: float = Field(default=0.0005, description="每笔不利滑点率")
-    t_plus1: bool = Field(default=False, description="T+1 卖出限制")
+    t_plus1: bool = Field(default=True, description="T+1 卖出限制；默认开启，贴近 A 股现实")
 
 
 class PredictorConfig(BaseModel):
