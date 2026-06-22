@@ -6,7 +6,7 @@
  * 前端仅消费，不做写入，因此所有字段均为只读语义。
  */
 
-import type { BacktestStatistics, LabelSpec } from './alpha'
+import type { BacktestEquityRow, BacktestStatistics, BacktestTrade, LabelSpec } from './alpha'
 
 /** CNN 适配度评分维度的置信度等级（由后端 ConfidenceLevel 字面量对齐）。 */
 export type ConfidenceLevel = 'insufficient' | 'low' | 'medium' | 'high'
@@ -227,6 +227,17 @@ export interface ScreeningFold {
   candidate_models: string[]
   /** 第 0 种子的完整回测统计（口径同 engine.calculate_statistics，可直喂 BacktestResults） */
   candidate_statistics: BacktestStatistics
+  /**
+   * 第 0 种子（代表）的折级 OOS 逐日净值/回撤曲线。
+   * 后端只保留代表种子以控报告体积；早退/异常折为 []。结构同 BacktestEquityRow，
+   * 可经 toEquityPoints 直喂 EquityCurveChart。不含基准列（fold 回测不叠加基准）。
+   */
+  candidate_equity_curve: BacktestEquityRow[]
+  /**
+   * 第 0 种子（代表）的折级成交流水（价/量/方向/开平，无单笔 PnL）。
+   * 经 toTradeMarkers 可在 K 线上标买卖点。
+   */
+  candidate_trades: BacktestTrade[]
   /** 逐种子的完整回测统计 */
   candidate_seed_statistics: BacktestStatistics[]
   /** 逐种子的核心分 */

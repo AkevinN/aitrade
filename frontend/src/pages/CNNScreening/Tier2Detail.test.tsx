@@ -24,6 +24,14 @@ vi.mock('../../api/screening', () => ({
   },
 }))
 
+// ── mock alphaService.getBarDataDetail（抽屉里 BacktestCharts 拉 K 线 OHLC）──────
+// 返回空 preview → K 线图渲染空态、不触网，保持确定性。
+vi.mock('../../api/alpha', () => ({
+  alphaService: {
+    getBarDataDetail: vi.fn().mockResolvedValue({ preview: [] }),
+  },
+}))
+
 import GateVerdictHeader from './GateVerdictHeader'
 import FoldTable from './FoldTable'
 import Tier2DetailDrawer from './Tier2DetailDrawer'
@@ -58,6 +66,8 @@ function mkFold(
     candidate_model: `m${i}`,
     candidate_models: [`m${i}`],
     candidate_statistics: { total_return: 5, sharpe_ratio: 1, ...stats } as BacktestStatistics,
+    candidate_equity_curve: [],
+    candidate_trades: [],
     candidate_seed_statistics: [{ total_return: 5 } as BacktestStatistics],
     candidate_seed_scores: [0.5],
     candidate_score: 0.5,
@@ -209,5 +219,15 @@ describe('Tier2DetailDrawer', () => {
     // 门禁头部仍以 verdict 渲染
     expect(await screen.findByText('✓ edge_ok 通过')).toBeInTheDocument()
     expect(await screen.findByText('报告不存在或加载失败')).toBeInTheDocument()
+  })
+
+  it('渲染折级净值曲线卡 + K线买卖点卡 + 成交明细（第三波）', async () => {
+    mockGetReport.mockResolvedValueOnce(mkReport([mkFold(0, { start_date: '2024-06-02' })]))
+    renderDrawer(mkVerdict())
+    // BacktestCharts 复用：净值/回撤曲线卡 + K线买卖点卡
+    expect(await screen.findByText('净值 / 回撤曲线')).toBeInTheDocument()
+    expect(screen.getByText('K 线与买卖点')).toBeInTheDocument()
+    // 折级成交明细折叠面板
+    expect(screen.getByText(/成交明细/)).toBeInTheDocument()
   })
 })

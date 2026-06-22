@@ -44,6 +44,8 @@ const mockGetDataResources = vi.fn()
 vi.mock('../../api/alpha', () => ({
   alphaService: {
     getDataResources: () => mockGetDataResources(),
+    // Tier-2 详情抽屉里 BacktestCharts 会拉 K 线 OHLC；返回空 preview 保持离线确定性。
+    getBarDataDetail: vi.fn().mockResolvedValue({ preview: [] }),
   },
 }))
 
