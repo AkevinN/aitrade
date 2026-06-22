@@ -115,6 +115,12 @@ class ScreeningRules(BaseModel):
     # Tier-2 入围标的数上限保护：实际入围数超过此值时按 fitness_score 截断并 log（Requirement 4.5）
     tier2_cap: int = Field(default=30, ge=1)
 
+    # Tier-2 按标的进程并行度：0=auto（取 min(cpu_count, 任务数)）。解析值 <=1 或任务数
+    # <=1 时走串行（等价改造前）。各标的 WF 评估完全独立、结果按 symbol 键装配，与执行
+    # 顺序无关；用进程而非线程是因为 torch.manual_seed 为进程级全局 RNG，只有进程隔离
+    # 才能保持各标的训练确定性不互相污染。详见 cnn-screening-tier2-speedup spec。
+    tier2_max_workers: int = Field(default=0, ge=0)
+
 
 # ---------------------------------------------------------------------------
 # 内置默认规则（Requirement 12.2）：未自定义时开箱即用。
@@ -139,4 +145,5 @@ DEFAULT_SCREENING_RULES = ScreeningRules(
     step_days=90,
     eval_window_days=900,
     tier2_cap=30,
+    tier2_max_workers=0,  # 0=auto（min(cpu_count, 任务数)）
 )

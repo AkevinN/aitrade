@@ -80,6 +80,9 @@ class CNNScreeningRequest(BaseModel):
     fold_test_days: Optional[int] = Field(default=None, ge=7)
     # 每折训练随机种子数：覆盖 ScreeningRules.n_seeds；None = 用规则默认（1）。
     n_seeds: Optional[int] = Field(default=None, ge=1, le=10)
+    # Tier-2 按标的进程并行度：覆盖 ScreeningRules.tier2_max_workers；None = 用规则默认
+    # （0=auto）。设为 1 可强制串行（等价改造前）；并行不改变任何结果，仅吃满多核提速。
+    tier2_max_workers: Optional[int] = Field(default=None, ge=1)
 
     # ---- 持久化 ----
     # 是否将 ScreeningResult 写入 SCREENING_PATH；False 时只在内存返回（Requirement 6.3）

@@ -9,6 +9,7 @@ checkpoint 与训练历史。配套若干评估指标工具函数（AUC、IC/Ran
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from datetime import date
@@ -403,6 +404,43 @@ def _selection_score(epoch_row: dict[str, Any], objective: str) -> float:
     return float(excess) if excess is not None else 0.0
 
 
+def _cpu_single_thread(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """装饰器：仅 CPU 时让被装饰函数在执行期间把 torch intra-op 线程钳为 1。
+
+    torch 默认对本项目这种小卷积开多线程反而过度订阅（实测比单线程慢约 1.6-2x）。
+    CPU 单线程既加速单次训练，又是「Tier-2 按标的进程并行」的前提——每个 worker
+    进程只占 1 个训练线程，N 个进程才能干净地吃满 N 核而不互相抢线程。
+
+    线程数不改变训练数值：同 seed 在线程数=1 与默认线程数下训练出的权重逐位一致
+    （由 tests/test_cnn_seed.py 守护）。CUDA 机零干预（GPU 不受 intra-op 线程影响）。
+    用 try/finally 覆盖所有 return/异常路径还原原值，避免把线程设置泄漏给推理/回测
+    等同进程内后续的 torch 使用方。
+
+    Args:
+        fn: 被装饰的函数（train_cnn_model）。
+
+    Returns:
+        包装后的函数；签名与返回值与 fn 完全一致。
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        import torch
+
+        limited = not torch.cuda.is_available()
+        prev = torch.get_num_threads() if limited else None
+        if limited:
+            torch.set_num_threads(1)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if limited and prev is not None:
+                torch.set_num_threads(prev)
+
+    return wrapper
+
+
+@_cpu_single_thread
 def train_cnn_model(
     name: str,
     vt_symbols: list[str],

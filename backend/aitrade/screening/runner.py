@@ -31,6 +31,7 @@ CNN 选股编排器（runner.py）。
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -197,6 +198,130 @@ class Tier2Window:
     epochs: int
     local_start: date
     local_end: date
+
+
+def _evaluate_tier2_symbol(
+    vt_symbol: str, wf_req: CNNWalkForwardRequest, rules: ScreeningRules
+) -> Tier2Verdict:
+    """在（可能的）worker 进程内评估单只标的的 Tier-2 WF/OOS 并派生 edge 结论。
+
+    本函数是模块级、入参均为 Pydantic（可 pickle），故既能被 ``ProcessPoolExecutor``
+    跨进程调度，也能在串行回退时直接 inline 调用。不需要 ``lab``——
+    ``run_walk_forward_evaluate`` 内部自建 ``AlphaLab``；隔离治理 store 在此就地 build
+    （轻量、仅路径，多进程并发写 ``SCREENING_GOVERNANCE_PATH`` 安全：report 按唯一
+    id 命名互不覆盖、history.jsonl 为小行原子追加）。异常降级为失败 verdict，与串行
+    版的 except 分支同口径同文案（"Tier-2 失败: ..."），保证单只失败不影响其余标的。
+
+    Args:
+        vt_symbol: 入围标的代码（仅用于失败 verdict 标注与日志）。
+        wf_req: 父进程已构造好的 WF/OOS 评估请求（含目标标的、窗口、objective、
+            label_spec、种子数等，与串行版逐字段相同）。
+        rules: 选股规则，供 ``derive_edge`` 读取绝对 edge 门禁阈值。
+
+    Returns:
+        ``Tier2Verdict``：成功为 ``derive_edge`` 的派生结论；异常为
+        ``evaluable=False`` 且 ``note`` 以 "Tier-2 失败: " 开头的失败结论。
+    """
+    try:
+        gov_store = build_screening_governance_store()
+        report = run_walk_forward_evaluate(wf_req, on_progress=None, store=gov_store)
+        return derive_edge(report, rules)
+    except Exception as exc:  # noqa: BLE001 - 单只 Tier-2 失败降级（与串行版一致）
+        logger.warning("Tier-2 评估失败 %s：%s", vt_symbol, exc)
+        return Tier2Verdict(
+            vt_symbol=vt_symbol,
+            evaluable=False,
+            edge_ok=False,
+            note=f"Tier-2 失败: {exc}",
+        )
+
+
+def _make_executor(max_workers: int):
+    """构造 Tier-2 并行用的进程池执行器。
+
+    单独成函数是为了成为可注入测试点：生产用 ``ProcessPoolExecutor``——进程隔离才能
+    保证各标的训练的 torch 全局 RNG（``torch.manual_seed`` 进程级）互不污染、结果与
+    串行逐位一致；测试 monkeypatch 成 ``ThreadPoolExecutor`` 在进程内跑，使 stub/
+    monkeypatch 生效（spawn 出的子进程内 monkeypatch 不生效，无法廉价桩化真实训练）。
+
+    Args:
+        max_workers: 并行工作进程数（由 ``_resolve_tier2_max_workers`` 解析、已夹取）。
+
+    Returns:
+        一个可用作上下文管理器的 Executor。
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    return ProcessPoolExecutor(max_workers=max_workers)
+
+
+def _run_tier2_tasks(
+    tasks: list[tuple[str, CNNWalkForwardRequest]],
+    rules: ScreeningRules,
+    max_workers: int,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Tier2Verdict]:
+    """执行一批 Tier-2 评估任务，返回 ``{vt_symbol: Tier2Verdict}``。
+
+    ``max_workers <= 1`` 或任务数 ``<= 1`` 时串行 inline 执行（等价改造前，且让进程内
+    monkeypatch/stub 生效）；否则用进程池并发。结果按 ``vt_symbol`` 键装配，与 worker
+    完成顺序无关——故并行与串行产出逐字段一致。进程池创建失败或中途中断（
+    ``BrokenProcessPool``）时记录告警并对未完成任务回退串行，不让整批选股失败。
+
+    Args:
+        tasks: ``(vt_symbol, wf_req)`` 列表，均为已过数据充足性预检的标的。
+        rules: 选股规则，透传给 ``_evaluate_tier2_symbol`` 的 ``derive_edge``。
+        max_workers: 并行度；``<= 1`` 走串行。
+        progress: 可选进度回调 ``(done, total)``，每完成一只回调一次。
+
+    Returns:
+        各标的 ``vt_symbol`` 到其 ``Tier2Verdict`` 的字典（含降级失败者）。
+    """
+    results: dict[str, Tier2Verdict] = {}
+    total = len(tasks)
+    if total == 0:
+        return results
+
+    def _serial(done0: int) -> None:
+        """对尚未出结果的任务串行求值（用于纯串行路径与并行回退）。"""
+        done = done0
+        for sym, wf_req in tasks:
+            if sym in results:
+                continue
+            results[sym] = _evaluate_tier2_symbol(sym, wf_req, rules)
+            done += 1
+            if progress:
+                progress(done, total)
+
+    if max_workers <= 1 or total == 1:
+        _serial(0)
+        return results
+
+    from concurrent.futures import as_completed
+    from concurrent.futures.process import BrokenProcessPool
+
+    try:
+        with _make_executor(max_workers) as executor:
+            futures = {
+                executor.submit(_evaluate_tier2_symbol, sym, wf_req, rules): sym
+                for sym, wf_req in tasks
+            }
+            done = 0
+            try:
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    # worker 内部已降级业务异常；result() 抛错仅来自进程基础设施。
+                    results[sym] = fut.result()
+                    done += 1
+                    if progress:
+                        progress(done, total)
+            except BrokenProcessPool as exc:
+                logger.warning("Tier-2 进程池中断，未完成任务回退串行：%s", exc)
+                _serial(done)
+    except Exception as exc:  # noqa: BLE001 - 池创建/调度失败 → 整体回退串行（不丢任务）
+        logger.warning("Tier-2 进程池不可用，回退串行：%s", exc)
+        _serial(len(results))
+    return results
 
 
 class ScreeningRunner:
@@ -384,6 +509,31 @@ class ScreeningRunner:
             "n_seeds": req.n_seeds if req.n_seeds is not None else self.rules.n_seeds,
             "epochs": self.rules.epochs,
         }
+
+    def _resolve_tier2_max_workers(self, req: CNNScreeningRequest, n_tasks: int) -> int:
+        """解析 Tier-2 按标的进程并行度（请求级覆盖优先，0=auto）。
+
+        ``req.tier2_max_workers`` 非 None 时覆盖规则默认；解析到的正值上限夹到任务数
+        （多于任务数的 worker 无意义）；取 0/auto 时用 ``min(cpu_count, 任务数)``。
+        返回 1 表示串行（``_run_tier2_tasks`` 据此走 inline 路径，等价改造前）。
+
+        Args:
+            req: 选股请求，提供可选的 ``tier2_max_workers`` 覆盖。
+            n_tasks: 已过预检、待评估的标的数（并行度不会超过它）。
+
+        Returns:
+            最终并行度（>= 1 的整数）；``n_tasks <= 0`` 时返回 1。
+        """
+        if n_tasks <= 0:
+            return 1
+        raw = (
+            req.tier2_max_workers
+            if req.tier2_max_workers is not None
+            else self.rules.tier2_max_workers
+        )
+        if raw and raw > 0:
+            return min(raw, n_tasks)
+        return min(os.cpu_count() or 1, n_tasks)  # auto
 
     def _resolve_tier2_window(
         self, vt_symbol: str, req: CNNScreeningRequest
@@ -609,22 +759,19 @@ class ScreeningRunner:
         tier2_by_symbol: dict[str, Tier2Verdict] = {}
         eval_window: dict | None = None
         if req.run_tier2 and promoted:
-            gov_store = build_screening_governance_store()
             k = len(promoted)
             eval_starts: list[date] = []
             eval_ends: list[date] = []
-            for j, score in enumerate(promoted, start=1):
+            if on_progress:
+                on_progress(_TIER1_PROGRESS_SHARE * 100, f"Tier-2 预检 {k} 只入围标的...")
+
+            # ---- 阶段 A（父进程，串行）：逐只窗口解析 + 数据充足性预检 ----
+            # 预检只读 self.lab（不可 pickle），故必须留在父进程；未过预检者直接产出
+            # skip/失败 verdict 入榜，过预检者构造 wf_req 入并行队列。eval_starts/ends
+            # 在此按"过预检"集合收集（与改造前同一集合同一时机——含随后 WF 失败者）。
+            tier2_tasks: list[tuple[str, CNNWalkForwardRequest]] = []
+            for score in promoted:
                 vt_symbol = score.vt_symbol
-
-                def _sub_progress(p: float, m: str, _j: int = j, _sym: str = vt_symbol) -> None:
-                    """把单只 WF 的 0~100 子进度映射到 Tier-2 总进度区间。"""
-                    if on_progress is None:
-                        return
-                    base = _TIER1_PROGRESS_SHARE * 100
-                    span = (1.0 - _TIER1_PROGRESS_SHARE) * 100
-                    pct = base + span * ((_j - 1) + p / 100.0) / k
-                    on_progress(pct, f"Tier-2 {_j}/{k}: {_sym} - {m}")
-
                 try:
                     # 解析窗口（含覆盖参数 + 本地数据夹取），预检与评估共用同一真相源。
                     window = self._resolve_tier2_window(vt_symbol, req)
@@ -656,7 +803,7 @@ class ScreeningRunner:
                                 f"无可评估区间，跳过 Tier-2；"
                                 f"请将 as_of 调整到 {_ls_date} 之后，或补充更早历史数据"
                             )
-                        verdict = Tier2Verdict(
+                        tier2_by_symbol[vt_symbol] = Tier2Verdict(
                             vt_symbol=vt_symbol,
                             evaluable=False,
                             edge_ok=False,
@@ -667,7 +814,7 @@ class ScreeningRunner:
                         # 此处为安全冗余，杜绝任何路径输出"本地可用 -N 天"）。
                         available_days = max(0, (window.end - window.start).days)
                         if available_days < needed:
-                            verdict = Tier2Verdict(
+                            tier2_by_symbol[vt_symbol] = Tier2Verdict(
                                 vt_symbol=vt_symbol,
                                 evaluable=False,
                                 edge_ok=False,
@@ -679,27 +826,37 @@ class ScreeningRunner:
                                 ),
                             )
                         else:
-                            # 预检通过：从同一窗口构造 WF 请求并评估。
+                            # 预检通过：从同一窗口构造 WF 请求，投入并行评估队列。
                             wf_req = self._build_wf_request(vt_symbol, req, window)
                             eval_starts.append(wf_req.start)
                             eval_ends.append(wf_req.end)
-                            report = run_walk_forward_evaluate(
-                                wf_req, on_progress=_sub_progress, store=gov_store
-                            )
-                            verdict = derive_edge(report, self.rules)
-                except Exception as exc:  # noqa: BLE001 - 单只 Tier-2 失败降级（R5.4）
-                    logger.warning("Tier-2 评估失败 %s：%s", vt_symbol, exc)
-                    verdict = Tier2Verdict(
+                            tier2_tasks.append((vt_symbol, wf_req))
+                except Exception as exc:  # noqa: BLE001 - 单只预检失败降级（与改造前一致）
+                    logger.warning("Tier-2 预检失败 %s：%s", vt_symbol, exc)
+                    tier2_by_symbol[vt_symbol] = Tier2Verdict(
                         vt_symbol=vt_symbol,
                         evaluable=False,
                         edge_ok=False,
                         note=f"Tier-2 失败: {exc}",
                     )
-                tier2_by_symbol[vt_symbol] = verdict
-                if on_progress:
-                    base = _TIER1_PROGRESS_SHARE * 100
-                    span = (1.0 - _TIER1_PROGRESS_SHARE) * 100
-                    on_progress(base + span * j / k, f"Tier-2 完成 {j}/{k}: {vt_symbol}")
+
+            # ---- 阶段 B（并行/串行）：对过预检标的执行 WF/OOS 评估 ----
+            # 各标的独立、结果按 symbol 键装配（顺序无关）→ 与串行逐位一致。
+            n_tasks = len(tier2_tasks)
+            max_workers = self._resolve_tier2_max_workers(req, n_tasks)
+
+            def _tier2_progress(done: int, total: int) -> None:
+                """把 Tier-2 评估完成数映射到 Tier-2 总进度区间（粗粒度，并行下不可细分）。"""
+                if on_progress is None:
+                    return
+                base = _TIER1_PROGRESS_SHARE * 100
+                span = (1.0 - _TIER1_PROGRESS_SHARE) * 100
+                on_progress(base + span * done / max(1, total), f"Tier-2 完成 {done}/{total}")
+
+            verdicts = _run_tier2_tasks(
+                tier2_tasks, self.rules, max_workers=max_workers, progress=_tier2_progress
+            )
+            tier2_by_symbol.update(verdicts)  # 按 symbol 键装配，与执行顺序无关
 
             if eval_starts and eval_ends:
                 # 评估区间回显：取所有入围标的的最早 start / 最晚 end（仍满足 end<=as_of）。
