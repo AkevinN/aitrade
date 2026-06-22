@@ -776,6 +776,11 @@ def run_walk_forward_evaluate(
         seed_scores: list[float] = []
         seed_models: list[str] = []
         seed_statistics: list[dict[str, Any]] = []
+        # 仅保留第 0 种子（代表）的净值/成交曲线供前端折级详情展示；不保留全部
+        # 折×种子 曲线，把单份报告体积压到 1/n_seeds（体积治理，见
+        # .kiro/specs/cnn-screening-tier2-detail 第三波 G-1）。
+        seed0_equity_curve: list[dict[str, Any]] = []
+        seed0_trades: list[dict[str, Any]] = []
         for seed_index in range(n_seeds):
             model_name = f"{req.name}_wf{idx}_s{seed_index}_{uuid.uuid4().hex[:4]}"
             train_result = _train_governance_model(
@@ -797,6 +802,10 @@ def run_walk_forward_evaluate(
             seed_models.append(actual_model)
             seed_statistics.append(candidate_bt.get("statistics", {}))
             seed_scores.append(_core_score(candidate_bt.get("statistics", {}), req.objective))
+            if seed_index == 0:
+                # 与 candidate_statistics 同源（均取第 0 种子），保持"代表种子"语义一致。
+                seed0_equity_curve = candidate_bt.get("equity_curve", [])
+                seed0_trades = candidate_bt.get("trades", [])
 
         cross_seed = _cross_seed_dispersion(seed_scores)
         candidate_score = cross_seed["mean"]
@@ -830,6 +839,9 @@ def run_walk_forward_evaluate(
             "candidate_model": seed_models[0],
             "candidate_models": seed_models,
             "candidate_statistics": seed_statistics[0],
+            # 第 0 种子（代表）的折级 OOS 净值/回撤曲线与成交流水，供前端详情抽屉画图。
+            "candidate_equity_curve": seed0_equity_curve,
+            "candidate_trades": seed0_trades,
             "candidate_seed_statistics": seed_statistics,
             "candidate_seed_scores": seed_scores,
             "candidate_score": candidate_score,
