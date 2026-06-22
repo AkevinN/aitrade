@@ -127,6 +127,21 @@ class ScreeningStore:
         """
         return sorted(path.stem for path in self.base_path.glob("*.json"))
 
+    def delete(self, run_id: str) -> bool:
+        """删除指定 run_id 的选股产物 JSON（用于"运行历史"级联清理）。
+
+        Args:
+            run_id: 目标选股运行 ID（与 ``save`` 时的 ``result.run_id`` 相同）。
+
+        Returns:
+            True 表示文件存在并已删除；False 表示本不存在（幂等）。
+        """
+        path = self._path(run_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
 
 def build_screening_governance_store() -> CNNGovernanceStore:
     """构造写入 SCREENING_GOVERNANCE_PATH 的隔离治理 store。

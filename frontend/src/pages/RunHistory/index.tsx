@@ -48,8 +48,13 @@ const RunHistory: React.FC = () => {
   // 删除一条运行记录（管理操作）：成功后失效列表查询以刷新。
   const deleteMutation = useMutation({
     mutationFn: (taskId: string) => alphaService.deleteTask(taskId),
-    onSuccess: () => {
-      message.success('已删除该运行记录')
+    onSuccess: (data) => {
+      const p = data.purged
+      const extra =
+        p && (p.reports || p.models || p.result_files)
+          ? `（连带清理 ${p.reports || 0} 份报告、${p.models || 0} 个临时模型）`
+          : ''
+      message.success(`已删除该运行${extra}`)
       queryClient.invalidateQueries({ queryKey: ['runHistory'] })
     },
     onError: (err: unknown) => {
@@ -99,8 +104,8 @@ const RunHistory: React.FC = () => {
           <Space size={8} onClick={(e) => e.stopPropagation()}>
             <a onClick={() => setSelected(t)}>查看</a>
             <Popconfirm
-              title="删除该运行记录？"
-              description="仅从历史中移除这条记录，不可恢复（不影响其它运行）。"
+              title="删除该运行及其产物？"
+              description="连同该运行的 WF 报告、临时模型等关联产物一并清理以释放磁盘，不可恢复。"
               okText="删除"
               okButtonProps={{ danger: true, loading: deleteMutation.isPending }}
               cancelText="取消"

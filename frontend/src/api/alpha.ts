@@ -97,14 +97,21 @@ export const alphaService = {
     api.get<Task>(`/api/alpha/tasks/${taskId}`).then((r) => r.data),
 
   /**
-   * 删除一条运行记录（"运行历史"管理删除），从内存与磁盘归档同时移除。
+   * 删除一条运行记录及其关联产物（"运行历史"管理删除）。
+   *
+   * 选股运行会级联清理其 Tier-2 WF 报告、临时候选模型、落盘 ScreeningResult，避免堆积占盘；
+   * `purged` 返回各类产物的删除计数。
    *
    * @param taskId - 待删除的任务 ID
-   * @returns `{ success, task_id }`
+   * @returns `{ success, task_id, purged: { reports, models, result_files } }`
    * @throws 运行中/排队中任务返回 409；不存在返回 404（由全局拦截器透传）
    */
   deleteTask: (taskId: string) =>
-    api.delete<{ success: boolean; task_id: string }>(`/api/alpha/tasks/${taskId}`).then((r) => r.data),
+    api
+      .delete<{ success: boolean; task_id: string; purged?: Record<string, number> }>(
+        `/api/alpha/tasks/${taskId}`,
+      )
+      .then((r) => r.data),
 
   // Datasets
   /**

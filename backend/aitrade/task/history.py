@@ -116,6 +116,30 @@ class TaskHistoryStore:
 
         return [_strip_internal(r) for r in results]
 
+    def find_by_task_id(self, task_id: str, *, days_back: int = 365) -> dict[str, Any] | None:
+        """在归档窗口内查找指定 task 的记录（含 result），找不到返回 None。
+
+        用于删除前读取该运行的 ``result`` 以做产物级联清理（内存里已无该任务时）。
+
+        Args:
+            task_id: 目标任务 ID。
+            days_back: 回看窗口天数（含今天），默认 365。
+
+        Returns:
+            该任务的归档记录（已剥离 ``_``/``ts`` 内部字段，含 ``type``/``result`` 等）；
+            未找到返回 None。
+        """
+        from datetime import timedelta
+
+        today = date.today()
+        records = self._store.read_range(
+            today - timedelta(days=max(1, days_back) - 1), today, reverse=True
+        )
+        for r in records:
+            if r.get("task_id") == task_id:
+                return {k: v for k, v in r.items() if not k.startswith("_") and k != "ts"}
+        return None
+
     def delete_by_task_id(self, task_id: str, *, days_back: int = 365) -> bool:
         """从最近 ``days_back`` 天的归档中删除指定 task_id 的记录（"运行历史"管理删除用）。
 

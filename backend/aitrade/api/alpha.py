@@ -320,37 +320,53 @@ async def get_task(task_id: str) -> dict:
 
 @router.delete("/tasks/{task_id}")
 async def delete_task(request: Request, task_id: str) -> dict:
-    """删除一条运行记录（"运行历史"管理删除），从内存与磁盘归档同时移除。
+    """删除一条运行记录及其全部关联产物（"运行历史"管理删除），避免产物堆积占盘。
 
-    DELETE /api/alpha/tasks/{task_id}。纯管理操作：只删任务记录本身，不触碰任何关联产物
-    （如 ScreeningStore / 治理 WF 报告等生产敏感产物——v1 不联动清理，避免误删）。
-    运行中/排队中的任务不可删，须等其到达终态。
+    DELETE /api/alpha/tasks/{task_id}。除删任务记录（内存 + 磁盘归档）外，**级联清理**该运行
+    的隔离产物：选股运行会清掉其 Tier-2 WF 报告、报告里的临时候选模型（.pt + _history.json）
+    以及落盘的 ScreeningResult。回测运行的产物都内联在 task.result 里，随记录一并消失，无额外
+    清理。**绝不触碰生产治理产物**（CNN_GOVERNANCE_PATH）。运行中/排队中的任务不可删。
 
     Args:
         request: FastAPI 请求对象，用于取 app.state.history_store；缺失时回退 task_manager 内置 store。
         task_id: 待删除的任务 ID。
 
     Returns:
-        ``{"success": True, "task_id": task_id}``。
+        ``{"success": True, "task_id": task_id, "purged": {...}}``，purged 为各类产物删除计数。
 
     Raises:
         HTTPException: 任务处于 running/pending 时抛 409；内存与历史均无此任务时抛 404。
     """
-    task = task_manager.get_task(task_id)
-    if task is not None and task.status.value in {"running", "pending"}:
-        raise HTTPException(409, "运行中或排队中的任务不可删除，请等待其结束后再删")
-
-    removed_mem = task_manager.delete_task(task_id)
-
     hist_store = getattr(getattr(request, "app", None), "state", None)
     hist_store = getattr(hist_store, "history_store", None)
     if hist_store is None:
         hist_store = task_manager._history_store
+
+    # 取该运行的 type/result（内存优先，否则从归档读），用于级联清理产物。
+    task = task_manager.get_task(task_id)
+    if task is not None and task.status.value in {"running", "pending"}:
+        raise HTTPException(409, "运行中或排队中的任务不可删除，请等待其结束后再删")
+
+    task_type: str | None = task.type.value if task is not None else None
+    result: Any = task.result if task is not None else None
+    if result is None:
+        record = hist_store.find_by_task_id(task_id)
+        if record is not None:
+            task_type = record.get("type")
+            result = record.get("result")
+
+    # 级联清理隔离产物（仅选股有独立落盘产物；回测产物随 task.result 一并消失）。
+    purged: dict[str, int] = {}
+    if task_type == "cnn_screening" and isinstance(result, dict):
+        from ..screening.cleanup import purge_screening_run
+        purged = purge_screening_run(result)
+
+    removed_mem = task_manager.delete_task(task_id)
     removed_hist = hist_store.delete_by_task_id(task_id)
 
     if not removed_mem and not removed_hist:
         raise HTTPException(404, f"任务 {task_id} 不存在")
-    return {"success": True, "task_id": task_id}
+    return {"success": True, "task_id": task_id, "purged": purged}
 
 
 # =============================================================================

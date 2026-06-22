@@ -273,6 +273,24 @@ class CNNGovernanceStore:
             return None
         return _read_json(path, {})
 
+    def delete_report(self, report_id: str) -> bool:
+        """删除指定 WF/OOS 评估报告文件（用于"运行历史"级联清理）。
+
+        仅删除 ``reports/{report_id}.json`` 文件本身。对**隔离的**选股治理 store
+        （``SCREENING_GOVERNANCE_PATH``）调用是安全的；绝不应用于清理生产治理产物。
+
+        Args:
+            report_id: 报告 ID，对应 ``reports/{report_id}.json``。
+
+        Returns:
+            True 表示文件存在并已删除；False 表示本不存在（幂等）。
+        """
+        path = self.report_path(report_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def save_replay_report(self, report: dict[str, Any]) -> dict[str, Any]:
         """持久化治理回放报告。
 

@@ -68,7 +68,7 @@ const ALL = [backtestTask, screeningTask, failedTask]
 beforeEach(() => {
   mockListTasks.mockReset()
   mockDeleteTask.mockReset()
-  mockDeleteTask.mockResolvedValue({ success: true, task_id: 'bt1' })
+  mockDeleteTask.mockResolvedValue({ success: true, task_id: 'bt1', purged: { reports: 0, models: 0, result_files: 0 } })
   mockListTasks.mockImplementation((params: { taskType?: string | string[] } | undefined) => {
     const t = params?.taskType
     const set = new Set<string>(Array.isArray(t) ? t : t ? [t] : [])
