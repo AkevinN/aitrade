@@ -39,6 +39,27 @@ vi.mock('../../api/cnn', () => ({
   },
 }))
 
+// ── mock alphaService（候选标的多选的数据源）─────────────────────────────────
+const mockGetDataResources = vi.fn()
+vi.mock('../../api/alpha', () => ({
+  alphaService: {
+    getDataResources: () => mockGetDataResources(),
+  },
+}))
+
+/** 合成本地数据资源：两只日线标的 + 一只仅 30m 标的，用于验证按周期过滤。 */
+const dataResourcesFixture = {
+  raw_bars: [
+    { key: 'd__600519.SSE', kind: 'raw_bar', vt_symbol: '600519.SSE', interval: 'd', row_count: 5000, start: '2015-01-01', end: '2025-06-20', file_size_kb: 100 },
+    { key: 'd__000001.SZSE', kind: 'raw_bar', vt_symbol: '000001.SZSE', interval: 'd', row_count: 4000, start: '2016-01-01', end: '2025-06-20', file_size_kb: 90 },
+    { key: '30m__300750.SZSE', kind: 'raw_bar', vt_symbol: '300750.SZSE', interval: '30m', row_count: 8000, start: '2019-01-01', end: '2025-06-20', file_size_kb: 200 },
+  ],
+  raw_ticks: [],
+  derived_bars: [],
+  raw_bar_intervals: ['d', '30m'],
+  derived_intervals: [],
+}
+
 // ── mock useTask ─────────────────────────────────────────────────────────────
 // 用 vi.fn() 持有引用，以便在各测试中动态切换返回值。
 const mockUseTask = vi.fn<(taskId: string | null) => Partial<UseQueryResult<Task>>>()
@@ -209,6 +230,8 @@ describe('CNNScreening 页面', () => {
   beforeEach(() => {
     mockRunScreening.mockReset()
     mockNavigate.mockReset()
+    mockGetDataResources.mockReset()
+    mockGetDataResources.mockResolvedValue(dataResourcesFixture)
     // 默认无进行中任务
     mockUseTask.mockReturnValue(idleTask())
   })
@@ -680,5 +703,71 @@ describe('CNNScreening 页面', () => {
     // 必填校验拦截 → 字段错误提示出现，且不发起请求（Requirement 4.4）
     expect(await screen.findByText('请填写止盈幅度')).toBeInTheDocument()
     expect(mockRunScreening).not.toHaveBeenCalled()
+  })
+
+  // ── 19~21. 候选池/排除清单：基于本地数据的多选（按周期联动）─────────────────
+
+  /** 打开/收起某个 Antd Select（按表单字段 id 定位其 .ant-select-selector）。 */
+  async function toggleSelect(user: ReturnType<typeof userEvent.setup>, fieldId: string) {
+    const input = document.getElementById(fieldId)
+    const selector = input?.closest('.ant-select')?.querySelector('.ant-select-selector')
+    await user.click(selector as HTMLElement)
+  }
+
+  it('显式候选池为多选，选项来自本地数据并按当前 K 线周期过滤', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    // 默认周期 d → 打开候选池下拉，应列出 d 标的，不列出仅 30m 的标的
+    // 用 getByTitle 精确命中下拉项（Antd 在 .ant-select-item-option 上设 title=vt_symbol）
+    await toggleSelect(user, 'include_symbols')
+
+    expect(await screen.findByTitle('600519.SSE')).toBeInTheDocument()
+    expect(screen.getByTitle('000001.SZSE')).toBeInTheDocument()
+    expect(screen.queryByTitle('300750.SZSE')).not.toBeInTheDocument()
+  })
+
+  it('选中候选标的后提交，runScreening 收到 include_symbols 数组（不再是文本）', async () => {
+    mockRunScreening.mockResolvedValueOnce({ task_id: 'tid-sym', name: 'sym' })
+    const user = userEvent.setup()
+    renderPage()
+
+    await toggleSelect(user, 'include_symbols')
+    await user.click(await screen.findByTitle('600519.SSE'))
+
+    const nameInput = screen.getByPlaceholderText('cnn_screen_YYYYMMDD')
+    await user.clear(nameInput)
+    await user.type(nameInput, 'sym_screen')
+    await user.click(screen.getByRole('button', { name: /启动选股/ }))
+
+    await waitFor(() => expect(mockRunScreening).toHaveBeenCalledTimes(1))
+    const req = mockRunScreening.mock.calls[0][0]
+    expect(req.include_symbols).toEqual(['600519.SSE'])
+    expect(req.exclude_symbols).toEqual([])
+  })
+
+  it('切换 K 线周期后候选项联动变化（30m 周期只列该周期下有数据的标的）', async () => {
+    const user = userEvent.setup()
+    renderPage()
+
+    // 等候选项就绪（确认数据已加载），再收起下拉
+    await toggleSelect(user, 'include_symbols')
+    await screen.findByTitle('600519.SSE')
+    await toggleSelect(user, 'include_symbols')
+
+    // 把 K 线周期从 d 切到 30m（用 selection-item 精确定位，避免与下拉同名冲突）
+    const intervalItem = document.querySelector(
+      '.ant-select-selection-item[title="d"]',
+    ) as HTMLElement
+    await user.click(intervalItem)
+    const opt30m = Array.from(
+      document.querySelectorAll('.ant-select-item-option-content'),
+    ).find((el) => el.textContent === '30m') as HTMLElement
+    await user.click(opt30m)
+
+    // 重新打开候选池 → 只剩 30m 标的，d 标的消失
+    await toggleSelect(user, 'include_symbols')
+    expect(await screen.findByTitle('300750.SZSE')).toBeInTheDocument()
+    expect(screen.queryByTitle('600519.SSE')).not.toBeInTheDocument()
   })
 })

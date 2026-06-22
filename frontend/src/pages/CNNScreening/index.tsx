@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -19,11 +19,14 @@ import {
   Typography,
   message,
 } from 'antd'
-import { FilterOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import { DatabaseOutlined, FilterOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 
+import { alphaService } from '../../api/alpha'
 import { cnnService } from '../../api/cnn'
+import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import { useTask } from '../../hooks/useTask'
 import type { CNNScreeningRequest, LeaderboardRow, ScreeningResult } from '../../types/screening'
 import { metricMeta } from '../../utils/screening'
@@ -152,14 +155,6 @@ const CNNScreening: React.FC = () => {
 
       setSubmitting(true)
 
-      const parseSymbolList = (raw?: string): string[] => {
-        if (!raw) return []
-        return raw
-          .split(/[\n,]+/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-      }
-
       const req: CNNScreeningRequest = {
         name: values.name,
         interval: values.interval,
@@ -167,8 +162,9 @@ const CNNScreening: React.FC = () => {
         lookback_days: values.lookback_days,
         exchange: values.exchange || null,
         min_bar_count: values.min_bar_count,
-        include_symbols: parseSymbolList(values.include_symbols),
-        exclude_symbols: parseSymbolList(values.exclude_symbols),
+        // 多选下拉直接产出 string[]（来自本地已有数据），无需再做文本分割
+        include_symbols: values.include_symbols || [],
+        exclude_symbols: values.exclude_symbols || [],
         top_k: values.top_k,
         run_tier2: values.run_tier2 ?? true,
         objective: values.objective,
@@ -427,6 +423,69 @@ function calcHistoryHint(
 }
 
 /**
+ * 候选标的多选下拉：从本地已有数据派生的选项中多选（可搜索、显示数据区间）。
+ *
+ * 作为 Antd Form.Item 的受控子组件，`value`/`onChange` 由表单注入并直接产出 string[]
+ * （vt_symbol 列表），无需再做文本分割。下拉项右侧展示该标的在当前 K 线周期下的本地
+ * 数据日期区间，便于判断历史是否充足。
+ */
+interface SymbolMultiSelectProps {
+  /** 候选项（已按当前 K 线周期过滤、按代码升序）；`range` 为该周期下本地数据日期区间文案 */
+  options: { value: string; label: string; range: string }[]
+  /** 当前 K 线周期；未选时下拉给出"请先选择 K 线周期"提示 */
+  interval?: string
+  /** 占位文案（已选周期时显示） */
+  placeholder?: string
+  /** 表单注入：控件 id（用于 label 关联），透传给内部 Select */
+  id?: string
+  /** 表单注入：已选 vt_symbol 列表 */
+  value?: string[]
+  /** 表单注入：选择变化回调 */
+  onChange?: (value: string[]) => void
+}
+
+function SymbolMultiSelect({
+  options,
+  interval,
+  placeholder,
+  id,
+  value,
+  onChange,
+}: SymbolMultiSelectProps) {
+  return (
+    <Select
+      id={id}
+      mode="multiple"
+      showSearch
+      allowClear
+      optionFilterProp="label"
+      maxTagCount="responsive"
+      value={value}
+      onChange={onChange}
+      placeholder={interval ? placeholder : '请先选择 K 线周期'}
+      notFoundContent={interval ? `周期 ${interval} 下暂无本地数据` : '请先选择 K 线周期'}
+      options={options.map((s) => ({ value: s.value, label: s.label }))}
+      optionRender={(option) => {
+        const meta = options.find((s) => s.value === option.value)
+        return (
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Space size={4}>
+              <DatabaseOutlined style={{ color: '#52c41a' }} />
+              <span>{option.label}</span>
+            </Space>
+            {meta ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {meta.range}
+              </Text>
+            ) : null}
+          </Space>
+        )
+      }}
+    />
+  )
+}
+
+/**
  * 选股配置表单：K 线周期、截止日期、回看天数、交易所/数量过滤、
  * 显式候选池与排除清单、漏斗参数（top_k、run_tier2）、Tier-2 目标函数，
  * 以及可折叠的「Tier-2 高级设置」面板（eval_window_days / train_days /
@@ -458,14 +517,36 @@ function ScreeningForm({
   /** 当前任务进度百分比（0-100，来自 Task.progress） */
   taskProgress?: number
 }) {
-  // 监听 run_tier2 开关、目标函数与 Tier-2 高级字段，用于条件渲染和历史需求实时计算
+  // 监听 run_tier2 开关、目标函数、K 线周期与 Tier-2 高级字段，用于条件渲染与候选标的联动
   const runTier2 = Form.useWatch('run_tier2', form)
   const objective = Form.useWatch('objective', form)
+  const interval = Form.useWatch('interval', form)
   const evalWindowDays = Form.useWatch('eval_window_days', form)
   const trainDays = Form.useWatch('train_days', form)
   const foldTestDays = Form.useWatch('fold_test_days', form)
 
   const hint = calcHistoryHint(evalWindowDays, trainDays, foldTestDays)
+
+  // 本地已有数据资源 → 候选标的多选项（按当前 K 线周期联动，只列该周期下有数据的标的）。
+  const { data: resources } = useQuery({
+    queryKey: ['dataResources'],
+    queryFn: () => alphaService.getDataResources(),
+  })
+  const availability = useAvailableSymbols(resources)
+  const symbolOptions = useMemo(() => {
+    const out: { value: string; label: string; range: string }[] = []
+    for (const [sym, meta] of availability) {
+      if (interval && !meta.intervals.has(interval)) continue
+      const r = meta.intervalRanges[interval] ?? { start: meta.start, end: meta.end }
+      out.push({
+        value: sym,
+        label: sym,
+        range: `${r.start.slice(0, 10)} ~ ${r.end.slice(0, 10)}`,
+      })
+    }
+    out.sort((a, b) => a.value.localeCompare(b.value))
+    return out
+  }, [availability, interval])
 
   return (
     <section className="panel">
@@ -479,8 +560,8 @@ function ScreeningForm({
           lookback_days: 250,
           exchange: '',
           min_bar_count: 250,
-          include_symbols: '',
-          exclude_symbols: '',
+          include_symbols: [],
+          exclude_symbols: [],
           top_k: 15,
           run_tier2: true,
           objective: 'classification',
@@ -553,20 +634,25 @@ function ScreeningForm({
         <Form.Item
           label="显式候选池（可选）"
           name="include_symbols"
-          tooltip="非空时以此清单为 universe（忽略交易所过滤）；逗号或换行分隔"
+          tooltip="从本地已有数据中多选（按 K 线周期联动，支持搜索）；非空时以此清单为 universe（忽略交易所过滤）。留空=扫描全部本地数据"
         >
-          <Input.TextArea
-            rows={3}
-            placeholder="600030.SSE&#10;000001.SZSE&#10;…（可留空，留空则扫描全部本地数据）"
+          <SymbolMultiSelect
+            options={symbolOptions}
+            interval={interval}
+            placeholder="选择候选标的（支持搜索；留空=全部本地数据）"
           />
         </Form.Item>
 
         <Form.Item
           label="强制排除清单（可选）"
           name="exclude_symbols"
-          tooltip="从最终 universe 中剔除；逗号或换行分隔"
+          tooltip="从最终 universe 中剔除；从本地已有数据中多选（按 K 线周期联动，支持搜索）"
         >
-          <Input.TextArea rows={2} placeholder="000001.SZSE&#10;…（可留空）" />
+          <SymbolMultiSelect
+            options={symbolOptions}
+            interval={interval}
+            placeholder="选择要排除的标的（支持搜索；可留空）"
+          />
         </Form.Item>
 
         <Row gutter={8}>
