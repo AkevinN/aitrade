@@ -225,6 +225,8 @@ async def list_tasks(
         request:         FastAPI 请求对象，用于从 app.state.history_store 取历史存储；缺失时回退到 task_manager 内置 store。
         status:          按状态过滤（completed/failed/running/pending）；None 表示不过滤。
         task_type:       按任务类型过滤（data_download/model_train 等）；None 表示不过滤。
+                         支持逗号分隔多值（如 "cnn_backtest,backtest_run,cnn_screening"），
+                         返回 type 属于该集合的任务；单值时与改造前逐字节一致。
         include_history: True 时合并归档历史（同 task_id 以内存为准），默认 False。
         limit:           最多返回条数，默认 200。
         history_days:    include_history=True 时回看天数，默认 90，传入值会被夹到 [1, 365]。
@@ -236,11 +238,17 @@ async def list_tasks(
     # 内存任务
     mem_tasks = task_manager.get_all_tasks()
 
+    # task_type 支持逗号分隔多值（如 "cnn_backtest,backtest_run"），用于"运行历史"一次性
+    # 拉取多种回测/选股类型。单值或 None 时行为与改造前逐字节一致（单值 → 单元素集合）。
+    type_set: set[str] | None = None
+    if task_type is not None:
+        type_set = {p.strip() for p in task_type.split(",") if p.strip()} or None
+
     # 过滤内存任务
     if status is not None:
         mem_tasks = [t for t in mem_tasks if t.status.value == status]
-    if task_type is not None:
-        mem_tasks = [t for t in mem_tasks if t.type.value == task_type]
+    if type_set is not None:
+        mem_tasks = [t for t in mem_tasks if t.type.value in type_set]
 
     # 按 updated_at 倒序
     mem_tasks = sorted(mem_tasks, key=lambda t: t.updated_at, reverse=True)
@@ -267,13 +275,18 @@ async def list_tasks(
     from datetime import timedelta
     hist_start = today - timedelta(days=history_days - 1)
 
+    # 恰一个类型时仍走 query 的单类型快路径（与改造前逐字节一致）；多类型时 query 不按
+    # 类型过滤，转为对结果做集合成员过滤，保证内存与历史口径一致。
+    _single_type = next(iter(type_set)) if type_set and len(type_set) == 1 else None
     hist_records = hist_store.query(
         status=status,
-        task_type=task_type,
+        task_type=_single_type,
         start=hist_start,
         end=today,
         limit=None,
     )
+    if type_set is not None and len(type_set) > 1:
+        hist_records = [r for r in hist_records if r.get("type") in type_set]
 
     # 历史中去掉已在内存的 task_id
     extra_hist = [r for r in hist_records if r.get("task_id") not in mem_ids]

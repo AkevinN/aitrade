@@ -40,6 +40,24 @@ import type {
   SymbolProfileResponse,
 } from '../types/alpha'
 
+/**
+ * `listTasks` 的查询参数（全部可选，对齐后端 `GET /api/alpha/tasks`）。
+ *
+ * 不传任何参数时等价于既有无参调用（`/api/alpha/tasks`），向后兼容。
+ */
+export interface ListTasksParams {
+  /** 按状态过滤：completed/failed/running/pending */
+  status?: string
+  /** 按任务类型过滤；可传单个或多个（多个用逗号拼接后传给后端） */
+  taskType?: string | string[]
+  /** 是否合并磁盘历史归档（"运行历史"需为 true） */
+  includeHistory?: boolean
+  /** 最多返回条数 */
+  limit?: number
+  /** include_history 时回看天数（后端夹到 [1,365]） */
+  historyDays?: number
+}
+
 export const alphaService = {
   // Module status
   /**
@@ -56,8 +74,18 @@ export const alphaService = {
    *
    * @returns 任务数组，含状态、进度与时间戳；通常按需自行排序后展示。
    */
-  listTasks: () =>
-    api.get<Task[]>('/api/alpha/tasks').then((r) => r.data),
+  listTasks: (params?: ListTasksParams) => {
+    const q = new URLSearchParams()
+    if (params?.status) q.set('status', params.status)
+    if (params?.taskType) {
+      q.set('task_type', Array.isArray(params.taskType) ? params.taskType.join(',') : params.taskType)
+    }
+    if (params?.includeHistory) q.set('include_history', 'true')
+    if (params?.limit != null) q.set('limit', String(params.limit))
+    if (params?.historyDays != null) q.set('history_days', String(params.historyDays))
+    const qs = q.toString()
+    return api.get<Task[]>(`/api/alpha/tasks${qs ? `?${qs}` : ''}`).then((r) => r.data)
+  },
 
   /**
    * 按任务 ID 查询单个任务的最新状态，常用于轮询进度。

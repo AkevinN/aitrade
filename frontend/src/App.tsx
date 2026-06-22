@@ -13,6 +13,7 @@ import {
   ControlOutlined,
   PieChartOutlined,
   SearchOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons'
 import { useNavigate, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
@@ -26,6 +27,7 @@ import Backtest from './pages/Backtest'
 import Resource from './pages/Resource'
 import TradingConsole from './pages/TradingConsole'
 import Portfolio from './pages/Portfolio'
+import RunHistory from './pages/RunHistory'
 import { useTaskList } from './hooks/useTask'
 
 const { Header, Sider, Content } = Layout
@@ -41,6 +43,7 @@ const menuItems = [
   { key: '/cnn-screening', icon: <SearchOutlined />, label: 'CNN选股' },
   { key: '/signal', icon: <ThunderboltOutlined />, label: '信号分析' },
   { key: '/backtest', icon: <LineChartOutlined />, label: '回测' },
+  { key: '/run-history', icon: <HistoryOutlined />, label: '运行历史' },
   { key: '/trading-console', icon: <FundOutlined />, label: '交易操作台' },
   { key: '/portfolio', icon: <PieChartOutlined />, label: '策略组合' },
   { key: '/resource', icon: <FolderOutlined />, label: '资源管理' },
@@ -255,6 +258,7 @@ const App: React.FC = () => {
         <Route path="/cnn-screening" element={<CNNScreening />} />
         <Route path="/signal" element={<Signal />} />
         <Route path="/backtest" element={<Backtest />} />
+        <Route path="/run-history" element={<RunHistory />} />
         <Route path="/trading-console" element={<TradingConsole />} />
         <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/resource" element={<Resource />} />
