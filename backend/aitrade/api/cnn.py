@@ -302,6 +302,38 @@ async def get_governance_report(report_id: str) -> dict:
     return report
 
 
+@router.get("/screening/reports/{report_id}")
+async def get_screening_report(report_id: str) -> dict:
+    """读取选股 Tier-2 的 walk-forward/OOS 评估报告（隔离 store，只读）。
+
+    按 ``Tier2Verdict.report_id`` 回读 ``SCREENING_GOVERNANCE_PATH`` 下的完整 WF 报告，
+    内含各折逐种子统计、跨种子离散度与门禁 summary，供选股页折级详情抽屉消费。
+
+    与生产 ``CNN_GOVERNANCE_PATH`` 物理隔离：本端点只经
+    ``build_screening_governance_store()`` 读取，绝不复用模块级生产 ``store``，
+    因此一个仅存在于生产 store 的 report_id 在此恒返回 404
+    （Requirement 1.2/5.2，对齐 cnn-stock-screening Requirement 10.2）。
+
+    Args:
+        report_id: WF 报告 ID（形如 ``wf_YYYYMMDDHHMMSS_xxxxxx``），取自路径参数。
+
+    Returns:
+        报告字典，与落盘 JSON 等价（``folds``/``summary``/``request`` 全字段往返）。
+
+    Raises:
+        HTTPException: 隔离 store 中无此 report_id 时返回 404。
+
+    Example:
+        >>> # GET /api/cnn/screening/reports/wf_20250622153012_a1b2c3
+    """
+    from ..screening.store import build_screening_governance_store
+    gov_store = build_screening_governance_store()
+    report = gov_store.get_report(report_id)
+    if report is None:
+        raise HTTPException(404, f"选股报告不存在: {report_id}")
+    return report
+
+
 @router.post("/governance/replay/run")
 async def start_governance_replay(req: CNNGovernanceReplayRequest) -> dict:
     """启动治理回放回测任务，在历史区间对比三条基线策略，异步执行并立即返回 task_id。
