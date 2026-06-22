@@ -649,7 +649,8 @@ describe('CNNScreening 页面', () => {
     await pickObjective(user, '方向分类', '路径形态分类')
     expect(await screen.findByText('止盈幅度 (%)')).toBeInTheDocument()
     expect(screen.getByText('止损幅度 (%)')).toBeInTheDocument()
-    expect(screen.getByText('最大持有 (bar)')).toBeInTheDocument()
+    // 「最大持有」已改用 DayBarField（按天/按 bar 双模），标签去掉了 (bar) 后缀。
+    expect(screen.getByText('最大持有')).toBeInTheDocument()
 
     // 切回「方向分类」→ OCO 子表单隐藏
     await pickObjective(user, '路径形态分类', '方向分类')

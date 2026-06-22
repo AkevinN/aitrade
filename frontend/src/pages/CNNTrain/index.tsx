@@ -38,12 +38,14 @@ import dayjs, { type Dayjs } from 'dayjs'
 import { alphaService } from '../../api/alpha'
 import { cnnService } from '../../api/cnn'
 import DateRangeSelector from '../../components/DateRangeSelector'
+import DayBarField from '../../components/DayBarField'
 import TaskStatusPanel from '../../components/TaskStatusPanel'
 import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import { useTask } from '../../hooks/useTask'
 import type { CNNArchitecture, CNNHistoryItem, CNNModelDetail, CNNModelInfo } from '../../types/cnn'
 import type { ConfidenceLevel, ObservationGroup, SymbolProfileResponse } from '../../types/alpha'
 import { confidenceStyle } from '../../utils/profiling'
+import { BARS_PER_TRADING_DAY } from '../../utils/barInterval'
 import ProfilingPanel from './ProfilingPanel'
 
 const { Title, Text } = Typography
@@ -80,18 +82,8 @@ const PRICE_REF_OPTIONS = [
   { label: '次日均价→次日均价（对齐T+1全天VWAP成交）', value: 'next_vwap' },
 ]
 
-// A 股每个交易日 240 分钟（9:30–11:30、13:00–15:00），各周期每交易日的 bar 数固定。
-// 用于「按时间窗口」自动推算 lookback(T) = 观测交易日数 × 每日 bar 数。
-// 派生/自定义周期不在表内（返回 undefined），此时回退到手填 bar 数。
-const BARS_PER_TRADING_DAY: Record<string, number> = {
-  d: 1,
-  '60m': 4,
-  '30m': 8,
-  '15m': 16,
-  '10m': 24,
-  '5m': 48,
-  '1m': 240,
-}
+// BARS_PER_TRADING_DAY 已收口到 utils/barInterval（前端单一事实源，与后端 cnn/intervals 镜像）。
+// lookback「按时间窗口」自动推算 T = 观测交易日数 × 每日 bar 数；派生/自定义周期回退手填。
 
 // 时间维(T)硬上限：防止「分钟周期 × 多交易日」误配出巨型张量（显存/训练时长爆炸）。
 const LOOKBACK_MAX = 1024
@@ -1180,11 +1172,12 @@ const CNNTrain: React.FC = () => {
                   </Form.Item>
                   {labelMode === 'horizon_bars' ? (
                     <Form.Item
-                      label="预测跨度（bar）"
+                      label="预测跨度"
                       name="label_horizon"
                       rules={[{ required: true, message: '请填写跨度' }]}
+                      tooltip="标签向前看多久算未来收益。可按天配置，按当前周期自动换算成 bar 根数。"
                     >
-                      <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                      <DayBarField interval={inputInterval} maxBars={120} minBars={1} defaultDays={3} />
                     </Form.Item>
                   ) : null}
                   {labelMode === 'oco' ? (
@@ -1218,12 +1211,12 @@ const CNNTrain: React.FC = () => {
                         </Col>
                         <Col span={8}>
                           <Form.Item
-                            label="最大持有（bar）"
+                            label="最大持有"
                             name="oco_max_hold"
-                            rules={[{ required: true, message: '请填写最大持有 bar 数' }]}
-                            tooltip="持有期内都不触发时，在第 max_hold+1 根开盘按时间止损平仓。"
+                            rules={[{ required: true, message: '请填写最大持有' }]}
+                            tooltip="持有期内都不触发时，在第 max_hold+1 根开盘按时间止损平仓。可按天配置，自动换算 bar 根数。"
                           >
-                            <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                            <DayBarField interval={inputInterval} maxBars={120} minBars={1} defaultDays={5} />
                           </Form.Item>
                         </Col>
                       </Row>

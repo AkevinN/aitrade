@@ -36,6 +36,7 @@ import type {
 } from '../../types/screening'
 import { metricMeta } from '../../utils/screening'
 import TaskStatusPanel from '../../components/TaskStatusPanel'
+import DayBarField from '../../components/DayBarField'
 import Tier2DetailDrawer from './Tier2DetailDrawer'
 
 const { Text } = Typography
@@ -807,12 +808,12 @@ function ScreeningForm({
                           </Col>
                           <Col span={8}>
                             <Form.Item
-                              label="最大持有 (bar)"
+                              label="最大持有"
                               name="oco_max_hold"
-                              rules={[{ required: true, message: '请填写最大持有 bar 数' }]}
-                              tooltip="持有期内都不触发时，到期按时间止损平仓。"
+                              rules={[{ required: true, message: '请填写最大持有' }]}
+                              tooltip="持有期内都不触发时，到期按时间止损平仓。可按天配置，按周期自动换算 bar 根数。"
                             >
-                              <InputNumber min={1} max={120} style={{ width: '100%' }} />
+                              <DayBarField interval={interval || 'd'} maxBars={120} minBars={1} defaultDays={5} />
                             </Form.Item>
                           </Col>
                         </Row>
