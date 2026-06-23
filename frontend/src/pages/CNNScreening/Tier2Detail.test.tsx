@@ -247,4 +247,25 @@ describe('Tier2DetailDrawer', () => {
     // 绝不应再用日线 d 去拉这只无 d 行情的标的
     expect(mockGetBarDataDetail).not.toHaveBeenCalledWith('d', '000415.SZSE')
   })
+
+  it('报告未回显回测周期时，从成交时间戳"数据驱动"反推周期，绝不硬拉 d', async () => {
+    // 兜底场景：report.request 缺 input_interval（旧报告/边缘），且未传 interval prop（默认 d）。
+    // 折级成交流水按 30m 粒度落点 → 抽屉应据成交时间戳反推出 30m 拉行情，而非回落到默认 d。
+    const fold = mkFold(0, { start_date: '2024-10-08' })
+    fold.candidate_trades = [
+      { datetime: '2024-10-09T10:30:00', vt_symbol: '000415.SZSE', direction: 'LONG', offset: 'OPEN', price: 10, volume: 100 },
+      { datetime: '2024-10-09T11:00:00', vt_symbol: '000415.SZSE', direction: 'LONG', offset: 'CLOSE', price: 11, volume: 100 },
+      { datetime: '2024-10-09T11:30:00', vt_symbol: '000415.SZSE', direction: 'LONG', offset: 'OPEN', price: 11, volume: 100 },
+    ]
+    const report = mkReport([fold])
+    report.request = {} // 关键：未回显 input_interval
+    mockGetReport.mockResolvedValueOnce(report)
+    renderDrawer(mkVerdict({ vt_symbol: '000415.SZSE' })) // 不传 interval prop → 默认回落值 'd'
+
+    expect(await screen.findByText('K 线与买卖点')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(mockGetBarDataDetail).toHaveBeenCalledWith('30m', '000415.SZSE'),
+    )
+    expect(mockGetBarDataDetail).not.toHaveBeenCalledWith('d', '000415.SZSE')
+  })
 })

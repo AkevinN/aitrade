@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { ScreeningFold, Tier2Verdict } from '../../types/screening'
 import type { BacktestResultPayload, BacktestTrade } from '../../types/alpha'
 import { screeningService } from '../../api/screening'
+import { inferIntervalFromDatetimes } from '../../utils/barInterval'
 import BacktestResults from '../Backtest/BacktestResults'
 import BacktestCharts from '../Backtest/BacktestCharts'
 import GateVerdictHeader from './GateVerdictHeader'
@@ -19,8 +20,8 @@ interface Tier2DetailDrawerProps {
   /** 触发抽屉的榜单行结论；report_id 为空时不应被打开 */
   verdict: Tier2Verdict | null
   /**
-   * K 线周期的**回落值**——优先用报告自身回测配置（report.request.input_interval），
-   * 仅在报告缺该字段时才用本 prop，最后回落 'd'。用于拉 K 线图的 OHLC 行情。
+   * K 线周期的**最末回落值**——优先用报告自身回测配置（report.request.input_interval），
+   * 其次从成交时间戳数据驱动反推，二者都无时才用本 prop，最后回落 'd'。用于拉 K 线图的 OHLC 行情。
    */
   interval?: string
   /** 关闭回调 */
@@ -55,13 +56,13 @@ const tradeColumns = [
  * 报告 404/加载失败/无折 时渲染空态占位，不崩溃；门禁头部始终以 `verdict` 渲染
  * （来自榜单行，无需等待报告）。曲线/成交取后端保留的第 0 种子（代表）数据。
  *
- * K 线周期取自报告自身的回测配置（report.request.input_interval），保证「bar 是什么
- * 图就用什么图」——分钟线选股的标的不会再被硬拉日线行情而报错；report 缺该字段时回落
- * 到 `interval` prop，再回落 'd'。
+ * K 线周期取自报告自身的回测配置（report.request.input_interval），保证「bar 是什么图就用
+ * 什么图」——分钟线选股的标的不会再被硬拉日线行情而报错；报告缺该字段时，从折级成交流水的
+ * 时间戳**数据驱动**反推周期（成交按 30m 落点即拉 30m），二者皆无才回落 `interval` prop、再到 'd'。
  *
  * @param open - 是否打开
  * @param verdict - 触发抽屉的榜单行结论
- * @param interval - K 线周期的回落值（报告含回测周期时不生效），缺省 'd'
+ * @param interval - K 线周期的最末回落值（报告含周期或可从成交反推时不生效），缺省 'd'
  * @param onClose - 关闭回调
  */
 const Tier2DetailDrawer: React.FC<Tier2DetailDrawerProps> = ({
@@ -95,13 +96,25 @@ const Tier2DetailDrawer: React.FC<Tier2DetailDrawerProps> = ({
   const selected: ScreeningFold | null =
     report?.folds.find((f) => f.fold === selectedFold) ?? report?.folds[0] ?? null
 
-  // K 线行情应复用该折回测**实际所用**的 bar 周期，而非外部默认的 'd'：
-  // 折级净值/成交流水都是按 report.request.input_interval 这条 K 线跑出来的，
-  // 用日线去拉一只只有分钟线的标的（如非日线选股）必然取不到行情而报错。
-  // 单一事实源 = 报告自身的回测配置；缺省再回落到 interval prop，最后才到 'd'。
+  // K 线行情应复用该折回测**实际所用**的 bar 周期，而非外部默认的 'd'：折级净值/成交流水
+  // 都是按这条 K 线跑出来的，用日线去拉一只只有分钟线的标的（如非日线选股）必然取不到行情而报错。
+  //
+  // 兜底：报告未回显 input_interval（旧报告/边缘）时，直接从成交流水的时间戳**数据驱动**反推
+  // 周期——"bar 是什么图就用什么图"：成交按 30m 落点就反推 30m，绝不在数据本是分钟级时硬回落到 'd'。
+  // 聚合所有折的成交以放大样本（周期是报告级、各折一致）。
+  const inferredInterval = useMemo(
+    () =>
+      inferIntervalFromDatetimes(
+        (report?.folds ?? []).flatMap((f) => (f.candidate_trades ?? []).map((t) => t.datetime)),
+      ),
+    [report?.folds],
+  )
+
+  // 解析优先级（单一事实源居首，数据驱动兜底其次，外部回落值垫底）：
+  //   报告回测配置 report.request.input_interval → 成交时间戳反推 → interval prop（缺省 'd'）
   const reportInterval = report?.request?.input_interval
   const effectiveInterval =
-    (typeof reportInterval === 'string' && reportInterval) || interval
+    (typeof reportInterval === 'string' && reportInterval) || inferredInterval || interval
 
   // 把选中折的净值/成交/标的组装成回测载荷，整块喂 BacktestCharts（复用净值图 + K线买卖点 + OHLC 拉取）。
   const foldResult = useMemo<BacktestResultPayload | undefined>(() => {
