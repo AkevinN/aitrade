@@ -8,7 +8,7 @@
 // 通过 mock screeningService 保持确定性、离线。
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App as AntApp } from 'antd'
@@ -25,10 +25,11 @@ vi.mock('../../api/screening', () => ({
 }))
 
 // ── mock alphaService.getBarDataDetail（抽屉里 BacktestCharts 拉 K 线 OHLC）──────
-// 返回空 preview → K 线图渲染空态、不触网，保持确定性。
+// 返回空 preview → K 线图渲染空态、不触网，保持确定性。用具名 mock 以断言拉行情时的周期实参。
+const mockGetBarDataDetail = vi.fn().mockResolvedValue({ preview: [] })
 vi.mock('../../api/alpha', () => ({
   alphaService: {
-    getBarDataDetail: vi.fn().mockResolvedValue({ preview: [] }),
+    getBarDataDetail: (...args: unknown[]) => mockGetBarDataDetail(...args),
   },
 }))
 
@@ -190,6 +191,7 @@ describe('FoldTable', () => {
 describe('Tier2DetailDrawer', () => {
   beforeEach(() => {
     mockGetReport.mockReset()
+    mockGetBarDataDetail.mockClear()
   })
 
   it('拉报告渲染全部折，点折行切换回测指标卡', async () => {
@@ -229,5 +231,20 @@ describe('Tier2DetailDrawer', () => {
     expect(screen.getByText('K 线与买卖点')).toBeInTheDocument()
     // 折级成交明细折叠面板
     expect(screen.getByText(/成交明细/)).toBeInTheDocument()
+  })
+
+  it('K 线复用回测实际所用的 bar 周期（report.request.input_interval），而非默认 d', async () => {
+    // 选股跑在 30m 线上、该标的无 d 行情：抽屉应按报告里回测的 30m 周期拉 OHLC，而非硬编码 d。
+    const report = mkReport([mkFold(0, { start_date: '2024-06-02' })])
+    report.request = { input_interval: '30m' }
+    mockGetReport.mockResolvedValueOnce(report)
+    renderDrawer(mkVerdict({ vt_symbol: '000415.SZSE' }))
+
+    expect(await screen.findByText('K 线与买卖点')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(mockGetBarDataDetail).toHaveBeenCalledWith('30m', '000415.SZSE'),
+    )
+    // 绝不应再用日线 d 去拉这只无 d 行情的标的
+    expect(mockGetBarDataDetail).not.toHaveBeenCalledWith('d', '000415.SZSE')
   })
 })

@@ -46,6 +46,7 @@ const ScreeningRunResult: React.FC<ScreeningRunResultProps> = ({ result }) => {
       <Tier2DetailDrawer
         open={detailVerdict != null}
         verdict={detailVerdict}
+        interval={interval}
         onClose={() => setDetailVerdict(null)}
       />
     </>

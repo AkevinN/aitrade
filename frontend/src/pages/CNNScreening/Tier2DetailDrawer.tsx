@@ -18,7 +18,10 @@ interface Tier2DetailDrawerProps {
   open: boolean
   /** 触发抽屉的榜单行结论；report_id 为空时不应被打开 */
   verdict: Tier2Verdict | null
-  /** 本次选股的 K 线周期，用于拉取 K 线图的 OHLC 行情；缺省 'd' */
+  /**
+   * K 线周期的**回落值**——优先用报告自身回测配置（report.request.input_interval），
+   * 仅在报告缺该字段时才用本 prop，最后回落 'd'。用于拉 K 线图的 OHLC 行情。
+   */
   interval?: string
   /** 关闭回调 */
   onClose: () => void
@@ -52,9 +55,13 @@ const tradeColumns = [
  * 报告 404/加载失败/无折 时渲染空态占位，不崩溃；门禁头部始终以 `verdict` 渲染
  * （来自榜单行，无需等待报告）。曲线/成交取后端保留的第 0 种子（代表）数据。
  *
+ * K 线周期取自报告自身的回测配置（report.request.input_interval），保证「bar 是什么
+ * 图就用什么图」——分钟线选股的标的不会再被硬拉日线行情而报错；report 缺该字段时回落
+ * 到 `interval` prop，再回落 'd'。
+ *
  * @param open - 是否打开
  * @param verdict - 触发抽屉的榜单行结论
- * @param interval - K 线周期（拉 OHLC 用），缺省 'd'
+ * @param interval - K 线周期的回落值（报告含回测周期时不生效），缺省 'd'
  * @param onClose - 关闭回调
  */
 const Tier2DetailDrawer: React.FC<Tier2DetailDrawerProps> = ({
@@ -87,6 +94,14 @@ const Tier2DetailDrawer: React.FC<Tier2DetailDrawerProps> = ({
 
   const selected: ScreeningFold | null =
     report?.folds.find((f) => f.fold === selectedFold) ?? report?.folds[0] ?? null
+
+  // K 线行情应复用该折回测**实际所用**的 bar 周期，而非外部默认的 'd'：
+  // 折级净值/成交流水都是按 report.request.input_interval 这条 K 线跑出来的，
+  // 用日线去拉一只只有分钟线的标的（如非日线选股）必然取不到行情而报错。
+  // 单一事实源 = 报告自身的回测配置；缺省再回落到 interval prop，最后才到 'd'。
+  const reportInterval = report?.request?.input_interval
+  const effectiveInterval =
+    (typeof reportInterval === 'string' && reportInterval) || interval
 
   // 把选中折的净值/成交/标的组装成回测载荷，整块喂 BacktestCharts（复用净值图 + K线买卖点 + OHLC 拉取）。
   const foldResult = useMemo<BacktestResultPayload | undefined>(() => {
@@ -132,7 +147,7 @@ const Tier2DetailDrawer: React.FC<Tier2DetailDrawerProps> = ({
             </div>
             <BacktestCharts
               result={foldResult}
-              interval={interval}
+              interval={effectiveInterval}
               start={selected?.test.start ?? ''}
               end={selected?.test.end ?? ''}
             />
