@@ -43,6 +43,13 @@ const fen = (v: number): React.ReactNode => {
   return <span style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}</span>
 }
 
+/** 由逐年行算"累计"行：各列全程复利 ∏(1+r)−1，超额取累计策略−累计基准（year=undefined 标记累计行）。 */
+const cumRowFor = (yearly: T0PeriodRow[]): T0PeriodRow => {
+  const cmp = (k: 'strat' | 'bh' | 'half_bh') => yearly.reduce((a, r) => a * (1 + r[k]), 1) - 1
+  const s = cmp('strat'), b = cmp('bh'), h = cmp('half_bh')
+  return { year: undefined, strat: s, bh: b, half_bh: h, excess_vs_bh: s - b, excess_vs_half_bh: s - h }
+}
+
 /**
  * 半仓做 T 回测页面。
  *
@@ -156,7 +163,7 @@ const T0Backtest: React.FC = () => {
     { title: '全日期望(分)', dataIndex: 'day_pnl_fen', key: 'dp', render: (v: number) => fen(v) },
   ]
   const yearCols = [
-    { title: '年份', dataIndex: 'year', key: 'year' },
+    { title: '年份', dataIndex: 'year', key: 'year', render: (v: number | undefined) => (v == null ? <b>累计</b> : v) },
     { title: '策略(净)', dataIndex: 'strat', key: 'strat', render: (v: number) => pct(v) },
     { title: '满仓持有', dataIndex: 'bh', key: 'bh', render: (v: number) => pct(v) },
     { title: '半仓持有', dataIndex: 'half_bh', key: 'half_bh', render: (v: number) => pct(v) },
@@ -316,8 +323,10 @@ const T0Backtest: React.FC = () => {
                     options={results.map((r, i) => ({ label: fillLabel(r.fill), value: i }))} />
                 </Space>
               ) : null}>
-              <Table<T0PeriodRow> size="small" rowKey={(r) => String(r.year)} pagination={false}
-                columns={yearCols} dataSource={sel.yearly} />
+              <Table<T0PeriodRow> size="small" pagination={false} columns={yearCols}
+                rowKey={(r) => (r.year == null ? 'cum' : String(r.year))}
+                rowClassName={(r) => (r.year == null ? 'ant-table-row-selected' : '')}
+                dataSource={[...sel.yearly, cumRowFor(sel.yearly)]} />
               <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
                 当前口径：{fillLabel(sel.fill)}{results.length > 1 ? '（切右上角看其它成交假设的逐年表现）' : ''}。
               </Paragraph>
