@@ -83,3 +83,43 @@ export interface T0Report {
   fill_sensitivity: T0FillSensitivityRow[]
   results: T0RunResult[]
 }
+
+/** 标的做 T 画像请求。 */
+export interface T0ProfileRequest {
+  symbol: string
+  /** 标定窗起（YYYY-MM-DD） */
+  start: string
+  /** 标定窗止（YYYY-MM-DD） */
+  end: string
+  /** 档位网格上限（分） */
+  x_max_fen: number
+  commission_rate: number
+  stamp_duty: number
+}
+
+/** 单档位逐买卖腿的回归边际收益行。 */
+export interface T0BandEdgeRow {
+  /** 偏离开盘价的档位（分） */
+  x_fen: number
+  /** 卖腿成交率 P(high>=O+x) */
+  sell_fill: number
+  /** 卖腿净于成本的每笔边际收益（分） */
+  sell_edge_fen: number
+  /** 买腿成交率 P(low<=O-x) */
+  buy_fill: number
+  /** 买腿净于成本的每笔边际收益（分） */
+  buy_edge_fen: number
+  /** 全日期望盈亏（分） */
+  day_pnl_fen: number
+}
+
+/** 标的做 T 画像（偏离-回归边际曲线 + 建议档位）。 */
+export interface T0Profile {
+  symbol: string
+  window: [string, string]
+  rows: T0BandEdgeRow[]
+  suggested_sell_tick: number
+  suggested_buy_tick: number
+  note: string
+  calib_mean_range?: number | null
+}

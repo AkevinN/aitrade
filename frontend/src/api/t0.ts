@@ -1,6 +1,6 @@
 // 半仓做 T 回测 API 服务 — 对应后端 /api/t0 路由组（同步返回，非异步任务）
 import api from './client'
-import type { T0BacktestRequest, T0Report } from '../types/t0'
+import type { T0BacktestRequest, T0Report, T0Profile, T0ProfileRequest } from '../types/t0'
 
 /**
  * 半仓做 T 回测 API 服务。
@@ -17,4 +17,13 @@ export const t0Service = {
    */
   runBacktest: (req: T0BacktestRequest): Promise<T0Report> =>
     api.post<T0Report>('/api/t0/backtest', req).then((r) => r.data),
+
+  /**
+   * 统计某标的"按偏离开盘 x 分挂单、单腿做 T 的每笔边际收益"曲线（理想撮合），并给建议档位。
+   *
+   * @param req - 画像请求（标的/标定窗/档位上限/成本）
+   * @returns T0Profile（逐档位逐腿边际曲线 + 建议卖/买档位）
+   */
+  profile: (req: T0ProfileRequest): Promise<T0Profile> =>
+    api.post<T0Profile>('/api/t0/profile', req).then((r) => r.data),
 }

@@ -12,7 +12,7 @@ from datetime import date
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..backtest.t0.profiler import load_daily_from_1m
+from ..backtest.t0.profiler import T0Profiler, load_daily_from_1m
 from ..backtest.t0.runner import T0BacktestRunner
 from ..backtest.t0.tick_policy import FixedTick
 from ..backtest.types import FillPolicy
@@ -89,3 +89,50 @@ async def run_t0_backtest(req: T0BacktestRequest) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"做T回测失败：{exc}") from exc
+
+
+class T0ProfileRequest(BaseModel):
+    """标的做 T 画像请求。"""
+
+    symbol: str = Field(default="000415.SZSE", description="标的 vt_symbol")
+    start: date = Field(description="标定窗起（含）")
+    end: date = Field(description="标定窗止（含）")
+    x_max_fen: int = Field(default=15, ge=2, le=50, description="档位网格上限（分）")
+    commission_rate: float = Field(default=0.0003, ge=0, description="单边佣金率")
+    stamp_duty: float = Field(default=0.0005, ge=0, description="卖出印花税率")
+
+
+@router.post("/profile", summary="标的做T画像：偏离-回归边际曲线 + 建议档位")
+async def run_t0_profile(req: T0ProfileRequest) -> dict:
+    """统计某标的"按偏离开盘 x 分挂单、单腿做 T 的每笔边际收益（理想撮合）"曲线。
+
+    按偏离档位网格、分买/卖腿算成交率与净于成本的条件回归边际收益，并给出建议档位（天然非对称）。
+
+    Args:
+        req: 画像请求（标的/标定窗/档位网格上限/成本）。
+
+    Returns:
+        T0Profile.to_dict()：rows（逐档位逐腿曲线）、suggested_sell_tick/buy_tick、note。
+
+    Raises:
+        HTTPException: 数据缺失（404）或区间非法/统计失败（400）。
+    """
+    if req.start >= req.end:
+        raise HTTPException(status_code=400, detail="起始日期须早于结束日期")
+    parquet = ALPHA_LAB_PATH / "bars" / "1m" / f"{req.symbol}.parquet"
+    if not parquet.exists():
+        raise HTTPException(status_code=404, detail=f"未找到 {req.symbol} 的 1 分钟数据：{parquet}")
+    try:
+        import polars as pl
+        daily = load_daily_from_1m(str(parquet), req.start.year, req.end.year)
+        daily = daily.filter((pl.col("d") >= req.start) & (pl.col("d") <= req.end))
+        if daily.height < 5:
+            raise HTTPException(status_code=400, detail="标定窗内有效交易日不足（至少 5 日）")
+        profile = T0Profiler().profile(
+            req.symbol, daily, x_grid_fen=range(1, req.x_max_fen + 1),
+            commission_rate=req.commission_rate, stamp_duty=req.stamp_duty)
+        return profile.to_dict()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"做T画像失败：{exc}") from exc
