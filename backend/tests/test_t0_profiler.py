@@ -162,3 +162,18 @@ def test_to_dict_round_trips_key_fields() -> None:
     assert d["suggested_buy_tick"] == 0.04
     assert d["rows"][0]["x_fen"] == 1
     assert d["rows"][0]["buy_edge_fen"] == 0.46
+
+
+def test_best_tick_weights_by_fill_count() -> None:
+    """建议档位应最大化"成交率×每笔均益"(日均贡献)，而非每笔均益本身。
+
+    2分: 成交率0.75 × 均益0.40 = 贡献0.30；5分: 成交率0.20 × 均益1.00 = 贡献0.20。
+    旧逻辑(只看均益)会错选5分；新逻辑(频率加权)应选2分。两档成交率均>0.1(不被尾部门槛剔除)。
+
+    Feature: half-position-t0-backtest
+    """
+    rows = [
+        BandEdgeRow(x_fen=2, sell_fill=0.0, sell_edge_fen=0.0, buy_fill=0.75, buy_edge_fen=0.40, day_pnl_fen=0.0),
+        BandEdgeRow(x_fen=5, sell_fill=0.0, sell_edge_fen=0.0, buy_fill=0.20, buy_edge_fen=1.00, day_pnl_fen=0.0),
+    ]
+    assert T0Profiler._best_tick(rows, "buy") == 0.02

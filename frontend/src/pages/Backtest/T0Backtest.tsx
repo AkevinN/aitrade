@@ -149,8 +149,10 @@ const T0Backtest: React.FC = () => {
     { title: '偏离(分)', dataIndex: 'x_fen', key: 'x' },
     { title: '卖腿成交率', dataIndex: 'sell_fill', key: 'sf', render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: '卖腿均益(分)', dataIndex: 'sell_edge_fen', key: 'se', render: (v: number) => fen(v) },
+    { title: '卖腿贡献(分/天)', key: 'sc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.sell_fill * r.sell_edge_fen) },
     { title: '买腿成交率', dataIndex: 'buy_fill', key: 'bf', render: (v: number) => `${(v * 100).toFixed(0)}%` },
     { title: '买腿均益(分)', dataIndex: 'buy_edge_fen', key: 'be', render: (v: number) => fen(v) },
+    { title: '买腿贡献(分/天)', key: 'bc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.buy_fill * r.buy_edge_fen) },
     { title: '全日期望(分)', dataIndex: 'day_pnl_fen', key: 'dp', render: (v: number) => fen(v) },
   ]
   const yearCols = [
@@ -188,7 +190,7 @@ const T0Backtest: React.FC = () => {
               rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
                 || r.x_fen === Math.round(profile.suggested_sell_tick * 100)) ? 'ant-table-row-selected' : ''} />
             <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-              均益&gt;0=该档位"触价后倾向回归"（做 T 有底层 edge）；买/卖腿峰值常不在同一档→建议档位天然非对称。注意：这是理想撮合上限，最终须看下方成交敏感性区间。
+              均益&gt;0=该档位"触价后倾向回归"（做 T 有底层 edge）。<b>建议档位取「日均贡献=成交率×均益」峰值</b>（已算上成交次数，避免选中很宽但很少成交的档），高亮行即各腿峰值；买/卖腿峰值常不在同一档→建议天然非对称。注意：这是理想撮合上限，最终须看下方成交敏感性区间。
             </Paragraph>
           </>
         )}

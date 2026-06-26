@@ -158,9 +158,9 @@ class T0Profiler:
           其中 ``ΔC = C − O``、``both = high>=O+x 且 low<=O−x``、
           ``onlyS = high>=O+x 且 low>O−x``、``onlyB = low<=O−x 且 high<O+x``。
 
-        建议档位：``suggested_sell_tick`` 取使 ``sell_edge_fen`` 最大且 ``sell_fill > 0.1`` 的 x；
-        ``suggested_buy_tick`` 取使 ``buy_edge_fen`` 最大且 ``buy_fill > 0.1`` 的 x（剔除小样本尾部，
-        天然非对称）。无任一腿满足成交率门槛时，该腿建议档位回退为该网格最小档。
+        建议档位：``suggested_sell_tick``/``suggested_buy_tick`` 取使**日均贡献 = 成交率×每笔均益**
+        （``fill × edge_fen``）最大且 ``fill > 0.1`` 的 x——把成交次数算进来，避免偏向"很宽、单笔大
+        但很少成交"的稀疏档（剔除小样本尾部，天然非对称）。无任一腿满足成交率门槛时，回退为网格最小档。
 
         无前视：只读传入的 ``daily``；调用方须保证其严格早于评估窗（Requirement 6.3）。
 
@@ -258,7 +258,11 @@ class T0Profiler:
 
     @staticmethod
     def _best_tick(rows: list[BandEdgeRow], leg: str) -> float:
-        """取某腿净 edge 峰值对应的偏离档（元），剔除成交率≤0.1 的小样本尾部。
+        """取某腿"日均贡献"峰值对应的偏离档（元），剔除成交率≤0.1 的小样本尾部。
+
+        日均贡献 = ``成交率 × 每笔均益``（``fill × edge_fen``）——即把成交次数算进来：
+        一个很宽、单笔均益大但很少成交的档位，总贡献其实很小，不应被选中。只看每笔均益会
+        系统性偏向稀疏成交的宽档，故这里按频率加权。
 
         Args:
             rows: 逐档位画像行。
@@ -272,7 +276,7 @@ class T0Profiler:
         eligible = [r for r in rows if getattr(r, fill_attr) > 0.1]
         if not eligible:
             return min(r.x_fen for r in rows) / 100.0 if rows else 0.0
-        best = max(eligible, key=lambda r: getattr(r, edge_attr))
+        best = max(eligible, key=lambda r: getattr(r, fill_attr) * getattr(r, edge_attr))
         return best.x_fen / 100.0
 
 
