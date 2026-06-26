@@ -9,6 +9,10 @@ import {
   ExperimentOutlined, PlusOutlined, MinusCircleOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid,
+  ResponsiveContainer, ReferenceLine,
+} from 'recharts'
 import dayjs, { type Dayjs } from 'dayjs'
 
 import { t0Service } from '../../api/t0'
@@ -179,6 +183,24 @@ const T0Backtest: React.FC = () => {
               message={<>建议档位：卖 <b>{profile.suggested_sell_tick.toFixed(2)}</b> 元 / 买 <b>{profile.suggested_buy_tick.toFixed(2)}</b> 元
                 <Button type="link" size="small" onClick={applySuggested}>用建议档位填入回测 →</Button></>}
               description={profile.note} />
+            <div style={{ width: '100%', height: 280, marginBottom: 12 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={profile.rows} margin={{ top: 8, right: 24, bottom: 16, left: 0 }}>
+                  <CartesianGrid stroke="#f0f0f0" />
+                  <XAxis dataKey="x_fen" tick={{ fontSize: 11 }}
+                    label={{ value: '偏离开盘（分）', position: 'insideBottom', offset: -8, fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} width={48} unit="分"
+                    label={{ value: '每笔均益', angle: -90, position: 'insideLeft', fontSize: 11 }} />
+                  <RTooltip formatter={(v) => `${Number(v).toFixed(2)} 分`}
+                    labelFormatter={(l) => `偏离 ${l} 分`} />
+                  <Legend />
+                  <ReferenceLine y={0} stroke="#bbb" strokeDasharray="3 3" />
+                  <Line type="monotone" dataKey="buy_edge_fen" name="买腿均益" stroke="#1d9e75" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="sell_edge_fen" name="卖腿均益" stroke="#d4537e" strokeWidth={2} dot={{ r: 2 }} />
+                  <Line type="monotone" dataKey="day_pnl_fen" name="全日期望" stroke="#378add" strokeWidth={2} strokeDasharray="5 3" dot={{ r: 2 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
             <Table<T0BandEdgeRow> size="small" rowKey="x_fen" pagination={false} columns={profCols}
               dataSource={profile.rows}
               rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
