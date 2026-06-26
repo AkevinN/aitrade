@@ -2,7 +2,7 @@
 import React, { useState, useMemo, useCallback } from 'react'
 import {
   Card, Row, Col, Typography, Space, Button, InputNumber,
-  Select, Alert, Table, Statistic, Tag, Tooltip, message, Divider,
+  Select, Alert, Table, Statistic, Tag, Tooltip, message, Divider, Segmented,
 } from 'antd'
 import {
   PlayCircleOutlined, ThunderboltOutlined, InfoCircleOutlined,
@@ -66,6 +66,7 @@ const T0Backtest: React.FC = () => {
     { penFen: 0, ratioPct: 50 },
   ])
   const [xMaxFen, setXMaxFen] = useState(15)
+  const [selFill, setSelFill] = useState(0)   // 逐年/命中分布查看哪个成交假设
 
   // 复用 CNN 训练同款"按现有数据快速选择"
   const { data: resources } = useQuery({
@@ -160,8 +161,11 @@ const T0Backtest: React.FC = () => {
     { title: '超额(vs满仓)', dataIndex: 'excess_vs_bh', key: 'e1', render: (v: number) => pct(v) },
     { title: '超额(vs半仓)', dataIndex: 'excess_vs_half_bh', key: 'e2', render: (v: number) => pct(v) },
   ]
-  const ideal = report?.results?.[0]
-  const hit = ideal?.hit_dist
+  // 每个成交假设(网格每行)都各跑了一次完整回测、各有一套逐年；selFill 选看哪一个
+  const results = report?.results ?? []
+  const selIdx = results.length ? Math.min(selFill, results.length - 1) : 0
+  const sel = results[selIdx]
+  const hit = sel?.hit_dist
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -301,15 +305,25 @@ const T0Backtest: React.FC = () => {
             )}
           </Card>
 
-          {ideal && (
-            <Card size="small" title="逐年收益与超额（第一个成交假设口径）">
+          {sel && (
+            <Card size="small" title="逐年收益与超额"
+              extra={results.length > 1 ? (
+                <Space size="small">
+                  <Text type="secondary" style={{ fontSize: 12 }}>成交假设</Text>
+                  <Segmented size="small" value={selIdx} onChange={(v) => setSelFill(Number(v))}
+                    options={results.map((r, i) => ({ label: fillLabel(r.fill), value: i }))} />
+                </Space>
+              ) : null}>
               <Table<T0PeriodRow> size="small" rowKey={(r) => String(r.year)} pagination={false}
-                columns={yearCols} dataSource={ideal.yearly} />
+                columns={yearCols} dataSource={sel.yearly} />
+              <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
+                当前口径：{fillLabel(sel.fill)}{results.length > 1 ? '（切右上角看其它成交假设的逐年表现）' : ''}。
+              </Paragraph>
             </Card>
           )}
 
           {hit && (
-            <Card size="small" title="命中分布（开盘 ±档位 是否被触及）">
+            <Card size="small" title={`命中分布（开盘 ±档位 是否被触及）`}>
               <Space size="large">
                 <Statistic title="两边都触（对敲）" value={(hit.both * 100).toFixed(0)} suffix="%" />
                 <Statistic title="仅触卖" value={(hit.onlyS * 100).toFixed(0)} suffix="%" />
@@ -317,7 +331,7 @@ const T0Backtest: React.FC = () => {
                 <Statistic title="都不触" value={(hit.none * 100).toFixed(0)} suffix="%" />
               </Space>
               <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-                年化换手 {ideal?.turnover_annual}x。「两边都触」是对敲落袋主力，「仅触一边」在趋势日易亏。
+                命中分布只由行情与档位决定（各成交假设相同）；{fillLabel(sel.fill)} 口径年化换手 {sel.turnover_annual}x。「两边都触」是对敲落袋主力，「仅触一边」在趋势日易亏。
               </Paragraph>
             </Card>
           )}
