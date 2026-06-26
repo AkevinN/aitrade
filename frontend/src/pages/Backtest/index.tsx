@@ -1,13 +1,14 @@
 import React from 'react'
 import { Alert, Button, Space, Tabs } from 'antd'
 import {
-  LineChartOutlined, ExperimentOutlined, ControlOutlined,
+  LineChartOutlined, ExperimentOutlined, ControlOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 
 import AlphaBacktest from './AlphaBacktest'
 import CNNBacktest from './CNNBacktest'
 import RuleBacktest from './RuleBacktest'
+import T0Backtest from './T0Backtest'
 
 /**
  * 回测页面（Tab 容器）。
@@ -54,6 +55,16 @@ const Backtest: React.FC = () => {
               </span>
             ),
             children: <RuleBacktest />,
+          },
+          {
+            key: 't0',
+            label: (
+              <span>
+                <ThunderboltOutlined />
+                半仓做 T
+              </span>
+            ),
+            children: <T0Backtest />,
           },
           {
             key: 'cnn-governance-replay',

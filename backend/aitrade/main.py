@@ -24,7 +24,7 @@ from .config import (
     SCHEDULER_TICK_SECONDS,
 )
 from .datasource import AkshareProvider, MockProvider, QmtBridgeProvider, TushareProvider, datasource_manager
-from .api import alpha_router, cnn_router, live_router, status_router, strategy_router
+from .api import alpha_router, cnn_router, live_router, status_router, strategy_router, t0_router
 from .api.live import build_plan_scheduler, register_scheduler
 from .api.ws import ws_manager
 from .live.single_instance import SingleInstanceLock
@@ -164,6 +164,7 @@ def create_app(history_store=None) -> FastAPI:
     app.include_router(cnn_router)
     app.include_router(live_router)
     app.include_router(strategy_router)
+    app.include_router(t0_router)
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
