@@ -5,9 +5,35 @@ Extracted from alpha/strategy/template.py for cross-module reuse.
 BarData is re-exported from alpha.lab so every module imports it from one place.
 """
 
+from dataclasses import dataclass
+
 from ..alpha.lab import BarData
 
-__all__ = ["Direction", "Offset", "OrderData", "TradeData", "BarData"]
+__all__ = ["Direction", "Offset", "OrderData", "TradeData", "BarData", "FillPolicy"]
+
+
+@dataclass(frozen=True)
+class FillPolicy:
+    """限价撮合成交保真度策略（做 T 成交旋钮），用于把"触价即全额成交"的理想假设打折。
+
+    限价单成交价始终为委托价或更优（无价格滑点）；本策略只调节"是否成交 / 成交多少"，
+    以近似真实的「触价未必成交（排队）+ 逆向选择」。**默认值等价于改造前引擎行为**
+    （触价即成交、单根全额），故 ``FillPolicy()`` 或 ``fill_policy=None`` 时撮合逐字节不变。
+
+    Attributes:
+        fill_penetration: 穿越阈值 ε（元，≥0）。要求买单 ``bar.low ≤ 委托价 − ε``、
+            卖单 ``bar.high ≥ 委托价 + ε`` 才成交（仅"碰一下"不成交）。默认 0 = 触价即成交。
+        fill_ratio: 单根触价 bar 可成交的比例（0<ratio≤1），按"原始委托量"折算，
+            不足部分留单到后续可成交 bar。默认 1.0 = 单根全额成交。
+
+    Example:
+        >>> FillPolicy()                              # 等价现状
+        >>> FillPolicy(fill_penetration=0.01)         # 要求穿过 1 分才成交
+        >>> FillPolicy(fill_ratio=0.5)                # 每根触价仅成交一半
+    """
+
+    fill_penetration: float = 0.0
+    fill_ratio: float = 1.0
 
 
 class Direction:

@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 from tqdm import tqdm
 
-from .types import Direction, Offset, OrderData, TradeData, BarData
+from .types import Direction, Offset, OrderData, TradeData, BarData, FillPolicy
 from .strategy import BaseStrategy
 from .pnl import PortfolioDailyResult
 from .oco import check_oco_trigger
@@ -142,6 +142,10 @@ class BacktestingEngine:
         # close/vwap 为市价化成交：成交价取参考价本身，不受委托限价封顶；
         # 仍保留涨跌停封板保护与 T+1 卖出限制。
         self.fill_price_mode: str = "open"
+
+        # 成交保真度策略（做 T 成交旋钮）：None 或默认 FillPolicy() 时撮合行为与改造前
+        # 逐字节一致；穿越 ε / 部分成交率仅在显式配置时生效（见 cross_order / _settle_fill）。
+        self.fill_policy: "FillPolicy | None" = None
 
     def set_parameters(
         self,
@@ -743,15 +747,18 @@ class BacktestingEngine:
                     and bar.high_price > limit_down
                 )
             else:
+                # 成交保真度旋钮：穿越阈值 ε。pen=0 时 `low <= price-0` 与原 `price >= low`
+                # 逐字节等价（Property 2）；pen>0 时要求价格真正穿过委托价才成交。
+                pen: float = self.fill_policy.fill_penetration if self.fill_policy is not None else 0.0
                 long_cross = (
                     order.direction == Direction.LONG
-                    and order.price >= long_cross_price
+                    and long_cross_price <= order.price - pen
                     and long_cross_price > 0
                     and bar.low_price < limit_up
                 )
                 short_cross = (
                     order.direction == Direction.SHORT
-                    and order.price <= short_cross_price
+                    and short_cross_price >= order.price + pen
                     and short_cross_price > 0
                     and bar.high_price > limit_down
                 )
@@ -773,7 +780,15 @@ class BacktestingEngine:
                 # 卖出成交价取 max(委托价, 开盘价)
                 raw_price = max(order.price, short_best_price)
 
-            self._settle_fill(order, raw_price)
+            # 成交保真度旋钮：部分成交率。ratio>=1 时整单成交（与现状一致）；
+            # ratio<1 时单根仅成交"原始量×ratio"，余量留单到后续可成交 bar。
+            ratio: float = self.fill_policy.fill_ratio if self.fill_policy is not None else 1.0
+            if ratio >= 1.0:
+                self._settle_fill(order, raw_price)
+            else:
+                remaining: float = order.volume - order.traded
+                step: float = max(1.0, float(int(order.volume * ratio)))
+                self._settle_fill(order, raw_price, fill_volume=min(remaining, step))
 
     def _cross_oco_orders(self) -> None:
         """撮合 OCO 止盈止损括号单。
@@ -837,12 +852,13 @@ class BacktestingEngine:
             # 一腿成交，撤销另一腿（OCO 语义）
             self.cancel_order(self.strategy, loser.vt_orderid)
 
-    def _settle_fill(self, order: OrderData, raw_price: float) -> TradeData:
+    def _settle_fill(self, order: OrderData, raw_price: float,
+                     fill_volume: float | None = None) -> TradeData:
         """成交结算：叠加滑点、更新订单状态、记录成交、更新现金与持仓。
 
         买入方向叠加不利滑点（价格更高）；卖出方向叠加不利滑点（价格更低）。
         成交后：
-        - 从 active_limit_orders 移除已成交订单；
+        - 全额成交时从 active_limit_orders 移除；部分成交时订单留存（status=nottraded）；
         - 创建 TradeData 并通知 strategy.update_trade()；
         - 更新 self.cash（含佣金与卖出印花税）；
         - 买入时记录 buy_dates，供 T+1 锁仓判定。
@@ -851,6 +867,8 @@ class BacktestingEngine:
         Args:
             order: 待结算的限价单。
             raw_price: 结算前的原始参考价（滑点将在此基础上叠加）。
+            fill_volume: 本次成交量；None（默认）= 一次成交完剩余全部量（与改造前一致）。
+                给定时按部分成交处理，余量留单。
 
         Returns:
             已写入 self.trades 的 TradeData 对象。
@@ -865,11 +883,14 @@ class BacktestingEngine:
             # 卖出叠加不利滑点（卖更便宜）
             trade_price = round_to(raw_price * (1 - slippage), pricetick)
 
-        order.traded = order.volume
-        order.status = STATUS_ALLTRADED
+        # fill_volume=None → 成交剩余全部（默认/旧行为）；否则按部分成交量
+        fill_qty: float = (order.volume - order.traded) if fill_volume is None \
+            else min(fill_volume, order.volume - order.traded)
+        order.traded += fill_qty
+        order.status = STATUS_ALLTRADED if order.traded >= order.volume else STATUS_NOTTRADED
         self.strategy.update_order(order)
 
-        if order.vt_orderid in self.active_limit_orders:
+        if not order.is_active() and order.vt_orderid in self.active_limit_orders:
             self.active_limit_orders.pop(order.vt_orderid)
 
         self.trade_count += 1
@@ -882,7 +903,7 @@ class BacktestingEngine:
             direction=order.direction,
             offset=order.offset,
             price=trade_price,
-            volume=order.volume,
+            volume=fill_qty,
             datetime=self.datetime,
             gateway_name=self.gateway_name,
         )
@@ -953,6 +974,51 @@ class BacktestingEngine:
 
         self.strategy.update_trade(trade)
         self.trades[trade.vt_tradeid] = trade
+
+    def buy_to_open_intrabar(self, vt_symbol: str, price: float, volume: float) -> None:
+        """当根 bar 内按给定价直接买入开多，用于做 T 收盘/开盘以确定价回半仓。
+
+        对称于 :meth:`sell_to_close_intrabar`：立即结算一笔 LONG/OPEN 成交（含佣金、
+        现金更新、记录 T+1 建仓日），成交价由调用方给定（如当日收盘价/开盘价）。买入不
+        受 T+1 限制，亦无印花税。
+
+        Args:
+            vt_symbol: 合约代码，如 ``"000415.SZSE"``。
+            price: 成交价（元），将对齐到最小价位。
+            volume: 成交数量（手/股）；≤0 时直接返回。
+        """
+        if volume <= 0:
+            return
+        pricetick: float = self.priceticks[vt_symbol]
+        trade_price: float = round_to(price, pricetick)
+        symbol, exchange = vt_symbol.rsplit(".", 1)
+
+        self.trade_count += 1
+        trade: TradeData = TradeData(
+            symbol=symbol,
+            exchange=exchange,
+            orderid=f"reb{self.trade_count}",
+            tradeid=str(self.trade_count),
+            direction=Direction.LONG,
+            offset=Offset.OPEN,
+            price=trade_price,
+            volume=volume,
+            datetime=self.datetime,
+            gateway_name=self.gateway_name,
+        )
+
+        size: float = self.sizes[vt_symbol]
+        turnover: float = trade_price * volume * size
+        commission: float = turnover * self.long_rates[vt_symbol]
+
+        self.cash -= turnover
+        self.cash -= commission
+
+        self.strategy.update_trade(trade)
+        self.trades[trade.vt_tradeid] = trade
+
+        if self.datetime is not None:
+            self.buy_dates[vt_symbol] = self.datetime.date()
 
     def get_signal(self) -> pl.DataFrame:
         """返回当前时间戳对应的模型信号行（从 signal_df 中按 datetime 过滤）。
