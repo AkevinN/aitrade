@@ -1,18 +1,20 @@
 // 半仓做 T 回测页面 — 同步运行，核心产物是"成交敏感性区间"
 import React, { useState, useMemo, useCallback } from 'react'
 import {
-  Card, Row, Col, Typography, Space, Button, DatePicker, InputNumber,
-  Input, Alert, Table, Statistic, Tag, Tooltip, message,
+  Card, Row, Col, Typography, Space, Button, InputNumber,
+  Select, Alert, Table, Statistic, Tag, Tooltip, message,
 } from 'antd'
 import { PlayCircleOutlined, ThunderboltOutlined, InfoCircleOutlined } from '@ant-design/icons'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
 
 import { t0Service } from '../../api/t0'
+import { alphaService } from '../../api/alpha'
+import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
+import DateRangeSelector from '../../components/DateRangeSelector'
 import type { T0FillCfg, T0FillSensitivityRow, T0PeriodRow, T0Report } from '../../types/t0'
 
 const { Text, Paragraph } = Typography
-const { RangePicker } = DatePicker
 
 /** 把成交假设格式化为可读标签。 */
 const fillLabel = (f: T0FillCfg): string => {
@@ -45,6 +47,38 @@ const T0Backtest: React.FC = () => {
   const [swingFrac, setSwingFrac] = useState(1.0)
   const [baseWeight, setBaseWeight] = useState(0.5)
   const [capital, setCapital] = useState(1_000_000)
+
+  // 复用 CNN 训练同款"按现有数据快速选择"：从本地数据资源派生可选标的 + 其可用区间
+  const { data: resources } = useQuery({
+    queryKey: ['alpha-data-resources'],
+    queryFn: () => alphaService.getDataResources(),
+  })
+  const availabilityMap = useAvailableSymbols(resources)
+  const symbolOptions = useMemo(
+    () =>
+      [...availabilityMap.entries()]
+        .filter(([, meta]) => meta.intervals.has('1m'))     // 做T 需要 1 分钟数据
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([sym, meta]) => ({
+          value: sym,
+          range: meta.intervalRanges['1m'] ?? { start: meta.start, end: meta.end },
+        })),
+    [availabilityMap],
+  )
+  /** 选中标的的本地 1m 数据可用区间，喂给 DateRangeSelector 约束/快捷选择。 */
+  const localRange = useMemo(() => {
+    const key = symbol.replace(/\.$/, '').toLowerCase()
+    const found = symbolOptions.find((o) => o.value.replace(/\.$/, '').toLowerCase() === key)
+    return found ? { start: found.range.start.slice(0, 10), end: found.range.end.slice(0, 10) } : null
+  }, [symbolOptions, symbol])
+  /** 切换标的时，自动把评估区间设为该标的的本地全区间（快速可用）。 */
+  const onSymbolChange = useCallback((val: string) => {
+    setSymbol(val)
+    const found = symbolOptions.find((o) => o.value === val)
+    if (found) {
+      setDateRange([dayjs(found.range.start.slice(0, 10)), dayjs(found.range.end.slice(0, 10))])
+    }
+  }, [symbolOptions])
 
   const mut = useMutation({
     mutationFn: t0Service.runBacktest,
@@ -105,23 +139,31 @@ const T0Backtest: React.FC = () => {
 
       <Card size="small" title="回测配置">
         <Row gutter={[16, 16]}>
-          <Col span={6}>
-            <Text type="secondary">标的</Text>
-            <Input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="000415.SZSE" />
-          </Col>
           <Col span={10}>
-            <Text type="secondary">评估区间</Text>
-            <RangePicker
+            <Text type="secondary">标的（仅列出有 1m 数据的）</Text>
+            <Select
+              showSearch
               style={{ width: '100%' }}
-              value={dateRange}
-              onChange={(v) => v && v[0] && v[1] && setDateRange([v[0], v[1]])}
-              allowClear={false}
+              value={symbol || undefined}
+              placeholder="选择标的"
+              onChange={onSymbolChange}
+              options={symbolOptions.map((o) => ({ value: o.value, label: o.value }))}
+              filterOption={(input, opt) => String(opt?.value ?? '').toLowerCase().includes(input.toLowerCase())}
+              notFoundContent={symbolOptions.length ? '无匹配' : '加载中…'}
             />
           </Col>
-          <Col span={4}>
+          <Col span={6}>
             <Text type="secondary">初始资金</Text>
             <InputNumber style={{ width: '100%' }} value={capital} min={100000} step={100000}
               onChange={(v) => setCapital(v ?? 1_000_000)} />
+          </Col>
+          <Col span={24}>
+            <Text type="secondary">评估区间（按该标的本地可用数据快速选择）</Text>
+            <DateRangeSelector
+              value={dateRange}
+              onChange={(v) => v && v[0] && v[1] && setDateRange([v[0], v[1]])}
+              localRange={localRange}
+            />
           </Col>
         </Row>
         <Row gutter={[16, 16]} style={{ marginTop: 12 }}>
