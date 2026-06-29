@@ -6,7 +6,7 @@ import {
 } from 'antd'
 import {
   PlayCircleOutlined, ThunderboltOutlined, InfoCircleOutlined,
-  ExperimentOutlined, PlusOutlined, MinusCircleOutlined,
+  PlusOutlined, MinusCircleOutlined,
 } from '@ant-design/icons'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
@@ -16,8 +16,9 @@ import { alphaService } from '../../api/alpha'
 import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import DateRangeSelector from '../../components/DateRangeSelector'
 import TickPolicyEditor from './TickPolicyEditor'
+import CalibrationDrawer from './CalibrationDrawer'
 import type {
-  T0BandEdgeRow, T0FillCfg, T0FillSensitivityRow, T0PeriodRow, T0Profile, T0Report, TickPolicyCfg,
+  T0FillCfg, T0FillSensitivityRow, T0PeriodRow, T0Report, TickPolicyCfg,
 } from '../../types/t0'
 
 /** 成交假设去重键。 */
@@ -56,12 +57,6 @@ const pct = (v: number, digits = 1): React.ReactNode => {
   return <span style={{ color }}>{v > 0 ? '+' : ''}{(v * 100).toFixed(digits)}%</span>
 }
 
-/** 带符号着色的"分"数值。 */
-const fen = (v: number): React.ReactNode => {
-  const color = v > 0 ? '#3f8600' : v < 0 ? '#cf1322' : undefined
-  return <span style={{ color }}>{v > 0 ? '+' : ''}{v.toFixed(2)}</span>
-}
-
 /** 由逐年行算"累计"行：各列全程复利 ∏(1+r)−1，超额取累计策略−累计基准（year=undefined 标记累计行）。 */
 const cumRowFor = (yearly: T0PeriodRow[]): T0PeriodRow => {
   const cmp = (k: 'strat' | 'bh' | 'half_bh') => yearly.reduce((a, r) => a * (1 + r[k]), 1) - 1
@@ -95,6 +90,7 @@ const T0Backtest: React.FC = () => {
   const [xMaxFen, setXMaxFen] = useState(15)
   const [selFill, setSelFill] = useState(0)     // 逐年/命中分布查看哪个成交假设
   const [selPolicy, setSelPolicy] = useState(0) // 逐年/命中分布查看哪个档位策略
+  const [calibIdx, setCalibIdx] = useState<number | null>(null) // 正在标定的策略下标（开抽屉）
 
   // 可用信号名（供条件规则的 signal 左值选择）
   const { data: signalNames = [] } = useQuery({
@@ -168,32 +164,6 @@ const T0Backtest: React.FC = () => {
     })
   }, [mut, symbol, dateRange, tickPolicies, swingFrac, baseWeight, capital, commissionRate, stampDuty, fillGrid])
 
-  // —— 画像 ——
-  const profMut = useMutation({
-    mutationFn: t0Service.profile,
-    onError: (e: unknown) => message.error(
-      (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '做T画像失败'),
-  })
-  const profile: T0Profile | undefined = profMut.data
-  const onProfile = useCallback(() => {
-    profMut.mutate({
-      symbol: symbol.trim(),
-      start: dateRange[0].format('YYYY-MM-DD'),
-      end: dateRange[1].format('YYYY-MM-DD'),
-      x_max_fen: xMaxFen, commission_rate: commissionRate, stamp_duty: stampDuty,
-    })
-  }, [profMut, symbol, dateRange, xMaxFen, commissionRate, stampDuty])
-  const applySuggested = useCallback(() => {
-    if (!profile) return
-    const s = profile.suggested_sell_tick, b = profile.suggested_buy_tick
-    setTickPolicies((ps) => {
-      const i = ps.findIndex((p) => p.kind === 'fixed')
-      if (i >= 0) return ps.map((p, idx) => (idx === i ? { ...p, sell_tick: s, buy_tick: b } : p))
-      return [...ps, { kind: 'fixed', label: '建议档', sell_tick: s, buy_tick: b }]
-    })
-    message.success(`已填入建议档位：卖 ${s} / 买 ${b}（更新到固定档策略）`)
-  }, [profile])
-
   // 结果 = 档位策略 × 成交假设；按两维分别切换查看
   const results = report?.results ?? []
   const policyLabels = useMemo(() => [...new Set(results.map((r) => r.tick_label))], [results])
@@ -214,16 +184,6 @@ const T0Backtest: React.FC = () => {
     return { hi: Math.max(...rets), lo: Math.min(...rets) }
   }, [report, selLabel])
 
-  const profCols = [
-    { title: '偏离(分)', dataIndex: 'x_fen', key: 'x' },
-    { title: '卖腿成交率', dataIndex: 'sell_fill', key: 'sf', render: (v: number) => `${(v * 100).toFixed(0)}%` },
-    { title: '卖腿均益(分)', dataIndex: 'sell_edge_fen', key: 'se', render: (v: number) => fen(v) },
-    { title: '卖腿贡献(分/天)', key: 'sc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.sell_fill * r.sell_edge_fen) },
-    { title: '买腿成交率', dataIndex: 'buy_fill', key: 'bf', render: (v: number) => `${(v * 100).toFixed(0)}%` },
-    { title: '买腿均益(分)', dataIndex: 'buy_edge_fen', key: 'be', render: (v: number) => fen(v) },
-    { title: '买腿贡献(分/天)', key: 'bc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.buy_fill * r.buy_edge_fen) },
-    { title: '全日期望(分)', dataIndex: 'day_pnl_fen', key: 'dp', render: (v: number) => fen(v) },
-  ]
   const yearCols = [
     { title: '年份', dataIndex: 'year', key: 'year', render: (v: number | undefined) => (v == null ? <b>累计</b> : v) },
     { title: '策略(净)', dataIndex: 'strat', key: 'strat', render: (v: number) => pct(v) },
@@ -236,28 +196,7 @@ const T0Backtest: React.FC = () => {
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Alert type="info" showIcon
         message="半仓做 T：每天按开盘价挂 ±档位限价单、日内做 T、收盘维持半仓"
-        description="先用「标的画像」看这只票各档位的回归边际收益、定档位；再跑回测看「成交敏感性区间」——盈亏几乎全取决于能否在 ±档位真成交，理想撮合是上限、穿越/部分成交更贴近实盘，区间越宽越不可复制。" />
-
-      {/* —— 标的画像 —— */}
-      <Card size="small" title={<span><ExperimentOutlined /> 标的画像：按偏离开盘 x 分挂单，单腿做 T 的每笔边际收益（理想撮合）</span>}
-        extra={<Button icon={<ExperimentOutlined />} loading={profMut.isPending} onClick={onProfile}>统计当前标的/区间</Button>}>
-        {!profile && <Text type="secondary">点右上角统计：按 1~{xMaxFen} 分逐档位、分买/卖腿算成交率与净于成本的回归边际收益，并给出建议档位（天然非对称）。</Text>}
-        {profile && (
-          <>
-            <Alert type="success" showIcon style={{ marginBottom: 12 }}
-              message={<>建议档位：卖 <b>{profile.suggested_sell_tick.toFixed(2)}</b> 元 / 买 <b>{profile.suggested_buy_tick.toFixed(2)}</b> 元
-                <Button type="link" size="small" onClick={applySuggested}>用建议档位填入回测 →</Button></>}
-              description={profile.note} />
-            <Table<T0BandEdgeRow> size="small" rowKey="x_fen" pagination={false} columns={profCols}
-              dataSource={profile.rows}
-              rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
-                || r.x_fen === Math.round(profile.suggested_sell_tick * 100)) ? 'ant-table-row-selected' : ''} />
-            <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-              均益&gt;0=该档位"触价后倾向回归"（做 T 有底层 edge）。<b>建议档位取「日均贡献=成交率×均益」峰值</b>（已算上成交次数，避免选中很宽但很少成交的档），高亮行即各腿峰值；买/卖腿峰值常不在同一档→建议天然非对称。注意：这是理想撮合上限，最终须看下方成交敏感性区间。
-            </Paragraph>
-          </>
-        )}
-      </Card>
+        description="为每个档位策略点「画像并建议」按其类型分场景标定档位（条件策略按高/低/平开分别画像、逐规则建议）；再跑回测看「成交敏感性区间」——盈亏几乎全取决于能否在 ±档位真成交，理想撮合是上限、穿越/部分成交更贴近实盘，区间越宽越不可复制。" />
 
       {/* —— 回测配置（全部参数可调） —— */}
       <Card size="small" title="回测配置">
@@ -314,7 +253,8 @@ const T0Backtest: React.FC = () => {
             档位策略 <Tooltip title="定义一个或多个命名档位策略，一次回测出「策略 × 成交假设」对比。固定/波动缩放/趋势倾斜为数值参数；条件规则可按跳空/波动/动量/信号挂不同档位。"><InfoCircleOutlined /></Tooltip>
           </Text>
         </Divider>
-        <TickPolicyEditor value={tickPolicies} onChange={setTickPolicies} signalNames={signalNames} />
+        <TickPolicyEditor value={tickPolicies} onChange={setTickPolicies} signalNames={signalNames}
+          onCalibrate={setCalibIdx} />
 
         <Divider style={{ margin: '12px 0' }} orientation="left" plain>
           <Text type="secondary" style={{ fontSize: 13 }}>
@@ -416,6 +356,18 @@ const T0Backtest: React.FC = () => {
           )}
         </>
       )}
+
+      <CalibrationDrawer
+        open={calibIdx !== null}
+        policy={calibIdx !== null ? (tickPolicies[calibIdx] ?? null) : null}
+        evalWindow={dateRange}
+        symbol={symbol.trim()}
+        commissionRate={commissionRate}
+        stampDuty={stampDuty}
+        xMaxFen={xMaxFen}
+        onApply={(next) => setTickPolicies((ps) => ps.map((p, i) => (i === calibIdx ? next : p)))}
+        onClose={() => setCalibIdx(null)}
+      />
     </Space>
   )
 }

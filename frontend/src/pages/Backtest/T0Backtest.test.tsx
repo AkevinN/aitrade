@@ -6,6 +6,7 @@ import { App as AntApp } from 'antd'
 
 const mockRunBacktest = vi.fn()
 const mockProfile = vi.fn()
+const mockProfileSegmented = vi.fn()
 const mockListSignals = vi.fn<() => Promise<string[]>>()
 const mockGetResources = vi.fn()
 
@@ -13,6 +14,7 @@ vi.mock('../../api/t0', () => ({
   t0Service: {
     runBacktest: (...a: unknown[]) => mockRunBacktest(...a),
     profile: (...a: unknown[]) => mockProfile(...a),
+    profileSegmented: (...a: unknown[]) => mockProfileSegmented(...a),
     listSignals: () => mockListSignals(),
   },
 }))
@@ -52,6 +54,9 @@ describe('T0Backtest 多策略配置', () => {
     mockGetResources.mockResolvedValue({ raw_bars: [], raw_ticks: [], derived_bars: [] })
     mockListSignals.mockResolvedValue(['mdl_prob'])
     mockRunBacktest.mockResolvedValue(REPORT)
+    mockProfile.mockResolvedValue({ symbol: 'X', window: ['2023-01-01', '2023-06-30'], rows: [],
+      suggested_sell_tick: 0.05, suggested_buy_tick: 0.03, note: '' })
+    mockProfileSegmented.mockResolvedValue({ symbol: 'X', thresh: 0.003, segments: [] })
   })
 
   it('默认发送单个固定档策略（向后兼容等价现状）', async () => {
@@ -112,6 +117,19 @@ describe('T0Backtest 多策略配置', () => {
     fireEvent.click(runBtn())
     await waitFor(() => expect(mockRunBacktest).toHaveBeenCalled())
     expect(mockRunBacktest.mock.calls[0][0].tick_policies[0].label).toBe('我的策略')
+  })
+
+  it('每个策略卡片可触发画像标定抽屉', async () => {
+    renderPage()
+    await screen.findByLabelText('策略0名称')
+    fireEvent.click(screen.getByLabelText('策略0画像'))
+    expect(await screen.findByText(/标定：固定2分/)).toBeInTheDocument()
+  })
+
+  it('已移除顶部全局画像区', async () => {
+    renderPage()
+    await screen.findByLabelText('策略0名称')
+    expect(screen.queryByText('统计当前标的/区间')).toBeNull()
   })
 })
 

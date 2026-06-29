@@ -2,7 +2,7 @@
 // label 一次请求内唯一（重复标红）；条件策略内嵌 ConditionalRuleEditor。
 import React from 'react'
 import { Card, Select, InputNumber, Button, Space, Input, Typography, Row, Col } from 'antd'
-import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, ExperimentOutlined } from '@ant-design/icons'
 
 import type { TickPolicyCfg, RuleCfg } from '../../types/t0'
 import ConditionalRuleEditor from './ConditionalRuleEditor'
@@ -50,6 +50,8 @@ export interface TickPolicyEditorProps {
   onChange: (v: TickPolicyCfg[]) => void
   /** 可用信号名（透传给条件规则编辑器） */
   signalNames: string[]
+  /** 点某策略「画像并建议」时触发（传该策略下标）；不传则不显示该入口 */
+  onCalibrate?: (index: number) => void
 }
 
 /**
@@ -58,7 +60,7 @@ export interface TickPolicyEditorProps {
  * 默认应至少含一个策略；label 重复会标红（上层据此可禁用运行）。条件规则策略内嵌
  * {@link ConditionalRuleEditor}；其余为数值参数表单（档位以"分"展示、后端口径为元）。
  */
-const TickPolicyEditor: React.FC<TickPolicyEditorProps> = ({ value, onChange, signalNames }) => {
+const TickPolicyEditor: React.FC<TickPolicyEditorProps> = ({ value, onChange, signalNames, onCalibrate }) => {
   // 以 trim 后的 label 计重复（与运行前校验/提交口径一致）
   const labelCounts = value.reduce<Record<string, number>>((m, p) => {
     const k = p.label.trim()
@@ -97,8 +99,14 @@ const TickPolicyEditor: React.FC<TickPolicyEditorProps> = ({ value, onChange, si
             </Space>
           }
           extra={
-            <Button size="small" danger type="text" icon={<DeleteOutlined />} disabled={value.length <= 1}
-              aria-label={`策略${i}删除`} onClick={() => removePolicy(i)} />
+            <Space>
+              {onCalibrate && (
+                <Button size="small" icon={<ExperimentOutlined />} aria-label={`策略${i}画像`}
+                  onClick={() => onCalibrate(i)}>画像并建议</Button>
+              )}
+              <Button size="small" danger type="text" icon={<DeleteOutlined />} disabled={value.length <= 1}
+                aria-label={`策略${i}删除`} onClick={() => removePolicy(i)} />
+            </Space>
           }>
           {p.kind === 'fixed' && (
             <Row gutter={12}>
