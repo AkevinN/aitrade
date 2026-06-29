@@ -15,9 +15,13 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    import polars as pl
 
 
 @runtime_checkable
@@ -107,3 +111,76 @@ class AlphaFactorSignalProvider:
             恒为 ``None``（v1 未打通因子产物读取）。
         """
         return None
+
+
+@dataclass
+class LabSignalProvider:
+    """从**持久化模型信号帧**建 point-in-time 查询的 ``SignalProvider`` 实现。
+
+    信号帧由 ``alpha`` 管线落盘（列含 ``datetime``/``vt_symbol``/信号值），经 ``lab.load_signal(name)``
+    读取。本类把若干 ``{信号名: 帧}`` 预处理成 ``{(标的, 信号名): (升序日期, 对应值)}`` 索引，
+    查询时二分定位「严格早于评估日（``date < day``）的最近一行」——保证滞后、无前视；
+    同一日有多行（盘中）时取该日最后一行。
+
+    Attributes:
+        index: ``{(vt_symbol, signal_name): (sorted_days, values)}``，``sorted_days`` 升序。
+
+    Example:
+        >>> import polars as pl
+        >>> from datetime import date, datetime
+        >>> f = pl.DataFrame({"datetime": [datetime(2025, 1, 2)], "vt_symbol": ["A.SZSE"], "signal": [0.8]})
+        >>> sp = LabSignalProvider.from_frames({"mom": f})
+        >>> sp.value("A.SZSE", date(2025, 1, 3), "mom")
+        0.8
+    """
+
+    index: dict[tuple[str, str], tuple[list[date], list[float]]] = field(default_factory=dict)
+
+    @classmethod
+    def from_frames(cls, frames: dict[str, "pl.DataFrame"], value_col: str = "signal") -> "LabSignalProvider":
+        """从 ``{信号名: 信号帧}`` 预建查询索引。
+
+        每帧按 ``(vt_symbol, 日期, 输入行序)`` 稳定排序后，按 ``(标的, 信号名)`` 收集升序日期与对应值；
+        同一日期保留输入顺序，故「该日最后一行」即输入序最后一条。
+
+        Args:
+            frames: ``{信号名: polars DataFrame}``；帧需含 ``datetime``/``vt_symbol``/``value_col`` 列。
+                值为 None 或空帧者跳过。
+            value_col: 信号值列名，默认 ``"signal"``（与 ``alpha`` 落盘口径一致）。
+
+        Returns:
+            构建好的 LabSignalProvider。
+        """
+        import polars as pl
+
+        index: dict[tuple[str, str], tuple[list[date], list[float]]] = {}
+        for name, df in frames.items():
+            if df is None or df.height == 0:
+                continue
+            with_idx = df.with_row_index("_i") if hasattr(pl.DataFrame, "with_row_index") else df.with_row_count("_i")
+            date_expr = (pl.col("datetime") if df.schema["datetime"] == pl.Date
+                         else pl.col("datetime").dt.date())
+            ordered = (with_idx
+                       .select([pl.col("vt_symbol"), date_expr.alias("_d"),
+                                pl.col(value_col).alias("_v"), pl.col("_i")])
+                       .sort(["vt_symbol", "_d", "_i"]))
+            for row in ordered.iter_rows(named=True):
+                bucket = index.setdefault((row["vt_symbol"], name), ([], []))
+                bucket[0].append(row["_d"])
+                bucket[1].append(row["_v"])
+        return cls(index)
+
+    def value(self, symbol: str, day: date, name: str) -> float | None:
+        """返回该标的 ``date < day`` 的最近一行信号值；不可得返回 ``None``（point-in-time）。
+
+        Args:
+            symbol: 合约代码。
+            day: 评估日（当日开盘时点）。
+            name: 信号名。
+
+        Returns:
+            滞后的信号值；无更早行（或无该标的/信号）时返回 ``None``。
+        """
+        days, vals = self.index.get((symbol, name), ([], []))
+        i = bisect_left(days, day) - 1
+        return vals[i] if i >= 0 else None
