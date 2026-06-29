@@ -15,9 +15,26 @@ import { t0Service } from '../../api/t0'
 import { alphaService } from '../../api/alpha'
 import { useAvailableSymbols } from '../../hooks/useAvailableSymbols'
 import DateRangeSelector from '../../components/DateRangeSelector'
+import TickPolicyEditor from './TickPolicyEditor'
 import type {
-  T0BandEdgeRow, T0FillCfg, T0FillSensitivityRow, T0PeriodRow, T0Profile, T0Report,
+  T0BandEdgeRow, T0FillCfg, T0FillSensitivityRow, T0PeriodRow, T0Profile, T0Report, TickPolicyCfg,
 } from '../../types/t0'
+
+/** 成交假设去重键。 */
+const fillKey = (f: T0FillCfg): string => `${f.penetration}|${f.ratio}`
+
+/** 校验档位策略：label 唯一 + signal 规则必选信号名。返回错误信息或 null。 */
+const validatePolicies = (policies: TickPolicyCfg[]): string | null => {
+  const labels = policies.map((p) => p.label.trim())
+  if (labels.some((l) => !l)) return '每个档位策略都需要名称'
+  if (new Set(labels).size !== labels.length) return '档位策略名称必须唯一'
+  for (const p of policies) {
+    if (p.kind === 'conditional') {
+      if (p.rules.some((r) => r.lhs === 'signal' && !r.signal_name)) return `策略「${p.label}」有信号规则未选信号名`
+    }
+  }
+  return null
+}
 
 const { Text, Paragraph } = Typography
 
@@ -60,8 +77,9 @@ const cumRowFor = (yearly: T0PeriodRow[]): T0PeriodRow => {
 const T0Backtest: React.FC = () => {
   const [symbol, setSymbol] = useState('000415.SZSE')
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs('2023-01-01'), dayjs('2025-12-31')])
-  const [sellTick, setSellTick] = useState(0.02)
-  const [buyTick, setBuyTick] = useState(0.02)
+  const [tickPolicies, setTickPolicies] = useState<TickPolicyCfg[]>([
+    { kind: 'fixed', label: '固定2分', sell_tick: 0.02, buy_tick: 0.02 },
+  ])
   const [swingFrac, setSwingFrac] = useState(1.0)
   const [baseWeight, setBaseWeight] = useState(0.5)
   const [capital, setCapital] = useState(1_000_000)
@@ -73,7 +91,14 @@ const T0Backtest: React.FC = () => {
     { penFen: 0, ratioPct: 50 },
   ])
   const [xMaxFen, setXMaxFen] = useState(15)
-  const [selFill, setSelFill] = useState(0)   // 逐年/命中分布查看哪个成交假设
+  const [selFill, setSelFill] = useState(0)     // 逐年/命中分布查看哪个成交假设
+  const [selPolicy, setSelPolicy] = useState(0) // 逐年/命中分布查看哪个档位策略
+
+  // 可用信号名（供条件规则的 signal 左值选择）
+  const { data: signalNames = [] } = useQuery({
+    queryKey: ['t0-signals'],
+    queryFn: () => t0Service.listSignals(),
+  })
 
   // 复用 CNN 训练同款"按现有数据快速选择"
   const { data: resources } = useQuery({
@@ -114,15 +139,22 @@ const T0Backtest: React.FC = () => {
   })
   const report: T0Report | undefined = mut.data
   const onRun = useCallback(() => {
+    const err = validatePolicies(tickPolicies)
+    if (err) { message.error(err); return }
+    const firstFixed = tickPolicies.find((p) => p.kind === 'fixed') as
+      | Extract<TickPolicyCfg, { kind: 'fixed' }> | undefined
     mut.mutate({
       symbol: symbol.trim(),
       start: dateRange[0].format('YYYY-MM-DD'),
       end: dateRange[1].format('YYYY-MM-DD'),
-      sell_tick: sellTick, buy_tick: buyTick, swing_frac: swingFrac, base_weight: baseWeight,
+      // sell_tick/buy_tick 仅为满足后端必填字段（有 tick_policies 时后端忽略它们）
+      sell_tick: firstFixed?.sell_tick ?? 0.02, buy_tick: firstFixed?.buy_tick ?? 0.02,
+      swing_frac: swingFrac, base_weight: baseWeight,
       capital, commission_rate: commissionRate, stamp_duty: stampDuty,
       fill_grid: fillGrid.map((f) => ({ penetration: f.penFen / 100, ratio: f.ratioPct / 100 })),
+      tick_policies: tickPolicies,
     })
-  }, [mut, symbol, dateRange, sellTick, buyTick, swingFrac, baseWeight, capital, commissionRate, stampDuty, fillGrid])
+  }, [mut, symbol, dateRange, tickPolicies, swingFrac, baseWeight, capital, commissionRate, stampDuty, fillGrid])
 
   // —— 画像 ——
   const profMut = useMutation({
@@ -141,16 +173,34 @@ const T0Backtest: React.FC = () => {
   }, [profMut, symbol, dateRange, xMaxFen, commissionRate, stampDuty])
   const applySuggested = useCallback(() => {
     if (!profile) return
-    setSellTick(profile.suggested_sell_tick)
-    setBuyTick(profile.suggested_buy_tick)
-    message.success(`已填入建议档位：卖 ${profile.suggested_sell_tick} / 买 ${profile.suggested_buy_tick}`)
+    const s = profile.suggested_sell_tick, b = profile.suggested_buy_tick
+    setTickPolicies((ps) => {
+      const i = ps.findIndex((p) => p.kind === 'fixed')
+      if (i >= 0) return ps.map((p, idx) => (idx === i ? { ...p, sell_tick: s, buy_tick: b } : p))
+      return [...ps, { kind: 'fixed', label: '建议档', sell_tick: s, buy_tick: b }]
+    })
+    message.success(`已填入建议档位：卖 ${s} / 买 ${b}（更新到固定档策略）`)
   }, [profile])
 
+  // 结果 = 档位策略 × 成交假设；按两维分别切换查看
+  const results = report?.results ?? []
+  const policyLabels = useMemo(() => [...new Set(results.map((r) => r.tick_label))], [results])
+  const fillCfgs = useMemo(() => {
+    const seen = new Map<string, T0FillCfg>()
+    results.forEach((r) => { if (!seen.has(fillKey(r.fill))) seen.set(fillKey(r.fill), r.fill) })
+    return [...seen.values()]
+  }, [results])
+  const selLabel = policyLabels[Math.min(selPolicy, Math.max(0, policyLabels.length - 1))]
+  const selFillCfg = fillCfgs[Math.min(selFill, Math.max(0, fillCfgs.length - 1))]
+  const sel = results.find((r) => r.tick_label === selLabel && fillKey(r.fill) === fillKey(selFillCfg ?? r.fill))
+  const hit = sel?.hit_dist
+  // 收益区间只在「当前所选策略」内跨成交假设取（不同策略不混在一起比）
   const spread = useMemo(() => {
-    if (!report?.fill_sensitivity?.length) return null
-    const rets = report.fill_sensitivity.map((r) => r.total_return)
+    const rows = report?.fill_sensitivity?.filter((r) => r.tick_label === selLabel) ?? []
+    if (!rows.length) return null
+    const rets = rows.map((r) => r.total_return)
     return { hi: Math.max(...rets), lo: Math.min(...rets) }
-  }, [report])
+  }, [report, selLabel])
 
   const profCols = [
     { title: '偏离(分)', dataIndex: 'x_fen', key: 'x' },
@@ -170,12 +220,6 @@ const T0Backtest: React.FC = () => {
     { title: '超额(vs满仓)', dataIndex: 'excess_vs_bh', key: 'e1', render: (v: number) => pct(v) },
     { title: '超额(vs半仓)', dataIndex: 'excess_vs_half_bh', key: 'e2', render: (v: number) => pct(v) },
   ]
-  // 每个成交假设(网格每行)都各跑了一次完整回测、各有一套逐年；selFill 选看哪一个
-  const results = report?.results ?? []
-  const selIdx = results.length ? Math.min(selFill, results.length - 1) : 0
-  const sel = results[selIdx]
-  const hit = sel?.hit_dist
-
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Alert type="info" showIcon
@@ -236,32 +280,29 @@ const T0Backtest: React.FC = () => {
         </Row>
 
         <Row gutter={[16, 12]} style={{ marginTop: 4 }}>
-          <Col span={5}>
-            <Text type="secondary">卖单档位（元）<Tooltip title="开盘价 + 该价差挂卖单"><InfoCircleOutlined /></Tooltip></Text>
-            <InputNumber style={{ width: '100%' }} value={sellTick} min={0.01} step={0.01} precision={2}
-              onChange={(v) => setSellTick(v ?? 0.02)} />
-          </Col>
-          <Col span={5}>
-            <Text type="secondary">买单档位（元）<Tooltip title="开盘价 − 该价差挂买单"><InfoCircleOutlined /></Tooltip></Text>
-            <InputNumber style={{ width: '100%' }} value={buyTick} min={0.01} step={0.01} precision={2}
-              onChange={(v) => setBuyTick(v ?? 0.02)} />
-          </Col>
-          <Col span={5}>
+          <Col span={8}>
             <Text type="secondary">摆动幅度<Tooltip title="做T一手占半仓比例，1=全半仓摆动"><InfoCircleOutlined /></Tooltip></Text>
             <InputNumber style={{ width: '100%' }} value={swingFrac} min={0.1} max={1} step={0.1}
               onChange={(v) => setSwingFrac(v ?? 1)} />
           </Col>
-          <Col span={5}>
+          <Col span={8}>
             <Text type="secondary">半仓锚权重</Text>
             <InputNumber style={{ width: '100%' }} value={baseWeight} min={0.1} max={0.9} step={0.1}
               onChange={(v) => setBaseWeight(v ?? 0.5)} />
           </Col>
-          <Col span={4}>
+          <Col span={8}>
             <Text type="secondary">画像档位上限(分)</Text>
             <InputNumber style={{ width: '100%' }} value={xMaxFen} min={2} max={50} step={1}
               onChange={(v) => setXMaxFen(v ?? 15)} />
           </Col>
         </Row>
+
+        <Divider style={{ margin: '12px 0' }} orientation="left" plain>
+          <Text type="secondary" style={{ fontSize: 13 }}>
+            档位策略 <Tooltip title="定义一个或多个命名档位策略，一次回测出「策略 × 成交假设」对比。固定/波动缩放/趋势倾斜为数值参数；条件规则可按跳空/波动/动量/信号挂不同档位。"><InfoCircleOutlined /></Tooltip>
+          </Text>
+        </Divider>
+        <TickPolicyEditor value={tickPolicies} onChange={setTickPolicies} signalNames={signalNames} />
 
         <Divider style={{ margin: '12px 0' }} orientation="left" plain>
           <Text type="secondary" style={{ fontSize: 13 }}>
@@ -296,6 +337,7 @@ const T0Backtest: React.FC = () => {
               {report.fill_sensitivity.map((r: T0FillSensitivityRow, i) => (
                 <Col span={8} key={i}>
                   <Card size="small" bordered>
+                    {policyLabels.length > 1 && <div><Text strong style={{ fontSize: 12 }}>{r.tick_label}</Text></div>}
                     <Tag color={r.fill.penetration > 0 ? 'volcano' : r.fill.ratio < 1 ? 'gold' : 'green'}>{fillLabel(r.fill)}</Tag>
                     <Statistic value={r.total_return * 100} precision={1} suffix="%"
                       valueStyle={{ color: r.total_return > 0 ? '#3f8600' : '#cf1322' }} />
@@ -316,11 +358,24 @@ const T0Backtest: React.FC = () => {
 
           {sel && (
             <Card size="small" title="逐年收益与超额"
-              extra={results.length > 1 ? (
-                <Space size="small">
-                  <Text type="secondary" style={{ fontSize: 12 }}>成交假设</Text>
-                  <Segmented size="small" value={selIdx} onChange={(v) => setSelFill(Number(v))}
-                    options={results.map((r, i) => ({ label: fillLabel(r.fill), value: i }))} />
+              extra={(policyLabels.length > 1 || fillCfgs.length > 1) ? (
+                <Space size="small" wrap>
+                  {policyLabels.length > 1 && (
+                    <>
+                      <Text type="secondary" style={{ fontSize: 12 }}>策略</Text>
+                      <Segmented size="small" value={Math.min(selPolicy, policyLabels.length - 1)}
+                        onChange={(v) => setSelPolicy(Number(v))}
+                        options={policyLabels.map((l, i) => ({ label: l, value: i }))} />
+                    </>
+                  )}
+                  {fillCfgs.length > 1 && (
+                    <>
+                      <Text type="secondary" style={{ fontSize: 12 }}>成交假设</Text>
+                      <Segmented size="small" value={Math.min(selFill, fillCfgs.length - 1)}
+                        onChange={(v) => setSelFill(Number(v))}
+                        options={fillCfgs.map((f, i) => ({ label: fillLabel(f), value: i }))} />
+                    </>
+                  )}
                 </Space>
               ) : null}>
               <Table<T0PeriodRow> size="small" pagination={false} columns={yearCols}
@@ -328,7 +383,8 @@ const T0Backtest: React.FC = () => {
                 rowClassName={(r) => (r.year == null ? 'ant-table-row-selected' : '')}
                 dataSource={[...sel.yearly, cumRowFor(sel.yearly)]} />
               <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-                当前口径：{fillLabel(sel.fill)}{results.length > 1 ? '（切右上角看其它成交假设的逐年表现）' : ''}。
+                当前口径：<b>{sel.tick_label}</b> ｜ {fillLabel(sel.fill)}
+                {(policyLabels.length > 1 || fillCfgs.length > 1) ? '（切右上角看其它策略/成交假设）' : ''}。
               </Paragraph>
             </Card>
           )}
