@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol, runtime_checkable
@@ -84,12 +85,39 @@ class DailyHistory:
         return self.bars[-1].close / base - 1.0
 
 
+@dataclass
+class TickContext:
+    """挂单决策的无前视上下文：只含「截至昨收 + 今开」的信息。
+
+    自定义算法可基于 ``hist``/``open`` 计算；``signals`` 为 point-in-time 信号值。
+    **绝不含当日 high/low/close 或未来 bar**，从结构上杜绝前视（design Property 1/5）。
+
+    Attributes:
+        day: 当前交易日。
+        open: 今日开盘价（元）——9:25 集合竞价后可知。
+        prev_close: 上一交易日收盘价（元）。
+        hist: 截至昨日（已完成日）的日线累积。
+        signals: 该标的截至昨收的信号值字典（因子或自定义算法皆可，point-in-time）。
+    """
+
+    day: date
+    open: float
+    prev_close: float
+    hist: DailyHistory
+    signals: dict[str, float | None] = field(default_factory=dict)
+
+    @property
+    def gap(self) -> float:
+        """今开相对昨收的跳空 = ``open/prev_close − 1``；昨收非正时退化为 0。"""
+        return self.open / self.prev_close - 1.0 if self.prev_close else 0.0
+
+
 @runtime_checkable
 class TickPolicy(Protocol):
-    """档位策略协议：给定交易日与"截至前一日"的历史，返回 (sell_tick, buy_tick)。"""
+    """档位策略协议：给定无前视上下文 ``TickContext``，返回 (sell_tick, buy_tick)。"""
 
-    def ticks_for(self, day: date, hist: DailyHistory) -> tuple[float, float]:
-        """返回某交易日的卖/买档位（元）。实现只许读 hist（无前视）。"""
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
+        """返回某交易日的卖/买档位（元）。实现只许读 ctx（无前视）。"""
         ...
 
 
@@ -105,8 +133,8 @@ class FixedTick:
     sell_tick: float = 0.02
     buy_tick: float = 0.02
 
-    def ticks_for(self, day: date, hist: DailyHistory) -> tuple[float, float]:
-        """忽略 hist，恒返回配置的固定档位。"""
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
+        """忽略 ctx，恒返回配置的固定档位。"""
         return (self.sell_tick, self.buy_tick)
 
 
@@ -128,9 +156,9 @@ class VolScaledTick:
     pricetick: float = 0.01
     fallback: float = 0.02
 
-    def ticks_for(self, day: date, hist: DailyHistory) -> tuple[float, float]:
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
         """按近 N 日均振幅缩放出对称档位；历史不足回退 fallback。"""
-        atr = hist.mean_range(self.n)
+        atr = ctx.hist.mean_range(self.n)
         if atr is None:
             return (self.fallback, self.fallback)
         t = max(self.pricetick, round_to(self.k * atr, self.pricetick))
@@ -156,9 +184,9 @@ class TrendTiltTick:
     n: int = 5
     pricetick: float = 0.01
 
-    def ticks_for(self, day: date, hist: DailyHistory) -> tuple[float, float]:
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
         """按近 N 日动量符号做非对称倾斜。"""
-        mom = hist.momentum(self.n)
+        mom = ctx.hist.momentum(self.n)
         if mom is None or mom == 0:
             return (max(self.pricetick, self.base), max(self.pricetick, self.base))
         if mom > 0:
@@ -166,3 +194,78 @@ class TrendTiltTick:
         else:
             sell, buy = self.base - self.tilt, self.base + self.tilt
         return (max(self.pricetick, sell), max(self.pricetick, buy))
+
+
+@dataclass
+class Rule:
+    """一条挂单规则：``condition``/``ticks`` 均为任意可调用（只读 ctx）。
+
+    自定义算法是一等公民——可直接在回调里基于 ``ctx.hist``/``ctx.open``/``ctx.signals`` 计算，
+    无需先注册为命名信号。
+
+    Args:
+        name: 规则名（报告/调试用）。
+        condition: ``(TickContext) -> bool``，触发判定；只读 ctx（无前视）。
+        ticks: ``(TickContext) -> (sell_tick, buy_tick)``，命中时给出卖/买档（元）。
+    """
+
+    name: str
+    condition: Callable[[TickContext], bool]
+    ticks: Callable[[TickContext], tuple[float, float]]
+
+
+@dataclass
+class ConditionalTickPolicy:
+    """条件驱动的档位策略（``TickPolicy`` 实现）：按规则顺序匹配，首个命中即返回其档位。
+
+    无任何规则命中时返回 ``default``。所有返回档位经 ``round_to`` 对齐最小价位、并夹到
+    ≥ 一个最小价位，避免非法报价（design Property 4）。
+
+    Args:
+        rules: 有序规则列表；逐条评估 ``condition``，命中即用其 ``ticks``。
+        default: 无规则命中时的兜底档位 ``(sell_tick, buy_tick)``（元）。
+        pricetick: 最小价位，用于对齐与下限；默认 0.01。
+
+    Example:
+        >>> p = ConditionalTickPolicy(rules=gap_rules(), default=(0.03, 0.02))
+        >>> p.ticks_for(ctx)  # 高开→(0.07,0.01) / 低开→(0.09,0.01) / 平开→default
+    """
+
+    rules: list[Rule]
+    default: tuple[float, float]
+    pricetick: float = 0.01
+    signal_names: tuple[str, ...] = ()   # 策略据此为 ctx.signals 预取的命名信号
+
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
+        """逐条评估规则，返回首个命中规则的档位；无匹配返回 default。"""
+        for rule in self.rules:
+            if rule.condition(ctx):
+                return self._round(rule.ticks(ctx))
+        return self._round(self.default)
+
+    def _round(self, ticks: tuple[float, float]) -> tuple[float, float]:
+        """把 (sell, buy) 对齐最小价位并夹到 ≥ pricetick。"""
+        pt = self.pricetick
+        sell, buy = ticks
+        return (max(pt, round_to(sell, pt)), max(pt, round_to(buy, pt)))
+
+
+def gap_rules(thresh: float = 0.003,
+              up: tuple[float, float] = (0.07, 0.01),
+              down: tuple[float, float] = (0.09, 0.01)) -> list[Rule]:
+    """构造「高开/低开」两条跳空规则（平开交由 ``ConditionalTickPolicy.default`` 兜底）。
+
+    高开 = ``gap > thresh``、低开 = ``gap < −thresh``；判定只用 ``ctx.gap``（今开/昨收），无前视。
+
+    Args:
+        thresh: 跳空阈值（如 0.003 = 0.3%）。
+        up: 高开档位 ``(sell_tick, buy_tick)``（元）。
+        down: 低开档位（元）。
+
+    Returns:
+        ``[Rule(高开), Rule(低开)]``；平开（``|gap| ≤ thresh``）不命中、走 default。
+    """
+    return [
+        Rule("高开", lambda c, t=thresh: c.gap > t, lambda c, v=up: v),
+        Rule("低开", lambda c, t=thresh: c.gap < -t, lambda c, v=down: v),
+    ]

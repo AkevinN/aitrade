@@ -19,7 +19,7 @@ from datetime import date, time
 from ..engine import round_to
 from ..strategy import BaseStrategy
 from ..types import BarData
-from .tick_policy import DailyBar, DailyHistory, FixedTick, TickPolicy
+from .tick_policy import DailyBar, DailyHistory, FixedTick, TickContext, TickPolicy
 
 _LOT = 100.0  # A 股最小交易单位（股）
 
@@ -38,6 +38,7 @@ class HalfPositionT0Strategy(BaseStrategy):
     swing_frac: float = 1.0
     base_weight: float = 0.5
     close_time: time = time(14, 57)       # 该时刻及之后的首根 bar 视为收盘，触发回半仓
+    signal_provider = None                # 可选 SignalProvider，为 ctx.signals 提供 point-in-time 值
 
     def on_init(self) -> None:
         """初始化日界与日线累积状态。"""
@@ -109,7 +110,13 @@ class HalfPositionT0Strategy(BaseStrategy):
         """按 TickPolicy 在开盘价上下挂卖/买限价单，数量=swing_frac×半仓股数。"""
         vt = self._vt()
         pricetick = self.strategy_engine.priceticks[vt]
-        sell_tick, buy_tick = self.tick_policy.ticks_for(self._cur_date, self._hist)
+        # 构造无前视上下文：今开 + 昨收 + 截至昨日历史 + 截至昨收的信号值
+        prev_close = self._hist.bars[-1].close if self._hist.bars else open_price
+        names = getattr(self.tick_policy, "signal_names", ())
+        signals = ({n: self.signal_provider.value(vt, self._cur_date, n) for n in names}
+                   if (self.signal_provider is not None and names) else {})
+        ctx = TickContext(self._cur_date, open_price, prev_close, self._hist, signals)
+        sell_tick, buy_tick = self.tick_policy.ticks_for(ctx)
         vol = _round_lot(self.swing_frac * self._half_shares(open_price))
         if vol < _LOT:
             return  # 半仓股数过小（资金过少/价过高），当日不做 T，仅维持半仓

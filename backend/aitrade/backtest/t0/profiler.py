@@ -22,7 +22,7 @@ from datetime import date
 
 import polars as pl
 
-from .tick_policy import DailyHistory
+from .tick_policy import DailyHistory, TickContext
 
 
 @dataclass
@@ -294,18 +294,18 @@ class ReversionCalibratedTick:
     def __init__(self, profile: T0Profile) -> None:
         self.profile = profile
 
-    def ticks_for(self, day: date, hist: DailyHistory) -> tuple[float, float]:
+    def ticks_for(self, ctx: TickContext) -> tuple[float, float]:
         """返回当日 (sell_tick, buy_tick)，按近 20 日均振幅缩放画像建议档位。
 
         Args:
-            day: 当前交易日（仅满足 TickPolicy 协议签名，**不被读取**，以保证确定性/无前视）。
-            hist: 截至前一交易日收盘的只读历史视图；用其 ``mean_range(20)`` 做缩放。
+            ctx: 无前视上下文；用其 ``hist.mean_range(20)`` 做缩放（不读 ``ctx.day``/``ctx.open``，
+                保证确定性/无前视）。
 
         Returns:
-            ``profile.suggested_ticks(scale=hist.mean_range(20))``；
+            ``profile.suggested_ticks(scale=ctx.hist.mean_range(20))``；
             历史不足 20 日时 ``mean_range`` 为 None，原样返回画像建议档位。
         """
-        return self.profile.suggested_ticks(scale=hist.mean_range(20))
+        return self.profile.suggested_ticks(scale=ctx.hist.mean_range(20))
 
 
 def load_daily_from_1m(parquet_path: str, start_year: int, end_year: int) -> pl.DataFrame:

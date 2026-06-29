@@ -22,7 +22,7 @@ from aitrade.backtest.t0.profiler import (
     T0Profiler,
     ReversionCalibratedTick,
 )
-from aitrade.backtest.t0.tick_policy import DailyBar, DailyHistory
+from aitrade.backtest.t0.tick_policy import DailyBar, DailyHistory, TickContext
 
 
 def _reversion_daily(n: int = 40) -> pl.DataFrame:
@@ -123,8 +123,8 @@ def test_reversion_calibrated_tick_no_lookahead_and_deterministic() -> None:
     for i in range(20):
         hist.append(DailyBar(d=date(2020, 6, 1 + i), open=10.0, high=10.10, low=9.90, close=10.0))
     # 近 20 日均振幅 0.20，是标定窗均振幅 0.10 的 2 倍 → 翻倍。
-    s1, b1 = pol.ticks_for(date(2020, 7, 1), hist)
-    s2, b2 = pol.ticks_for(date(2099, 12, 31), hist)  # day 不同，结果应相同（不读 day）
+    s1, b1 = pol.ticks_for(TickContext(date(2020, 7, 1), 10.0, 10.0, hist, {}))
+    s2, b2 = pol.ticks_for(TickContext(date(2099, 12, 31), 10.0, 10.0, hist, {}))  # day 不同，结果应相同
     assert (s1, b1) == (s2, b2)
     assert math.isclose(s1, 0.04, rel_tol=1e-9)
     assert math.isclose(b1, 0.08, rel_tol=1e-9)
@@ -132,7 +132,7 @@ def test_reversion_calibrated_tick_no_lookahead_and_deterministic() -> None:
     # 历史不足时 mean_range 返回 None → 原样返回建议档位。
     short_hist = DailyHistory()
     short_hist.append(DailyBar(d=date(2020, 6, 1), open=10.0, high=10.1, low=9.9, close=10.0))
-    assert pol.ticks_for(date(2020, 7, 1), short_hist) == (0.02, 0.04)
+    assert pol.ticks_for(TickContext(date(2020, 7, 1), 10.0, 10.0, short_hist, {})) == (0.02, 0.04)
 
 
 def test_to_dict_round_trips_key_fields() -> None:

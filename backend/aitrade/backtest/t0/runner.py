@@ -19,7 +19,7 @@ from ...config import ALPHA_LAB_PATH
 from ..engine import BacktestingEngine
 from ..types import FillPolicy
 from .strategy import HalfPositionT0Strategy
-from .tick_policy import FixedTick, TickPolicy
+from .tick_policy import FixedTick, TickContext, TickPolicy
 
 _TRADING_DAYS = 244
 
@@ -183,7 +183,11 @@ class T0BacktestRunner:
         turn = len(trades) / max(yrs, 1e-9)
 
         # 逐年/逐月超额：把策略净值与基准净值都按年/月切（用基准的日期轴）
-        sell_tick, buy_tick = tick_policy.ticks_for(bench["d"][-1], _full_hist(bench))
+        # 代表性档位（仅用于命中分布诊断）：用最后一日的 ctx
+        last_open = bench["open"][-1]
+        last_pc = bench["close"][-2] if bench.height >= 2 else last_open
+        rep_ctx = TickContext(bench["d"][-1], last_open, last_pc, _full_hist(bench), {})
+        sell_tick, buy_tick = tick_policy.ticks_for(rep_ctx)
         yearly = _by_period(equity, dates, bench, "year")
         monthly = _by_period(equity, dates, bench, "month")
         return T0RunResult(
