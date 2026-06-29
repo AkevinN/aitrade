@@ -161,3 +161,49 @@ def test_grid_product_capped_400(monkeypatch, tmp_path) -> None:
         r = c.post("/api/t0/backtest", json={"symbol": "AAA.SSE", "start": "2025-01-01",
                                              "end": "2025-01-31", "tick_policies": policies, "fill_grid": fills})
     assert r.status_code == 400
+
+
+# ---- 分场景画像端点 /profile_segmented ----
+
+def _patch_profile(monkeypatch, tmp_path, daily) -> None:
+    """打桩：parquet 存在 + load_daily_from_1m 返回指定日线（画像端点用真实 profiler 计算）。"""
+    p = tmp_path / "bars" / "1m"
+    p.mkdir(parents=True, exist_ok=True)
+    (p / "AAA.SSE.parquet").write_bytes(b"x")
+    monkeypatch.setattr(t0, "ALPHA_LAB_PATH", tmp_path)
+    monkeypatch.setattr(t0, "load_daily_from_1m", lambda *a, **k: daily)
+
+
+def _gap_daily():
+    """7 日日线：高2/低2/平2（首日占位）。"""
+    rows = []
+    prev = None
+    for i, g in enumerate([0.0, 0.01, -0.01, 0.0, 0.006, -0.006, 0.001]):
+        o = 10.0 if prev is None else round(prev * (1 + g), 4)
+        c = round(o + 0.03, 4)
+        rows.append({"d": date(2025, 1, 1) + (date(2025, 1, 1 + i) - date(2025, 1, 1)),
+                     "open": o, "high": max(o, c) + 0.05, "low": min(o, c) - 0.05, "close": c})
+        prev = c
+    return pl.DataFrame(rows)
+
+
+def test_profile_segmented_returns_three_regimes(monkeypatch, tmp_path) -> None:
+    """/profile_segmented 返回 高/低/平开 三段，各带 n_days；和=总日数−1。"""
+    _patch_profile(monkeypatch, tmp_path, _gap_daily())
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/profile_segmented", json={"symbol": "AAA.SSE", "start": "2025-01-01",
+                                                      "end": "2025-12-31", "gap_thresh": 0.003})
+    assert r.status_code == 200
+    body = r.json()
+    assert [s["regime"] for s in body["segments"]] == ["high", "low", "flat"]
+    assert sum(s["n_days"] for s in body["segments"]) == 7 - 1
+    assert all("profile" in s and "suggested_sell_tick" in s["profile"] for s in body["segments"])
+
+
+def test_profile_segmented_insufficient_days_400(monkeypatch, tmp_path) -> None:
+    """有效日不足（<6）→ 400。"""
+    small = _gap_daily().head(3)
+    _patch_profile(monkeypatch, tmp_path, small)
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/profile_segmented", json={"symbol": "AAA.SSE", "start": "2025-01-01", "end": "2025-12-31"})
+    assert r.status_code == 400

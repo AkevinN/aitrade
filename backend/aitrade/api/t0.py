@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..backtest.t0.policy_spec import TickPolicyCfg, compile_tick_policy
-from ..backtest.t0.profiler import T0Profiler, load_daily_from_1m
+from ..backtest.t0.profiler import T0Profiler, load_daily_from_1m, profile_by_gap
 from ..backtest.t0.runner import T0BacktestRunner
 from ..backtest.t0.signals import LabSignalProvider, SignalProvider
 from ..backtest.t0.tick_policy import FixedTick, TickPolicy
@@ -215,6 +215,50 @@ async def run_t0_profile(req: T0ProfileRequest) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"做T画像失败：{exc}") from exc
+
+
+class T0ProfileSegmentedRequest(T0ProfileRequest):
+    """分场景（高/低/平开）做 T 画像请求：在全窗画像请求上加跳空阈值。"""
+
+    gap_thresh: float = Field(default=0.003, gt=0, description="高/低开判定阈值（小数，如 0.003=0.3%）")
+
+
+@router.post("/profile_segmented", summary="按高/低/平开分场景的做T画像（供条件策略逐规则标定）")
+async def run_t0_profile_segmented(req: T0ProfileSegmentedRequest) -> dict:
+    """把标定窗按跳空切高/低/平开三组，各自做 T 画像，供条件(跳空)策略逐规则建议档位。
+
+    每组各自给建议 (sell, buy) 档与样本天数 ``n_days``；调用方据 ``n_days`` 对小样本场景告警。
+    无前视（gap 用昨收、画像只读标定窗），建议仍为理想撮合上限、须经回测 FillPolicy 网格验证。
+
+    Args:
+        req: 分场景画像请求（标的/标定窗/档位上限/成本 + gap_thresh）。
+
+    Returns:
+        ``{"symbol", "thresh", "segments": [{regime,label,n_days,profile}, ...]}``，
+        ``segments`` 固定顺序 高开/低开/平开。
+
+    Raises:
+        HTTPException: 数据缺失（404）或区间非法/有效日不足/统计失败（400）。
+    """
+    if req.start >= req.end:
+        raise HTTPException(status_code=400, detail="起始日期须早于结束日期")
+    parquet = ALPHA_LAB_PATH / "bars" / "1m" / f"{req.symbol}.parquet"
+    if not parquet.exists():
+        raise HTTPException(status_code=404, detail=f"未找到 {req.symbol} 的 1 分钟数据：{parquet}")
+    try:
+        import polars as pl
+        daily = load_daily_from_1m(str(parquet), req.start.year, req.end.year)
+        daily = daily.filter((pl.col("d") >= req.start) & (pl.col("d") <= req.end))
+        if daily.height < 6:   # 分场景需更多样本（首日剔除 + 三组各需若干天）
+            raise HTTPException(status_code=400, detail="标定窗内有效交易日不足（分场景至少 6 日）")
+        segs = profile_by_gap(
+            req.symbol, daily, thresh=req.gap_thresh, x_grid_fen=range(1, req.x_max_fen + 1),
+            commission_rate=req.commission_rate, stamp_duty=req.stamp_duty)
+        return {"symbol": req.symbol, "thresh": req.gap_thresh, "segments": [s.to_dict() for s in segs]}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"分场景画像失败：{exc}") from exc
 
 
 @router.get("/signals", summary="列出可用于条件规则的信号名")

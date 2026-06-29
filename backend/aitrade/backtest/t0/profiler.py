@@ -280,6 +280,87 @@ class T0Profiler:
         return best.x_fen / 100.0
 
 
+@dataclass
+class GapSegmentProfile:
+    """单个跳空场景（高/低/平开）的画像 + 样本天数。
+
+    Args:
+        regime: 场景代号，``"high"``/``"low"``/``"flat"``。
+        label: 场景中文名，``"高开"``/``"低开"``/``"平开"``。
+        n_days: 该场景在标定窗内的样本天数（供小样本告警；过少则建议不可靠）。
+        profile: 该场景子集上的 ``T0Profile``（含自己的建议 (sell, buy) 档位）。
+    """
+
+    regime: str
+    label: str
+    n_days: int
+    profile: T0Profile
+
+    def to_dict(self) -> dict:
+        """序列化为可 JSON 落盘的 dict（``profile`` 逐层展开）。"""
+        return {
+            "regime": self.regime,
+            "label": self.label,
+            "n_days": self.n_days,
+            "profile": self.profile.to_dict(),
+        }
+
+
+def profile_by_gap(
+    symbol: str,
+    daily: pl.DataFrame,
+    thresh: float = 0.003,
+    x_grid_fen=range(1, 16),
+    commission_rate: float = 0.0003,
+    stamp_duty: float = 0.0005,
+) -> list[GapSegmentProfile]:
+    """把标定窗日线按跳空 ``gap`` 切成高/低/平开三组，各自调既有 ``T0Profiler.profile``。
+
+    ``gap = open / prev_close − 1``，``prev_close`` 取昨收（``close.shift(1)``）——首日无昨收，
+    其 ``gap`` 为空、**被剔除**，绝不参与任何场景（无前视）。三组判定互斥且完备：
+
+    - 高开：``gap > thresh``
+    - 低开：``gap < −thresh``
+    - 平开：``|gap| ≤ thresh``（边界归平开）
+
+    某场景为空/样本不足时仍返回该场景（``n_days`` 据实、``profile`` 退化为零档），由调用方据
+    ``n_days`` 告警，不在此强行回填。本函数**不复制**任何画像统计：每组只是先过滤、再调既有 ``profile``。
+
+    Args:
+        symbol: 标的合约代码（回填到各场景 ``T0Profile.symbol``）。
+        daily: 标定窗日线，含列 ``d``/``open``/``high``/``low``/``close``，每个交易日一行。
+        thresh: 高/低开判定阈值（小数，如 0.003 = 0.3%）。
+        x_grid_fen: 偏离档位网格（分），默认 ``range(1, 16)``。
+        commission_rate: 单边佣金率。
+        stamp_duty: 卖出印花税率。
+
+    Returns:
+        固定顺序 ``[高开, 低开, 平开]`` 的 ``GapSegmentProfile`` 列表；
+        三组 ``n_days`` 之和等于"有昨收"的交易日数（总日数 − 1，标定窗非空时）。
+
+    Example:
+        >>> segs = profile_by_gap("000415.SZSE", daily_df, thresh=0.003)
+        >>> {s.regime: s.n_days for s in segs}
+        {'high': 42, 'low': 38, 'flat': 120}
+    """
+    d = daily.sort("d").with_columns(
+        (pl.col("open") / pl.col("close").shift(1) - 1.0).alias("_gap")
+    ).drop_nulls(subset=["_gap"])   # 剔除首日（无昨收）
+
+    segments = [
+        ("high", "高开", pl.col("_gap") > thresh),
+        ("low", "低开", pl.col("_gap") < -thresh),
+        ("flat", "平开", pl.col("_gap").abs() <= thresh),
+    ]
+    profiler = T0Profiler()
+    out: list[GapSegmentProfile] = []
+    for regime, label, cond in segments:
+        sub = d.filter(cond).drop("_gap")
+        prof = profiler.profile(symbol, sub, x_grid_fen, commission_rate, stamp_duty)
+        out.append(GapSegmentProfile(regime=regime, label=label, n_days=sub.height, profile=prof))
+    return out
+
+
 class ReversionCalibratedTick:
     """由 T0Profile 标定的档位策略（TickPolicy）：天然非对称、按近期振幅缩放。
 
