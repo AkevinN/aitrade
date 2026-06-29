@@ -26,4 +26,12 @@ export const t0Service = {
    */
   profile: (req: T0ProfileRequest): Promise<T0Profile> =>
     api.post<T0Profile>('/api/t0/profile', req).then((r) => r.data),
+
+  /**
+   * 列出可用于条件规则（`lhs="signal"`）的持久化模型信号名。
+   *
+   * @returns 信号名升序数组；Alpha 未安装时为空数组
+   */
+  listSignals: (): Promise<string[]> =>
+    api.get<{ names: string[] }>('/api/t0/signals').then((r) => r.data.names),
 }

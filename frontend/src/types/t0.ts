@@ -8,6 +8,45 @@ export interface T0FillCfg {
   ratio: number
 }
 
+/**
+ * 单条件规则声明（与后端 RuleCfg 镜像）：单个左值 op 阈值 → (卖档, 买档)。
+ *
+ * 单位为后端口径：`sell_tick`/`buy_tick` 为元；`lhs="gap"` 时 `threshold` 为小数（0.003=0.3%），
+ * 其余左值 `threshold` 为原始值。编辑器以"分/%"展示、提交前换算到此口径。
+ */
+export interface RuleCfg {
+  /** 规则名（可空，报告/调试用） */
+  name?: string
+  /** 左值来源：gap=今开/昨收−1；mean_range/momentum=近 window 日；signal=命名持久化信号 */
+  lhs: 'gap' | 'mean_range' | 'momentum' | 'signal'
+  /** 比较运算：大于/不小于/小于/不大于 */
+  op: 'gt' | 'ge' | 'lt' | 'le'
+  /** 阈值（gap 为小数，signal/mean_range/momentum 为原始值） */
+  threshold: number
+  /** 回看日数，mean_range/momentum 适用 */
+  window?: number
+  /** 信号名，lhs="signal" 时必填 */
+  signal_name?: string
+  /** 命中时卖单挂高价差（元，>0） */
+  sell_tick: number
+  /** 命中时买单挂低价差（元，>0） */
+  buy_tick: number
+}
+
+/** 档位策略声明（判别联合，与后端 TickPolicyCfg 镜像）。`label` 一次请求内唯一。 */
+export type TickPolicyCfg =
+  | { kind: 'fixed'; label: string; sell_tick: number; buy_tick: number }
+  | { kind: 'vol_scaled'; label: string; k: number; n: number; fallback: number }
+  | { kind: 'trend_tilt'; label: string; base: number; tilt: number; n: number }
+  | {
+      kind: 'conditional'
+      label: string
+      rules: RuleCfg[]
+      default_sell_tick: number
+      default_buy_tick: number
+      pricetick: number
+    }
+
 /** 半仓做 T 回测请求体。 */
 export interface T0BacktestRequest {
   /** 标的 vt_symbol，如 "000415.SZSE" */
@@ -32,6 +71,8 @@ export interface T0BacktestRequest {
   stamp_duty: number
   /** 成交假设网格 */
   fill_grid: T0FillCfg[]
+  /** 多档位策略声明；省略则后端回退为单 FixedTick(sell_tick, buy_tick)（向后兼容） */
+  tick_policies?: TickPolicyCfg[]
 }
 
 /** 逐年（或逐月）收益与超额行。 */
