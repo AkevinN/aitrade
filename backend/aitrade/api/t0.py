@@ -47,12 +47,14 @@ def _compile_tick_policies(cfgs: list) -> tuple[list[tuple[str, TickPolicy]], li
 def _load_signal_provider(symbol: str, names: list[str]) -> SignalProvider | None:
     """按信号名加载持久化模型信号，建该标的的 point-in-time 提供器；无可用信号返回 None。
 
-    仅加载用到的信号，并预过滤到该标的以省内存。Alpha 模块不可用或信号缺失时优雅降级返回 None
-    （相应规则将恒不命中，不报致命错误）。
+    仅加载**已登记**（``list_all_signals()`` 白名单内）且用到的信号，并预过滤到该标的以省内存。
+    白名单杜绝了客户端用伪造 ``signal_name``（如 ``../../x``、绝对路径）穿越出信号目录读任意
+    ``.parquet`` 的风险：不在白名单的名字直接跳过（规则恒不命中），不会触达 ``load_signal``。
+    Alpha 模块不可用或信号缺失/脏帧时优雅降级（跳过该信号），不报致命错误。
 
     Args:
         symbol: 标的 vt_symbol。
-        names: 规则引用的信号名集合。
+        names: 规则引用的信号名集合（可能含客户端伪造名）。
 
     Returns:
         ``LabSignalProvider`` 或 None（无引用/不可用）。
@@ -66,9 +68,15 @@ def _load_signal_provider(symbol: str, names: list[str]) -> SignalProvider | Non
     except ImportError:
         return None
     lab = AlphaLab(ALPHA_LAB_PATH)
+    available = set(lab.list_all_signals())   # 白名单：只认已登记信号，杜绝路径穿越
     frames = {}
     for name in names:
-        f = lab.load_signal(name)
+        if name not in available:
+            continue                          # 伪造/未知名直接跳过，绝不触达文件系统
+        try:
+            f = lab.load_signal(name)
+        except Exception:  # noqa: BLE001  脏信号帧不致命，跳过该信号
+            continue
         if f is not None and "vt_symbol" in f.columns:
             sub = f.filter(pl.col("vt_symbol") == symbol)
             if sub.height > 0:
@@ -100,9 +108,10 @@ class T0BacktestRequest(BaseModel):
         default_factory=lambda: [FillCfg(penetration=0.0, ratio=1.0),
                                  FillCfg(penetration=0.01, ratio=1.0),
                                  FillCfg(penetration=0.0, ratio=0.5)],
+        max_length=20,
         description="成交假设网格（默认含理想/穿越1分/部分成交）")
     tick_policies: list[TickPolicyCfg] | None = Field(
-        default=None,
+        default=None, max_length=20,
         description="多档位策略声明（fixed/vol_scaled/trend_tilt/conditional）；"
                     "省略则回退为单 FixedTick(sell_tick, buy_tick)（向后兼容）")
 
@@ -136,6 +145,9 @@ async def run_t0_backtest(req: T0BacktestRequest) -> dict:
 
         if req.tick_policies:
             tick_policies, names = _compile_tick_policies(req.tick_policies)
+            # 防滥用：策略 × 成交假设 的网格规模封顶（每格都是一次完整 1m 回测）
+            if len(tick_policies) * len(req.fill_grid) > 120:
+                raise HTTPException(status_code=400, detail="策略 × 成交假设 组合过多（上限 120 格）")
             signal_provider = _load_signal_provider(req.symbol, names)
         else:  # 向后兼容：无 tick_policies 时沿用单 FixedTick
             tick_policies = [(f"fixed_{int(req.sell_tick*100)}/{int(req.buy_tick*100)}fen",

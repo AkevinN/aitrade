@@ -121,3 +121,43 @@ def test_list_t0_signals_returns_list(monkeypatch, tmp_path) -> None:
         r = c.get("/api/t0/signals")
     assert r.status_code == 200
     assert isinstance(r.json()["names"], list)
+
+
+# ---- 安全加固：signal_name 路径穿越 + 网格规模封顶 ----
+
+def test_load_signal_provider_rejects_traversal_names(monkeypatch) -> None:
+    """伪造 signal_name（穿越/绝对路径/未知）绝不触达 load_signal；只加载白名单内信号。"""
+    import aitrade.alpha as alpha_mod
+
+    calls: list[str] = []
+
+    class _FakeLab:
+        def __init__(self, _p): pass
+        def list_all_signals(self): return ['realsig']
+        def load_signal(self, name): calls.append(name); return None
+
+    monkeypatch.setattr(alpha_mod, 'AlphaLab', _FakeLab)
+    sp = t0._load_signal_provider('000415.SZSE',
+                                  ['../../../etc/passwd', '/abs/secret', 'realsig', 'unknown'])
+    assert calls == ['realsig']     # 仅白名单内被加载；伪造名从不触达文件系统
+    assert sp is None               # realsig 返回空帧 → 无 frames → None（优雅降级）
+
+
+def test_oversized_tick_policies_rejected_422() -> None:
+    """tick_policies 超 max_length → 422（请求校验层拦截，防组合爆炸）。"""
+    policies = [{"kind": "fixed", "label": f"p{i}", "sell_tick": 0.02, "buy_tick": 0.02} for i in range(21)]
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/backtest", json={"symbol": "AAA.SSE", "start": "2025-01-01",
+                                             "end": "2025-01-31", "tick_policies": policies})
+    assert r.status_code == 422
+
+
+def test_grid_product_capped_400(monkeypatch, tmp_path) -> None:
+    """策略 × 成交假设 组合数超上限 → 400（每格都是一次完整回测）。"""
+    _patch(monkeypatch, tmp_path)
+    policies = [{"kind": "fixed", "label": f"p{i}", "sell_tick": 0.02, "buy_tick": 0.02} for i in range(12)]
+    fills = [{"penetration": 0.0, "ratio": round(0.1 + i * 0.01, 2)} for i in range(11)]  # 11 个 → 12×11=132>120
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/backtest", json={"symbol": "AAA.SSE", "start": "2025-01-01",
+                                             "end": "2025-01-31", "tick_policies": policies, "fill_grid": fills})
+    assert r.status_code == 400
