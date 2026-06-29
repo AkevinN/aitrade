@@ -154,6 +154,32 @@ export interface T0BandEdgeRow {
   day_pnl_fen: number
 }
 
+/** 分场景画像请求：在全窗画像请求上加跳空阈值（高/低开判定）。 */
+export interface T0ProfileSegmentedRequest extends T0ProfileRequest {
+  /** 高/低开判定阈值（小数，如 0.003=0.3%） */
+  gap_thresh: number
+}
+
+/** 单个跳空场景（高/低/平开）的画像 + 样本天数。 */
+export interface GapSegmentProfile {
+  /** 场景代号 */
+  regime: 'high' | 'low' | 'flat'
+  /** 场景中文名（高开/低开/平开） */
+  label: string
+  /** 该场景样本天数（过少则建议不可靠） */
+  n_days: number
+  /** 该场景子集上的画像 */
+  profile: T0Profile
+}
+
+/** 分场景画像响应：固定顺序 高开/低开/平开。 */
+export interface T0SegmentedProfile {
+  symbol: string
+  /** 本次使用的跳空阈值 */
+  thresh: number
+  segments: GapSegmentProfile[]
+}
+
 /** 标的做 T 画像（偏离-回归边际曲线 + 建议档位）。 */
 export interface T0Profile {
   symbol: string

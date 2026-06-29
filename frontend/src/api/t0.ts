@@ -1,6 +1,9 @@
 // 半仓做 T 回测 API 服务 — 对应后端 /api/t0 路由组（同步返回，非异步任务）
 import api from './client'
-import type { T0BacktestRequest, T0Report, T0Profile, T0ProfileRequest } from '../types/t0'
+import type {
+  T0BacktestRequest, T0Report, T0Profile, T0ProfileRequest,
+  T0ProfileSegmentedRequest, T0SegmentedProfile,
+} from '../types/t0'
 
 /**
  * 半仓做 T 回测 API 服务。
@@ -26,6 +29,15 @@ export const t0Service = {
    */
   profile: (req: T0ProfileRequest): Promise<T0Profile> =>
     api.post<T0Profile>('/api/t0/profile', req).then((r) => r.data),
+
+  /**
+   * 按高/低/平开分场景统计做 T 画像，供条件(跳空)策略逐规则标定档位。
+   *
+   * @param req - 分场景画像请求（标的/标定窗/档位上限/成本 + gap_thresh）
+   * @returns 三段画像（高开/低开/平开），各带建议档位与样本天数
+   */
+  profileSegmented: (req: T0ProfileSegmentedRequest): Promise<T0SegmentedProfile> =>
+    api.post<T0SegmentedProfile>('/api/t0/profile_segmented', req).then((r) => r.data),
 
   /**
    * 列出可用于条件规则（`lhs="signal"`）的持久化模型信号名。
