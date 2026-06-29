@@ -100,4 +100,27 @@ describe('CalibrationDrawer', () => {
     fireEvent.click(screen.getByText('统计画像'))
     expect(await screen.findByText('仅供参考')).toBeInTheDocument()
   })
+
+  it('重开抽屉清空上次结果：应用需对当前策略重新统计才可用', async () => {
+    const onApply = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const FIXED2: TickPolicyCfg = { kind: 'fixed', label: '固定B', sell_tick: 0.02, buy_tick: 0.02 }
+    const ui = (open: boolean, policy: TickPolicyCfg | null) => (
+      <QueryClientProvider client={qc}>
+        <AntApp>
+          <CalibrationDrawer open={open} policy={policy} evalWindow={[dayjs('2024-01-01'), dayjs('2025-12-31')]}
+            symbol="X" commissionRate={0.0001} stampDuty={0.0003} xMaxFen={15} onApply={onApply} onClose={vi.fn()} />
+        </AntApp>
+      </QueryClientProvider>
+    )
+    const { rerender } = render(ui(true, FIXED))
+    fireEvent.click(screen.getByText('统计画像'))
+    await screen.findByText(/建议 卖/)
+    expect(screen.getByRole('button', { name: '应用到本策略' })).toBeEnabled()
+    // 关闭 → 为另一策略重开：旧结果应被清空、应用按钮重新禁用
+    rerender(ui(false, null))
+    rerender(ui(true, FIXED2))
+    await waitFor(() => expect(screen.getByRole('button', { name: '应用到本策略' })).toBeDisabled())
+    expect(screen.queryByText(/建议 卖/)).toBeNull()
+  })
 })

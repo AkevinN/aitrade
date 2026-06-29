@@ -81,9 +81,6 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   // 标定窗默认：评估窗起点前一年 → 评估窗起点前一日（样本外）
   const [calibRange, setCalibRange] = useState<[Dayjs, Dayjs]>(
     [evalWindow[0].subtract(1, 'year'), evalWindow[0].subtract(1, 'day')])
-  useEffect(() => {
-    if (open) setCalibRange([evalWindow[0].subtract(1, 'year'), evalWindow[0].subtract(1, 'day')])
-  }, [open, evalWindow])
 
   // 条件策略：分场景阈值取该策略首个跳空规则的阈值绝对值
   const gapThresh = useMemo(() => {
@@ -100,6 +97,16 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
     mutationFn: t0Service.profileSegmented,
     onError: (e: unknown) => message.error((e as { response?: { data?: { detail?: string } } })?.response?.data?.detail || '分场景画像失败'),
   })
+
+  // 每次打开 / 切换被标定策略：重置标定窗为默认(评估窗之前) + 清空上次画像结果，
+  // 避免抽屉常驻挂载导致串用旧建议（旧窗口/旧策略/旧 gap_thresh 的结果误用到当前策略）。
+  useEffect(() => {
+    if (!open) return
+    setCalibRange([evalWindow[0].subtract(1, 'year'), evalWindow[0].subtract(1, 'day')])
+    profMut.reset()
+    segMut.reset()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, evalWindow, policy?.kind, policy?.label])
 
   const onRun = () => {
     const base = {
@@ -155,6 +162,11 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
         {!isCond && profMut.data && <ProfileBlock profile={profMut.data} />}
 
         {/* 条件(跳空)：高/低/平开三场景 */}
+        {isCond && segMut.data && (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            按 gap ±{(gapThresh * 100).toFixed(2)}% 切分高/低/平开（取首个跳空规则的阈值；若高、低开规则阈值不同，两侧统一按此切分，可把两条规则阈值设成相同量级以对齐）。
+          </Text>
+        )}
         {isCond && segMut.data && segMut.data.segments.map((seg) => (
           <div key={seg.regime}>
             <Space>
