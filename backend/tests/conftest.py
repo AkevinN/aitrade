@@ -13,7 +13,8 @@ conftest.py 是 pytest 在收集前最先 import 的文件：在本模块顶层�
 ``AITRADE_HOME`` 环境变量，aitrade.config 首次求值时即拿到隔离目录，
 全部派生常量与下游模块的 import 时副本随之指向隔离目录，无需逐模块
 monkeypatch。隔离效果由 tests/test_storage_isolation.py 持续校验，
-本文件的 session 级看门狗 fixture 兜底检测任何真实落盘。
+本文件的 session 级看门狗 fixture 兜底检测**本进程**对真实目录的任何写入
+（基于 ``open`` 审计钩子，详见 ``_real_storage_watchdog``）。
 """
 
 from __future__ import annotations
@@ -40,52 +41,103 @@ if "aitrade.config" in sys.modules:
 _ISOLATED_HOME = tempfile.mkdtemp(prefix="aitrade-pytest-home-")
 os.environ["AITRADE_HOME"] = _ISOLATED_HOME
 
+# ---------------------------------------------------------------------------
+# 真实数据目录写入看门狗（进程内 ``open`` 审计钩子）
+# ---------------------------------------------------------------------------
+# 真实（未隔离）数据目录：项目根 .aitrade 与用户主目录 .aitrade。
+# PROJECT_ROOT 直接由 conftest 自身位置推导（backend/tests/conftest.py →
+# 上三级即项目根），避免在此处 import aitrade.config——只需路径常量。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_REAL_DATA_DIRS: tuple[str, ...] = (
+    os.path.normpath(_PROJECT_ROOT / ".aitrade"),
+    os.path.normpath(Path.home() / ".aitrade"),
+)
 
-def _snapshot(root: Path) -> set[tuple[str, int]]:
-    """对目录做 (文件路径, 文件大小) 快照，用于检测新增与追加写入。
+# 本进程内捕获到的真实目录写入路径集合（审计钩子填充，看门狗 fixture 校验）。
+_REAL_WRITES: set[str] = set()
 
-    记录大小而非仅路径，是为了捕获对已有文件的追加（如往已存在的
-    task_history/*.jsonl 里 append 记录——这正是历史上真实发生过的
-    污染形态，仅对比文件名会漏检）。
+# os.open 形态下（mode 为 None）据 flags 判定写意图的标志位掩码。
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+
+def _is_write_open(mode: object, flags: object) -> bool:
+    """判断一次 ``open`` 审计事件是否带写入意图。
+
+    CPython 的 ``open`` 审计事件对 builtin ``open``/``io.open`` 给出字符串
+    ``mode``（"r"/"a"/"w"/"r+"…），对 ``os.open`` 给出 ``mode=None`` 并把
+    打开标志放在整数 ``flags`` 里。两种形态分别判定，纯读取不算写入。
 
     Args:
-        root: 要快照的目录；不存在时视为空目录。
+        mode: 审计事件第二参数；字符串模式（builtin open）或 None（os.open）。
+        flags: 审计事件第三参数；os.open 的整数打开标志，其它情况忽略。
 
     Returns:
-        {(绝对路径字符串, 字节大小)} 集合；root 不存在时返回空集合。
+        写入意图为真返回 True；纯读取（"r" / O_RDONLY）返回 False。
     """
-    if not root.is_dir():
-        return set()
-    return {
-        (str(p), p.stat().st_size)
-        for p in root.rglob("*")
-        if p.is_file()
-    }
+    if isinstance(mode, str):
+        return any(c in mode for c in "wax+")
+    return bool((int(flags) if isinstance(flags, int) else 0) & _WRITE_FLAGS)
+
+
+def _audit_open(event: str, args: tuple) -> None:
+    """``sys.addaudithook`` 回调：记录**本进程**对真实数据目录的写入式 open。
+
+    只关心写意图的 ``open`` 事件；命中真实数据目录前缀时把规整后的绝对
+    路径收入模块级 ``_REAL_WRITES``。审计钩子内抛出的异常会污染被审计的
+    ``open`` 调用本身，故全程吞异常、绝不向外传播。
+
+    与旧版"会话前后对真实目录做文件快照差分"相比，本钩子只看本进程发起
+    的 open，天然忽略同机并发进程（如本地 ``uvicorn`` 调度线程持续往
+    ``.aitrade/live/scheduler_runs`` 追加日志）的落盘，从根上消除误报。
+
+    Args:
+        event: 审计事件名；只处理 "open"。
+        args: 事件参数元组，对 "open" 为 ``(path, mode, flags)``。
+    """
+    if event != "open":
+        return
+    try:
+        path = args[0]
+        if not isinstance(path, (str, bytes)):  # 经 fd 打开等情况，path 非路径
+            return
+        if not _is_write_open(args[1], args[2]):
+            return
+        abspath = os.path.normpath(os.path.abspath(os.fsdecode(path)))
+        for real in _REAL_DATA_DIRS:
+            if abspath == real or abspath.startswith(real + os.sep):
+                _REAL_WRITES.add(abspath)
+                return
+    except Exception:  # noqa: BLE001 审计钩子绝不能抛出
+        return
+
+
+sys.addaudithook(_audit_open)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _real_storage_watchdog():
-    """session 级看门狗：整个测试会话结束后断言真实数据目录零变化。
+    """session 级看门狗：断言**本测试进程**从未向真实数据目录写入。
 
-    在会话开始时对两处真实数据目录（项目根 .aitrade 与用户主目录
-    .aitrade）做快照，会话结束时复查；若出现新增文件或已有文件被
-    追加写入，直接判会话失败。这是对环境变量重定向的兜底——即使
-    将来有代码绕过 config 硬编码真实路径，也会在 CI 里立刻暴露。
+    依赖模块顶层安装的 ``open`` 审计钩子 ``_audit_open``：它只捕获本进程
+    发起的写入式 open，因此与同机并发运行的真实服务完全隔离——历史上正
+    是这种并发进程（本地 ``uvicorn`` 后台调度线程往 ``.aitrade/live/
+    scheduler_runs`` 每 30s 追加一行）的落盘，被旧版"目录前后快照差分"
+    误判为测试污染，并把 session 级 teardown 失败归因到最后一个被收集的
+    用例（如 test_list_data_resources_uses_canonical_symbol）。
+
+    覆盖范围：本进程经 Python 层 ``open`` 的写入/追加/重写（即历史真实泄漏
+    形态——JSONL/JSON 存储的 append 与 delete_where 重写均走 ``open``）。
+    已知局限：经 Rust/polars 等绕过 CPython ``open`` 的写入不被本钩子捕获；
+    config 派生路径的静态隔离保证由 test_storage_isolation.py 兜底。
 
     Yields:
-        None。本 fixture 只做前后置校验，不向测试提供值。
+        None。本 fixture 只做会话末校验，不向测试提供值。
     """
-    from aitrade.config import PROJECT_ROOT
-
-    real_dirs = [PROJECT_ROOT / ".aitrade", Path.home() / ".aitrade"]
-    before = {d: _snapshot(d) for d in real_dirs}
     yield
-    for d, old in before.items():
-        leaked = _snapshot(d) - old
-        assert not leaked, (
-            f"测试套件向真实数据目录 {d} 落盘了 {len(leaked)} 处变化"
-            f"（新增或追加），样例: {sorted(leaked)[:5]}"
-        )
+    assert not _REAL_WRITES, (
+        f"测试进程向真实数据目录写入了 {len(_REAL_WRITES)} 个文件"
+        f"（存储隔离被绕过，非并发进程所致），样例: {sorted(_REAL_WRITES)[:5]}"
+    )
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
