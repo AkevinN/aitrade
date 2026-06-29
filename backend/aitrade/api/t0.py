@@ -12,13 +12,68 @@ from datetime import date
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..backtest.t0.policy_spec import TickPolicyCfg, compile_tick_policy
 from ..backtest.t0.profiler import T0Profiler, load_daily_from_1m
 from ..backtest.t0.runner import T0BacktestRunner
-from ..backtest.t0.tick_policy import FixedTick
+from ..backtest.t0.signals import LabSignalProvider, SignalProvider
+from ..backtest.t0.tick_policy import FixedTick, TickPolicy
 from ..backtest.types import FillPolicy
 from ..config import ALPHA_LAB_PATH
 
 router = APIRouter(prefix="/api/t0", tags=["t0"])
+
+
+def _compile_tick_policies(cfgs: list) -> tuple[list[tuple[str, TickPolicy]], list[str]]:
+    """把声明式档位策略列表编译成 ``[(label, TickPolicy)]`` 并汇总引用的信号名。
+
+    Args:
+        cfgs: 已被 Pydantic 解析的 ``TickPolicyCfg`` 列表（kind 已是白名单）。
+
+    Returns:
+        ``(tick_policies, signal_names)``：前者交 runner 扫网格，后者（升序去重）用于按需加载信号源。
+
+    Raises:
+        HTTPException: 策略 ``label`` 不唯一（400）。
+    """
+    compiled = [compile_tick_policy(c) for c in cfgs]
+    labels = [lbl for lbl, _, _ in compiled]
+    if len(set(labels)) != len(labels):
+        raise HTTPException(status_code=400, detail="档位策略 label 必须唯一")
+    policies = [(lbl, pol) for lbl, pol, _ in compiled]
+    names = sorted({n for _, _, ns in compiled for n in ns})
+    return policies, names
+
+
+def _load_signal_provider(symbol: str, names: list[str]) -> SignalProvider | None:
+    """按信号名加载持久化模型信号，建该标的的 point-in-time 提供器；无可用信号返回 None。
+
+    仅加载用到的信号，并预过滤到该标的以省内存。Alpha 模块不可用或信号缺失时优雅降级返回 None
+    （相应规则将恒不命中，不报致命错误）。
+
+    Args:
+        symbol: 标的 vt_symbol。
+        names: 规则引用的信号名集合。
+
+    Returns:
+        ``LabSignalProvider`` 或 None（无引用/不可用）。
+    """
+    if not names:
+        return None
+    try:
+        import polars as pl
+
+        from ..alpha import AlphaLab
+    except ImportError:
+        return None
+    lab = AlphaLab(ALPHA_LAB_PATH)
+    frames = {}
+    for name in names:
+        f = lab.load_signal(name)
+        if f is not None and "vt_symbol" in f.columns:
+            sub = f.filter(pl.col("vt_symbol") == symbol)
+            if sub.height > 0:
+                frames[name] = sub
+    return LabSignalProvider.from_frames(frames) if frames else None
 
 
 class FillCfg(BaseModel):
@@ -46,6 +101,10 @@ class T0BacktestRequest(BaseModel):
                                  FillCfg(penetration=0.01, ratio=1.0),
                                  FillCfg(penetration=0.0, ratio=0.5)],
         description="成交假设网格（默认含理想/穿越1分/部分成交）")
+    tick_policies: list[TickPolicyCfg] | None = Field(
+        default=None,
+        description="多档位策略声明（fixed/vol_scaled/trend_tilt/conditional）；"
+                    "省略则回退为单 FixedTick(sell_tick, buy_tick)（向后兼容）")
 
 
 @router.post("/backtest", summary="运行半仓做T回测，返回成交敏感性区间")
@@ -75,12 +134,20 @@ async def run_t0_backtest(req: T0BacktestRequest) -> dict:
         if daily.height < 2:
             raise HTTPException(status_code=400, detail="评估窗内有效交易日不足")
 
+        if req.tick_policies:
+            tick_policies, names = _compile_tick_policies(req.tick_policies)
+            signal_provider = _load_signal_provider(req.symbol, names)
+        else:  # 向后兼容：无 tick_policies 时沿用单 FixedTick
+            tick_policies = [(f"fixed_{int(req.sell_tick*100)}/{int(req.buy_tick*100)}fen",
+                              FixedTick(req.sell_tick, req.buy_tick))]
+            signal_provider = None
+
         runner = T0BacktestRunner()
         report = runner.run(
             req.symbol, req.start, req.end, daily,
-            tick_policies=[(f"fixed_{int(req.sell_tick*100)}/{int(req.buy_tick*100)}fen",
-                            FixedTick(req.sell_tick, req.buy_tick))],
+            tick_policies=tick_policies,
             fill_grid=[FillPolicy(f.penetration, f.ratio) for f in req.fill_grid],
+            signal_provider=signal_provider,
             capital=req.capital, commission_rate=req.commission_rate,
             stamp_duty=req.stamp_duty, swing_frac=req.swing_frac, base_weight=req.base_weight,
         )
@@ -136,3 +203,20 @@ async def run_t0_profile(req: T0ProfileRequest) -> dict:
         raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"做T画像失败：{exc}") from exc
+
+
+@router.get("/signals", summary="列出可用于条件规则的信号名")
+async def list_t0_signals() -> dict:
+    """列出可作为条件规则 ``lhs=signal`` 来源的持久化模型信号名（升序）。
+
+    供前端条件规则编辑器填充信号下拉。Alpha 模块不可用时返回空列表（不报错）。
+
+    Returns:
+        ``{"names": [...]}``：信号名升序列表。
+    """
+    try:
+        from ..alpha import AlphaLab
+    except ImportError:
+        return {"names": []}
+    lab = AlphaLab(ALPHA_LAB_PATH)
+    return {"names": sorted(lab.list_all_signals())}

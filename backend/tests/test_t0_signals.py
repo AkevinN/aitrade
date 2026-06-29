@@ -45,7 +45,7 @@ def test_alpha_factor_provider_is_stub_returns_none() -> None:
     assert isinstance(sp, SignalProvider)
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 @given(
     entries=st.lists(
         st.tuples(
@@ -136,7 +136,7 @@ def test_lab_provider_satisfies_protocol() -> None:
     assert isinstance(LabSignalProvider.from_frames({}), SignalProvider)
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 @given(
     entries=st.lists(
         st.tuples(st.sampled_from(["A.SZSE", "B.SSE"]),

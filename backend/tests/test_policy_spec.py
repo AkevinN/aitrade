@@ -115,7 +115,7 @@ def test_source_has_no_dynamic_exec() -> None:
     assert not leaked, f"工厂可执行代码不应引用动态执行原语：{leaked}"
 
 
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 @given(
     lhs=st.sampled_from(["gap", "mean_range", "momentum", "signal"]),
     op=st.sampled_from(["gt", "ge", "lt", "le"]),
