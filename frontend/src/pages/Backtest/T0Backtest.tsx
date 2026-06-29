@@ -21,15 +21,16 @@ import type {
 } from '../../types/t0'
 
 /** 成交假设去重键。 */
-const fillKey = (f: T0FillCfg): string => `${f.penetration}|${f.ratio}`
+export const fillKey = (f: T0FillCfg): string => `${f.penetration}|${f.ratio}`
 
-/** 校验档位策略：label 唯一 + signal 规则必选信号名。返回错误信息或 null。 */
-const validatePolicies = (policies: TickPolicyCfg[]): string | null => {
+/** 校验档位策略：label 非空且唯一、条件策略至少一条规则、signal 规则必选信号名。返回错误信息或 null。 */
+export const validatePolicies = (policies: TickPolicyCfg[]): string | null => {
   const labels = policies.map((p) => p.label.trim())
   if (labels.some((l) => !l)) return '每个档位策略都需要名称'
   if (new Set(labels).size !== labels.length) return '档位策略名称必须唯一'
   for (const p of policies) {
     if (p.kind === 'conditional') {
+      if (p.rules.length === 0) return `策略「${p.label}」至少需要一条规则`
       if (p.rules.some((r) => r.lhs === 'signal' && !r.signal_name)) return `策略「${p.label}」有信号规则未选信号名`
     }
   }
@@ -41,11 +42,12 @@ const { Text, Paragraph } = Typography
 /** 单条成交假设的前端编辑态：穿越（分）+ 成交率（%）。 */
 interface FillEdit { penFen: number; ratioPct: number }
 
-/** 把成交假设格式化为可读标签。 */
-const fillLabel = (f: T0FillCfg): string => {
-  if (f.penetration > 0) return `穿越 ${Math.round(f.penetration * 100)} 分`
-  if (f.ratio < 1) return `部分成交 ${Math.round(f.ratio * 100)}%`
-  return '理想撮合（触价即成交）'
+/** 把成交假设格式化为可读标签（穿越与部分成交可叠加，二者皆无则为理想撮合）。 */
+export const fillLabel = (f: T0FillCfg): string => {
+  const parts: string[] = []
+  if (f.penetration > 0) parts.push(`穿越 ${Math.round(f.penetration * 100)} 分`)
+  if (f.ratio < 1) parts.push(`部分成交 ${Math.round(f.ratio * 100)}%`)
+  return parts.length ? parts.join(' + ') : '理想撮合（触价即成交）'
 }
 
 /** 收益百分比着色文本。 */
@@ -143,6 +145,16 @@ const T0Backtest: React.FC = () => {
     if (err) { message.error(err); return }
     const firstFixed = tickPolicies.find((p) => p.kind === 'fixed') as
       | Extract<TickPolicyCfg, { kind: 'fixed' }> | undefined
+    // label 统一 trim 后再发（与 validatePolicies/标红口径一致，避免空白差异）
+    const policies = tickPolicies.map((p) => ({ ...p, label: p.label.trim() }))
+    // 成交假设去重（同 穿越×成交率 只跑一次，避免重复卡片/无谓回测）
+    const seenFill = new Set<string>()
+    const dedupGrid = fillGrid.filter((f) => {
+      const k = `${f.penFen}|${f.ratioPct}`
+      if (seenFill.has(k)) return false
+      seenFill.add(k)
+      return true
+    })
     mut.mutate({
       symbol: symbol.trim(),
       start: dateRange[0].format('YYYY-MM-DD'),
@@ -151,8 +163,8 @@ const T0Backtest: React.FC = () => {
       sell_tick: firstFixed?.sell_tick ?? 0.02, buy_tick: firstFixed?.buy_tick ?? 0.02,
       swing_frac: swingFrac, base_weight: baseWeight,
       capital, commission_rate: commissionRate, stamp_duty: stampDuty,
-      fill_grid: fillGrid.map((f) => ({ penetration: f.penFen / 100, ratio: f.ratioPct / 100 })),
-      tick_policies: tickPolicies,
+      fill_grid: dedupGrid.map((f) => ({ penetration: f.penFen / 100, ratio: f.ratioPct / 100 })),
+      tick_policies: policies,
     })
   }, [mut, symbol, dateRange, tickPolicies, swingFrac, baseWeight, capital, commissionRate, stampDuty, fillGrid])
 

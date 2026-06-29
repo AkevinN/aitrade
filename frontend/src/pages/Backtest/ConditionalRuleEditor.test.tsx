@@ -50,6 +50,11 @@ describe('ConditionalRuleEditor', () => {
     expect(onChange.mock.calls[0][0].rules[0].op).toBe('lt')   // 删的是第0条
   })
 
+  it('仅剩一条规则时删除按钮禁用（不能清空规则）', () => {
+    renderEditor()   // 默认 1 条规则
+    expect(screen.getByLabelText('规则0删除')).toBeDisabled()
+  })
+
   it('下移规则：交换顺序', () => {
     const { onChange } = renderEditor({ rules: [{ ...GAP_RULE, name: 'A' }, { ...GAP_RULE, name: 'B' }] })
     fireEvent.click(screen.getByLabelText('规则0下移'))

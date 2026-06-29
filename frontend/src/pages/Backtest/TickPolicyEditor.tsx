@@ -59,11 +59,13 @@ export interface TickPolicyEditorProps {
  * {@link ConditionalRuleEditor}；其余为数值参数表单（档位以"分"展示、后端口径为元）。
  */
 const TickPolicyEditor: React.FC<TickPolicyEditorProps> = ({ value, onChange, signalNames }) => {
+  // 以 trim 后的 label 计重复（与运行前校验/提交口径一致）
   const labelCounts = value.reduce<Record<string, number>>((m, p) => {
-    m[p.label] = (m[p.label] ?? 0) + 1
+    const k = p.label.trim()
+    m[k] = (m[k] ?? 0) + 1
     return m
   }, {})
-  const isDup = (label: string): boolean => (labelCounts[label] ?? 0) > 1
+  const isDup = (label: string): boolean => (labelCounts[label.trim()] ?? 0) > 1
 
   const updatePolicy = (i: number, patch: Partial<TickPolicyCfg>) =>
     onChange(value.map((p, idx) => (idx === i ? ({ ...p, ...patch } as TickPolicyCfg) : p)))

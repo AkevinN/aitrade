@@ -136,7 +136,7 @@ const ConditionalRuleEditor: React.FC<ConditionalRuleEditorProps> = ({
           <Button size="small" type="text" icon={<ArrowDownOutlined />} disabled={i === rules.length - 1}
             aria-label={`规则${i}下移`} onClick={() => moveRule(i, 1)} />
           <Button size="small" danger type="text" icon={<MinusCircleOutlined />}
-            aria-label={`规则${i}删除`} onClick={() => removeRule(i)} />
+            aria-label={`规则${i}删除`} disabled={rules.length <= 1} onClick={() => removeRule(i)} />
         </Space>
       ))}
       <Space>

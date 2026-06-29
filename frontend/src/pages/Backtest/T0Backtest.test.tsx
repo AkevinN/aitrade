@@ -20,7 +20,8 @@ vi.mock('../../api/alpha', () => ({
   alphaService: { getDataResources: () => mockGetResources() },
 }))
 
-import T0Backtest from './T0Backtest'
+import T0Backtest, { fillLabel, validatePolicies } from './T0Backtest'
+import type { TickPolicyCfg, RuleCfg } from '../../types/t0'
 
 const REPORT = {
   symbol: '000415.SZSE', eval_window: ['2023-01-01', '2025-12-31'],
@@ -93,5 +94,44 @@ describe('T0Backtest 多策略配置', () => {
     expect(await screen.findAllByText('高低开')).not.toHaveLength(0)
     // 逐年"当前口径"默认看第一个策略
     expect(await screen.findByText(/当前口径/)).toBeInTheDocument()
+  })
+
+  it('重复成交假设在提交前去重', async () => {
+    renderPage()
+    await screen.findByLabelText('策略0名称')
+    fireEvent.click(screen.getByText('添加成交假设'))   // 加一个与默认首行相同的 0分/100%
+    fireEvent.click(runBtn())
+    await waitFor(() => expect(mockRunBacktest).toHaveBeenCalled())
+    // 默认 3 个(0/100,1/100,0/50)，新增的 0/100 与首行重复被去掉 → 仍 3 个
+    expect(mockRunBacktest.mock.calls[0][0].fill_grid).toHaveLength(3)
+  })
+
+  it('提交前 trim 策略名称（不发首尾空白）', async () => {
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('策略0名称'), { target: { value: ' 我的策略 ' } })
+    fireEvent.click(runBtn())
+    await waitFor(() => expect(mockRunBacktest).toHaveBeenCalled())
+    expect(mockRunBacktest.mock.calls[0][0].tick_policies[0].label).toBe('我的策略')
+  })
+})
+
+describe('T0Backtest 导出工具', () => {
+  it('fillLabel 叠加穿越与部分成交', () => {
+    expect(fillLabel({ penetration: 0, ratio: 1 })).toBe('理想撮合（触价即成交）')
+    expect(fillLabel({ penetration: 0.01, ratio: 1 })).toBe('穿越 1 分')
+    expect(fillLabel({ penetration: 0, ratio: 0.5 })).toBe('部分成交 50%')
+    expect(fillLabel({ penetration: 0.01, ratio: 0.5 })).toBe('穿越 1 分 + 部分成交 50%')
+  })
+
+  it('validatePolicies 拦空名/重名/空规则/缺信号名', () => {
+    const fixed = (l: string): TickPolicyCfg => ({ kind: 'fixed', label: l, sell_tick: 0.02, buy_tick: 0.02 })
+    const cond = (rules: RuleCfg[]): TickPolicyCfg =>
+      ({ kind: 'conditional', label: 'c', rules, default_sell_tick: 0.02, default_buy_tick: 0.02, pricetick: 0.01 })
+    expect(validatePolicies([fixed('a')])).toBeNull()
+    expect(validatePolicies([fixed('a'), fixed('a')])).toMatch(/唯一/)
+    expect(validatePolicies([fixed('  ')])).toMatch(/名称/)
+    expect(validatePolicies([cond([])])).toMatch(/至少需要一条规则/)
+    expect(validatePolicies([cond([{ lhs: 'signal', op: 'gt', threshold: 0, sell_tick: 0.02, buy_tick: 0.02 }])]))
+      .toMatch(/未选信号名/)
   })
 })
