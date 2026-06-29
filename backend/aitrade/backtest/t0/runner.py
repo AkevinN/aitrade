@@ -18,6 +18,7 @@ import polars as pl
 from ...config import ALPHA_LAB_PATH
 from ..engine import BacktestingEngine
 from ..types import FillPolicy
+from .signals import SignalProvider
 from .strategy import HalfPositionT0Strategy
 from .tick_policy import FixedTick, TickContext, TickPolicy
 
@@ -114,7 +115,7 @@ class T0BacktestRunner:
                    fill_policy: FillPolicy, daily: pl.DataFrame, capital: int = 1_000_000,
                    commission_rate: float = 0.0003, stamp_duty: float = 0.0005,
                    swing_frac: float = 1.0, base_weight: float = 0.5,
-                   tick_label: str = "") -> T0RunResult:
+                   tick_label: str = "", signal_provider: SignalProvider | None = None) -> T0RunResult:
         """跑单个组合并汇总指标 + 逐年/逐月超额 + 命中分布。
 
         Args:
@@ -130,6 +131,8 @@ class T0BacktestRunner:
             swing_frac: 做 T 摆动幅度占半仓比例。
             base_weight: 半仓锚权重。
             tick_label: 该档位策略的标签（报告用）。
+            signal_provider: 可选 point-in-time 信号提供器；非空时注入策略，供条件规则按
+                ``tick_policy.signal_names`` 读取 ``ctx.signals``。缺省 None 时策略 signals 恒空。
 
         Returns:
             T0RunResult。
@@ -147,10 +150,11 @@ class T0BacktestRunner:
         engine.slippages[symbol] = 0.0            # 限价单无价格滑点（Property 8）
         engine.t_plus1 = True
         engine.fill_policy = fill_policy
-        engine.add_strategy(HalfPositionT0Strategy, {
-            "vt_symbol": symbol, "tick_policy": tick_policy,
-            "swing_frac": swing_frac, "base_weight": base_weight,
-        }, None)
+        setting = {"vt_symbol": symbol, "tick_policy": tick_policy,
+                   "swing_frac": swing_frac, "base_weight": base_weight}
+        if signal_provider is not None:
+            setting["signal_provider"] = signal_provider   # 策略已支持该 setting（缺省不注入=既有行为）
+        engine.add_strategy(HalfPositionT0Strategy, setting, None)
         engine.load_data()
         engine.run_backtesting()
 
@@ -203,8 +207,18 @@ class T0BacktestRunner:
 
     def run(self, symbol: str, start: date, end: date, daily: pl.DataFrame,
             tick_policies: list[tuple[str, TickPolicy]] | None = None,
-            fill_grid: list[FillPolicy] | None = None, **kw) -> T0Report:
-        """扫 {TickPolicy × FillPolicy} 网格，汇总成 T0Report（含成交敏感性区间）。"""
+            fill_grid: list[FillPolicy] | None = None,
+            signal_provider: SignalProvider | None = None, **kw) -> T0Report:
+        """扫 {TickPolicy × FillPolicy} 网格，汇总成 T0Report（含成交敏感性区间）。
+
+        Args:
+            symbol/start/end/daily: 标的、评估窗与日线。
+            tick_policies: ``[(label, TickPolicy), ...]``；缺省单 ``FixedTick(0.02, 0.02)``。
+            fill_grid: ``FillPolicy`` 网格；缺省含理想/穿越1分/部分成交。
+            signal_provider: 可选 point-in-time 信号提供器，注入每个 ``run_single``；
+                条件策略含 signal 左值时必需，否则其信号恒空。
+            **kw: 透传给 ``run_single``（capital/commission_rate/stamp_duty/swing_frac/base_weight）。
+        """
         if tick_policies is None:
             tick_policies = [("fixed_2fen", FixedTick(0.02, 0.02))]
         if fill_grid is None:
@@ -220,7 +234,8 @@ class T0BacktestRunner:
         for label, tp in tick_policies:
             for fp in fill_grid:
                 report.results.append(
-                    self.run_single(symbol, start, end, tp, fp, daily, tick_label=label, **kw))
+                    self.run_single(symbol, start, end, tp, fp, daily, tick_label=label,
+                                    signal_provider=signal_provider, **kw))
         return report
 
 
