@@ -12,7 +12,7 @@ import { t0Service } from '../../api/t0'
 import DateRangeSelector, { type LocalDateRange } from '../../components/DateRangeSelector'
 import KLineChart from '../../components/charts/KLineChart'
 import { applyFixedSuggestion, applyGapSegments } from './calibrationApply'
-import { buildLegChart } from './t0LegMarkers'
+import { buildLegChart, fixedSuggestionResolver, gapSuggestionResolver, noMarkerResolver } from './t0LegMarkers'
 import type { TickPolicyCfg, T0BandEdgeRow, T0Profile } from '../../types/t0'
 
 const { Text, Paragraph } = Typography
@@ -143,11 +143,17 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   // walk-forward 违例：标定窗末日不早于评估窗起点
   const overlap = !calibRange[1].isBefore(evalWindow[0])
 
-  // K 线买卖腿：用「当前配置档」把标定窗 K 线标上买卖腿（hover 看每根明细）
-  const profileBars = isCond ? segMut.data?.bars : profMut.data?.bars
-  const legChart = useMemo(
-    () => (profileBars && policy ? buildLegChart(profileBars, policy) : null),
-    [profileBars, policy])
+  // K 线买卖腿：用画像「建议档」标在标定窗 K 线上（与上方表格建议一致；hover 看每根明细）。
+  // 条件策略按当日 gap 所属高/低/平开场景取该场景建议；波动/趋势档位动态、不标腿。
+  const legChart = useMemo(() => {
+    if (isParamOnly) {
+      return profMut.data?.bars ? buildLegChart(profMut.data.bars, noMarkerResolver) : null
+    }
+    if (isCond) {
+      return segMut.data?.bars ? buildLegChart(segMut.data.bars, gapSuggestionResolver(segMut.data)) : null
+    }
+    return profMut.data?.bars ? buildLegChart(profMut.data.bars, fixedSuggestionResolver(profMut.data)) : null
+  }, [isCond, isParamOnly, profMut.data, segMut.data])
 
   const canApply = isCond ? !!segMut.data : (policy?.kind === 'fixed' && !!profMut.data)
   const onApplyClick = () => {
@@ -187,8 +193,8 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
           <div>
             <Text strong>K 线与买卖腿</Text>
             <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
-              按当前配置档标在标定窗 K 线上（▲买腿 / ▼卖腿，hover 看该根明细）
-              {isCond ? '；条件策略按每天所属高/低/平开场景取档' : ''}
+              按上方「建议档」标在标定窗 K 线上（▲买腿 / ▼卖腿，hover 看该根明细），与表格一致
+              {isCond ? '；条件策略按每天所属高/低/平开场景取该场景建议档' : ''}
             </Text>
             {!legChart.supported && (
               <Text type="warning" style={{ fontSize: 12, display: 'block' }}>

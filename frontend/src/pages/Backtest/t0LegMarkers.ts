@@ -1,7 +1,18 @@
-// 做 T 标定 K 线买卖腿标记：把标定窗日线 + 策略「当前配置档」算成 K 线买卖点 + 逐日 hover 明细。
+// 做 T 标定 K 线买卖腿标记：把标定窗日线 + 画像「建议档」算成 K 线买卖点 + 逐日 hover 明细。
+// 标记口径与上方表格「建议档」一致：固定档用全窗建议；条件策略按当日 gap 所属高/低/平开场景用该场景建议。
 // 纯函数、无前视（gap 用昨收 close.shift(1)），便于单测。
-import type { TickPolicyCfg, T0DailyBar } from '../../types/t0'
+import type { T0DailyBar, T0Profile, T0SegmentedProfile } from '../../types/t0'
 import type { OHLCBar, TradeMarker } from '../../components/charts/types'
+
+/** 当日采用的（卖档, 买档, 场景名）。 */
+export interface DayTicks {
+  sell: number
+  buy: number
+  regime: string
+}
+
+/** 逐日档位解析器：给定当日开盘与昨收，返回当日采用的档位；返回 null 表示不标腿（动态档）。 */
+export type TickResolver = (open: number, prevClose: number | null) => DayTicks | null
 
 /** buildLegChart 产物。 */
 export interface LegChart {
@@ -11,31 +22,8 @@ export interface LegChart {
   markers: TradeMarker[]
   /** 逐日 hover 明细文本，键为 d（YYYY-MM-DD） */
   details: Map<string, string>
-  /** 是否支持按配置档标腿；vol_scaled/trend_tilt 档位动态、不支持 → false */
+  /** 是否标了腿（动态档/无解析时为 false） */
   supported: boolean
-}
-
-/** 按比较运算判断 gap 是否命中（与后端 _OPS 一致）。 */
-function gapMatches(gap: number, op: string, thr: number): boolean {
-  return op === 'gt' ? gap > thr : op === 'ge' ? gap >= thr : op === 'lt' ? gap < thr : gap <= thr
-}
-
-/** 当日的（卖档, 买档, 场景名）；vol/trend 等动态档返回 null。 */
-function ticksForDay(
-  policy: TickPolicyCfg, open: number, prevClose: number | null,
-): { sell: number; buy: number; regime: string } | null {
-  if (policy.kind === 'fixed') return { sell: policy.sell_tick, buy: policy.buy_tick, regime: '固定档' }
-  if (policy.kind === 'conditional') {
-    const gap = prevClose ? open / prevClose - 1 : 0
-    for (const r of policy.rules) {
-      if (r.lhs !== 'gap') continue           // 仅 gap 规则可在前端无前视判定；信号/振幅/动量需历史，跳过
-      if (gapMatches(gap, r.op, r.threshold)) {
-        return { sell: r.sell_tick, buy: r.buy_tick, regime: r.name || `gap${r.op}${r.threshold}` }
-      }
-    }
-    return { sell: policy.default_sell_tick, buy: policy.default_buy_tick, regime: '默认（平开等）' }
-  }
-  return null   // vol_scaled / trend_tilt：档位按历史动态算，前端不复算
 }
 
 /** 元→分（整数）显示。 */
@@ -43,9 +31,7 @@ const fen = (yuan: number): number => Math.round(yuan * 100)
 
 /** 拼一日的 hover 明细文本（多行，纯文本，无 HTML 注入风险）。 */
 function dayDetail(
-  b: T0DailyBar, prevClose: number | null,
-  t: { sell: number; buy: number; regime: string } | null,
-  sellFire: boolean, buyFire: boolean,
+  b: T0DailyBar, prevClose: number | null, t: DayTicks | null, sellFire: boolean, buyFire: boolean,
 ): string {
   const gapTxt = prevClose ? `${((b.open / prevClose - 1) * 100).toFixed(2)}%` : '—（首日无昨收）'
   const lines = [
@@ -63,29 +49,29 @@ function dayDetail(
 }
 
 /**
- * 把标定窗日线 + 策略「当前配置档」算成 K 线买卖腿标记与逐日 hover 明细。
+ * 把标定窗日线按 `tickFor` 解析出的逐日档位算成 K 线买卖腿标记与逐日 hover 明细。
  *
- * 每日按策略当前配置取档（固定档=配置对；条件策略=按当日 gap 首个命中的跳空规则、否则默认档），
- * 卖腿在 `high ≥ open+卖档` 触发、买腿在 `low ≤ open−买档` 触发，分别标在 K 线上下。gap 用昨收，无前视。
+ * 卖腿在 `high ≥ open+卖档` 触发（▼上方）、买腿在 `low ≤ open−买档` 触发（▲下方）。gap 用昨收，无前视。
  *
  * @param bars - 标定窗逐日 OHLC（升序）
- * @param policy - 被标定的策略（用其当前配置档判定触发）
- * @returns {@link LegChart}：K 线、买卖点、逐日明细、是否支持标腿
+ * @param tickFor - 逐日档位解析器（见 {@link fixedSuggestionResolver}/{@link gapSuggestionResolver}）
+ * @returns {@link LegChart}
  */
-export function buildLegChart(bars: T0DailyBar[], policy: TickPolicyCfg): LegChart {
+export function buildLegChart(bars: T0DailyBar[], tickFor: TickResolver): LegChart {
   const chartBars: OHLCBar[] = bars.map((b) => ({
     time: b.d, open: b.open, high: b.high, low: b.low, close: b.close,
   }))
   const markers: TradeMarker[] = []
   const details = new Map<string, string>()
-  const dynamic = policy.kind === 'vol_scaled' || policy.kind === 'trend_tilt'
-
   let prevClose: number | null = null
+  let any = false
+
   for (const b of bars) {
-    const t = dynamic ? null : ticksForDay(policy, b.open, prevClose)
+    const t = tickFor(b.open, prevClose)
     let sellFire = false
     let buyFire = false
     if (t) {
+      any = true
       sellFire = b.high >= b.open + t.sell
       buyFire = b.low <= b.open - t.buy
       if (sellFire) markers.push({ time: b.d, side: 'sell', price: b.open + t.sell })
@@ -95,5 +81,30 @@ export function buildLegChart(bars: T0DailyBar[], policy: TickPolicyCfg): LegCha
     prevClose = b.close
   }
 
-  return { bars: chartBars, markers, details, supported: !dynamic }
+  return { bars: chartBars, markers, details, supported: any }
 }
+
+/** 固定档/全窗画像的解析器：每天都用全窗「建议档」（与表格建议一致）。 */
+export function fixedSuggestionResolver(prof: T0Profile): TickResolver {
+  return () => ({ sell: prof.suggested_sell_tick, buy: prof.suggested_buy_tick, regime: '建议档' })
+}
+
+/**
+ * 条件(跳空)策略的解析器：按当日 gap 落在高/低/平开哪个场景，用**该场景的建议档**（与分场景表格一致）。
+ *
+ * @param seg - 分场景画像（含各场景 suggested 档与切分阈值 thresh）
+ */
+export function gapSuggestionResolver(seg: T0SegmentedProfile): TickResolver {
+  const byRegime = new Map(seg.segments.map((s) => [s.regime, s]))
+  const t = seg.thresh
+  return (open, prevClose) => {
+    const gap = prevClose ? open / prevClose - 1 : 0
+    const regime = gap > t ? 'high' : gap < -t ? 'low' : 'flat'
+    const s = byRegime.get(regime)
+    if (!s) return null
+    return { sell: s.profile.suggested_sell_tick, buy: s.profile.suggested_buy_tick, regime: s.label }
+  }
+}
+
+/** 动态档（波动/趋势）解析器：不标腿（档位按历史动态算，画像测不出最优）。 */
+export const noMarkerResolver: TickResolver = () => null
