@@ -1,6 +1,6 @@
 // 逐策略标定抽屉：按策略类型画像并给建议档位，一键回填该策略。
 // 条件(跳空)策略→高/低/平开分场景；固定档→全窗一对档；波动/趋势→全窗仅参考。
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Drawer, Button, Space, Typography, Table, Alert, Tag, Statistic, Row, Col, message, Tooltip,
 } from 'antd'
@@ -142,6 +142,7 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   // 抽屉宽度（可拖左缘调整）；常驻挂载 → 跨开关保留；初值按当前视口夹一次
   const [drawerWidth, setDrawerWidth] = useState(
     () => clampDrawerWidth(720, typeof window !== 'undefined' ? window.innerWidth : 1440))
+  const handleRef = useRef<HTMLDivElement>(null)
 
   // 视口变化时重新夹宽，避免缩窗后抽屉溢出视口
   useEffect(() => {
@@ -150,14 +151,23 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
+  // 拖拽期间「绕过 React」直接写 DOM 宽度：零重渲、零图表/表格重建，rAF 每帧一次；松手才提交一次 state。
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault()
+    const wrapperEl = document.querySelector(
+      '.t0-calib-drawer .ant-drawer-content-wrapper') as HTMLElement | null
+    if (wrapperEl) wrapperEl.style.transition = 'none'   // 关掉任何宽度过渡，跟手不滞后
     let raf = 0
     let next = drawerWidth
+    function apply() {
+      raf = 0
+      if (wrapperEl) wrapperEl.style.width = `${next}px`
+      if (handleRef.current) handleRef.current.style.right = `${next - 6}px`
+    }
     function onMove(ev: MouseEvent) {
-      if (ev.buttons === 0) { stop(); return }   // 漏接 mouseup（如窗外松手）→ 下次移动自终止
+      if (ev.buttons === 0) { stop(); return }   // 漏接 mouseup（如窗外松手）→ 自终止
       next = clampDrawerWidth(window.innerWidth - ev.clientX, window.innerWidth)
-      if (!raf) raf = requestAnimationFrame(() => { raf = 0; setDrawerWidth(next) })  // 每帧最多一次 setState，避免高频重渲
+      if (!raf) raf = requestAnimationFrame(apply)
     }
     function stop() {
       if (raf) cancelAnimationFrame(raf)
@@ -166,7 +176,8 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
       document.removeEventListener('mouseup', stop)
       window.removeEventListener('blur', stop)
       document.body.style.userSelect = ''
-      setDrawerWidth(next)   // 收尾提交最终宽度
+      if (wrapperEl) wrapperEl.style.transition = ''   // 还原过渡（开合动画）
+      setDrawerWidth(next)   // 仅此一次提交 → 受控 width 与 DOM 同步
     }
     document.body.style.userSelect = 'none'   // 拖拽时禁选中，体验更顺
     document.addEventListener('mousemove', onMove)
@@ -245,11 +256,11 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   return (
     <>
       {open && (
-        <div aria-label="拖拽调整标定抽屉宽度" onMouseDown={startResize}
+        <div ref={handleRef} aria-label="拖拽调整标定抽屉宽度" onMouseDown={startResize}
           style={{ position: 'fixed', top: 0, bottom: 0, right: drawerWidth - 6, width: 6,
             cursor: 'col-resize', zIndex: 1003, background: 'rgba(0,0,0,0.04)' }} />
       )}
-      <Drawer width={drawerWidth} open={open} onClose={onClose}
+      <Drawer rootClassName="t0-calib-drawer" width={drawerWidth} open={open} onClose={onClose}
         title={<span><ExperimentOutlined /> 标定：{policy?.label ?? ''}（{policy?.kind}）</span>}
       extra={
         <Space>

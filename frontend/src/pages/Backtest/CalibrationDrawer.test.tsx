@@ -16,13 +16,13 @@ vi.mock('../../api/t0', () => ({
 
 // 抽屉内嵌 KLineChart 用 lightweight-charts；jsdom 无 canvas，mock 掉避免初始化报错。
 vi.mock('lightweight-charts', () => ({
-  createChart: () => ({
+  createChart: vi.fn(() => ({
     addSeries: () => ({ setData: vi.fn(), createPriceLine: vi.fn(), priceScale: () => ({ applyOptions: vi.fn() }) }),
     applyOptions: vi.fn(),
     timeScale: () => ({ fitContent: vi.fn() }),
     subscribeCrosshairMove: vi.fn(),
     remove: vi.fn(),
-  }),
+  })),
   createSeriesMarkers: vi.fn(),
   CandlestickSeries: 'CandlestickSeries',
   HistogramSeries: 'HistogramSeries',
@@ -34,6 +34,7 @@ const BARS = [
 ]
 
 import CalibrationDrawer, { defaultCalibWindow, clampDrawerWidth } from './CalibrationDrawer'
+import { createChart as mockedCreateChart } from 'lightweight-charts'
 import type { TickPolicyCfg } from '../../types/t0'
 
 describe('clampDrawerWidth', () => {
@@ -168,6 +169,30 @@ describe('CalibrationDrawer', () => {
   it('打开时渲染可拖拽宽度手柄', () => {
     renderDrawer(FIXED)
     expect(screen.getByLabelText('拖拽调整标定抽屉宽度')).toBeInTheDocument()
+  })
+
+  it('拖拽调宽：直接写 DOM 宽度、全程不重建 K 线图（丝滑）', async () => {
+    // rAF 同步执行，便于断言拖拽期间的直写效果
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb: FrameRequestCallback) => { cb(0); return 1 })
+    const chartCalls = () => (mockedCreateChart as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+    renderDrawer(FIXED)
+    fireEvent.click(screen.getByText('统计画像'))
+    await screen.findByText('K 线与买卖腿')
+    const before = chartCalls()
+    expect(before).toBeGreaterThan(0)               // 图已建一次
+
+    const handle = screen.getByLabelText('拖拽调整标定抽屉宽度')
+    fireEvent.mouseDown(handle, { clientX: 800 })
+    fireEvent.mouseMove(document, { clientX: 700, buttons: 1 })
+    fireEvent.mouseMove(document, { clientX: 600, buttons: 1 })
+    // 拖拽期间直接写 antd 抽屉 DOM 宽度（jsdom innerWidth=1024 → clamp(1024−600,1024)=480）
+    const wrapper = document.querySelector('.t0-calib-drawer .ant-drawer-content-wrapper') as HTMLElement
+    expect(wrapper.style.width).toBe('480px')
+    fireEvent.mouseUp(document, { clientX: 600, buttons: 0 })
+
+    expect(chartCalls()).toBe(before)               // 全程未重建图表（createChart 调用数不变）
+    rafSpy.mockRestore()
   })
 
   it('波动策略：K 线区标"暂不标买卖腿"', async () => {
