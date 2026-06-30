@@ -208,9 +208,9 @@ export default function KLineChart({
       container.style.position = 'relative'
       tooltipEl = document.createElement('div')
       tooltipEl.style.cssText =
-        'position:absolute;display:none;pointer-events:none;z-index:20;background:rgba(255,255,255,0.96);' +
+        'position:absolute;display:none;pointer-events:none;z-index:20;background:#ffffff;color:#333333;' +
         'border:1px solid #d9d9d9;border-radius:4px;padding:6px 8px;font-size:12px;line-height:1.6;' +
-        'white-space:pre-line;box-shadow:0 2px 8px rgba(0,0,0,0.12)'
+        'white-space:pre-line;box-shadow:0 2px 8px rgba(0,0,0,0.15)'
       container.appendChild(tooltipEl)
       const barByTime = new Map<string, OHLCBar>(bars.map((b) => [timeKey(b.time), b]))
       chart.subscribeCrosshairMove((param: MouseEventParams) => {
