@@ -33,8 +33,20 @@ const BARS = [
   { d: '2025-01-03', open: 10.1, high: 10.2, low: 10.0, close: 10.15 },
 ]
 
-import CalibrationDrawer, { defaultCalibWindow } from './CalibrationDrawer'
+import CalibrationDrawer, { defaultCalibWindow, clampDrawerWidth } from './CalibrationDrawer'
 import type { TickPolicyCfg } from '../../types/t0'
+
+describe('clampDrawerWidth', () => {
+  it('夹在 [min, 视口−margin] 内', () => {
+    expect(clampDrawerWidth(720, 1440)).toBe(720)        // 正常区间原样
+    expect(clampDrawerWidth(100, 1440)).toBe(480)        // < 最小 → 480
+    expect(clampDrawerWidth(5000, 1440)).toBe(1360)      // > 视口−80 → 1360
+  })
+  it('窄视口下视口边界优先（不溢出）', () => {
+    expect(clampDrawerWidth(800, 500)).toBe(420)         // min(480) 也让位给 视口−80=420
+    expect(clampDrawerWidth(800, 450)).toBe(370)         // 450−80=370 < 视口，仍不溢出
+  })
+})
 
 describe('defaultCalibWindow', () => {
   it('无本地区间：评估窗起点前一年 → 前一日', () => {
@@ -142,6 +154,20 @@ describe('CalibrationDrawer', () => {
     renderDrawer(FIXED)
     fireEvent.click(screen.getByText('统计画像'))
     expect(await screen.findByText('K 线与买卖腿')).toBeInTheDocument()
+  })
+
+  it('表格含更多字段（成交率 / 全日期望）', async () => {
+    renderDrawer(FIXED)
+    fireEvent.click(screen.getByText('统计画像'))
+    // antd Table scroll.x 会把表头渲染到额外的 sticky 子表 → 同名表头可能多于 1 个，用 All
+    expect((await screen.findAllByText('卖成交率')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('买成交率').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('全日期望(分)').length).toBeGreaterThan(0)
+  })
+
+  it('打开时渲染可拖拽宽度手柄', () => {
+    renderDrawer(FIXED)
+    expect(screen.getByLabelText('拖拽调整标定抽屉宽度')).toBeInTheDocument()
   })
 
   it('波动策略：K 线区标"暂不标买卖腿"', async () => {

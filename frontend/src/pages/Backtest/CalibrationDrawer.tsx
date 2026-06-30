@@ -2,9 +2,9 @@
 // 条件(跳空)策略→高/低/平开分场景；固定档→全窗一对档；波动/趋势→全窗仅参考。
 import React, { useEffect, useMemo, useState } from 'react'
 import {
-  Drawer, Button, Space, Typography, Table, Alert, Tag, Statistic, Row, Col, message,
+  Drawer, Button, Space, Typography, Table, Alert, Tag, Statistic, Row, Col, message, Tooltip,
 } from 'antd'
-import { ExperimentOutlined, PlayCircleOutlined } from '@ant-design/icons'
+import { ExperimentOutlined, PlayCircleOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import { useMutation } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
 
@@ -46,13 +46,48 @@ const fen = (v: number): React.ReactNode => (
   </span>
 )
 
-/** 偏离-回归边际曲线的紧凑列（偏离 / 逐腿均益+贡献）。 */
+/** 成交率百分比单元。 */
+const pctCell = (v: number): string => `${(v * 100).toFixed(0)}%`
+
+/** 带"计算方法"hover 提示的表头：hover 列名上的 ⓘ 看该字段怎么算的。 */
+const hdr = (label: string, tip: string): React.ReactNode => (
+  <Tooltip title={tip}>
+    <span>{label} <InfoCircleOutlined style={{ color: '#999' }} /></span>
+  </Tooltip>
+)
+
+/**
+ * 把抽屉宽度夹到 `[min, innerWidth − margin]`，避免拖太窄/超出视口。
+ *
+ * @param raw - 拖拽算出的原始宽度（px）
+ * @param innerWidth - 视口宽度（px）
+ * @param min - 最小宽度，默认 480
+ * @param margin - 距视口左缘的最小留白，默认 80
+ * @returns 夹取后的宽度（px）
+ */
+export function clampDrawerWidth(raw: number, innerWidth: number, min = 480, margin = 80): number {
+  // 视口边界优先：窗口窄于 min+margin 时，宁可比 min 还窄也不溢出视口
+  return Math.min(Math.max(raw, min), Math.max(0, innerWidth - margin))
+}
+
+/** 偏离-回归边际曲线全字段表（表头 hover 看计算方法）。 */
 const bandCols = [
-  { title: '偏离(分)', dataIndex: 'x_fen', key: 'x' },
-  { title: '卖均益', dataIndex: 'sell_edge_fen', key: 'se', render: (v: number) => fen(v) },
-  { title: '卖贡献', key: 'sc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.sell_fill * r.sell_edge_fen) },
-  { title: '买均益', dataIndex: 'buy_edge_fen', key: 'be', render: (v: number) => fen(v) },
-  { title: '买贡献', key: 'bc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.buy_fill * r.buy_edge_fen) },
+  { title: hdr('偏离(分)', '挂单价相对开盘价的偏离档位；1 分 = 0.01 元。x 越大挂得越远、越难成交。'),
+    dataIndex: 'x_fen', key: 'x' },
+  { title: hdr('卖成交率', '卖腿可成交的天数占比 = P(当日最高 ≥ 开盘 + x)。'),
+    dataIndex: 'sell_fill', key: 'sf', render: (v: number) => pctCell(v) },
+  { title: hdr('卖均益(分)', '卖腿每笔净于成本的边际收益 = mean(开+x − 收 | 高≥开+x) − 往返成本，再 ×100 转分。>0 表示触价后倾向回落、做T有底层 edge。'),
+    dataIndex: 'sell_edge_fen', key: 'se', render: (v: number) => fen(v) },
+  { title: hdr('卖贡献(分/天)', '日均贡献 = 卖成交率 × 卖均益（没成交的日子记 0）。建议卖档取本列在「成交率 > 10%」的行中的峰值；若无任一档 > 10%，回退为最小档（故高亮行未必是肉眼峰值）。'),
+    key: 'sc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.sell_fill * r.sell_edge_fen) },
+  { title: hdr('买成交率', '买腿可成交的天数占比 = P(当日最低 ≤ 开盘 − x)。'),
+    dataIndex: 'buy_fill', key: 'bf', render: (v: number) => pctCell(v) },
+  { title: hdr('买均益(分)', '买腿每笔净于成本的边际收益 = mean(收 − (开−x) | 低≤开−x) − 往返成本，再 ×100 转分。'),
+    dataIndex: 'buy_edge_fen', key: 'be', render: (v: number) => fen(v) },
+  { title: hdr('买贡献(分/天)', '日均贡献 = 买成交率 × 买均益。建议买档取本列在「成交率 > 10%」的行中的峰值；若无任一档 > 10%，回退为最小档（故高亮行未必是肉眼峰值）。'),
+    key: 'bc', render: (_: unknown, r: T0BandEdgeRow) => fen(r.buy_fill * r.buy_edge_fen) },
+  { title: hdr('全日期望(分)', '全样本每日期望盈亏（含未触价日）×100 = both·2x + 仅卖·(x−Δ收) + 仅买·(x+Δ收)，Δ收=收−开。'),
+    dataIndex: 'day_pnl_fen', key: 'dp', render: (v: number) => fen(v) },
 ]
 
 /** 单份画像的建议档 + 紧凑曲线表（标定窗内）。 */
@@ -60,7 +95,7 @@ const ProfileBlock: React.FC<{ profile: T0Profile }> = ({ profile }) => (
   <>
     <Text>建议 卖 <b>{profile.suggested_sell_tick.toFixed(2)}</b> 元 / 买 <b>{profile.suggested_buy_tick.toFixed(2)}</b> 元</Text>
     <Table<T0BandEdgeRow> size="small" rowKey="x_fen" pagination={false} columns={bandCols}
-      dataSource={profile.rows} style={{ marginTop: 6 }}
+      dataSource={profile.rows} style={{ marginTop: 6 }} scroll={{ x: 'max-content' }}
       rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
         || r.x_fen === Math.round(profile.suggested_sell_tick * 100)) ? 'ant-table-row-selected' : ''} />
   </>
@@ -100,6 +135,35 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
 }) => {
   const isCond = policy?.kind === 'conditional'
   const isParamOnly = policy?.kind === 'vol_scaled' || policy?.kind === 'trend_tilt'
+
+  // 抽屉宽度（可拖左缘调整）；常驻挂载 → 跨开关保留；初值按当前视口夹一次
+  const [drawerWidth, setDrawerWidth] = useState(
+    () => clampDrawerWidth(720, typeof window !== 'undefined' ? window.innerWidth : 1440))
+
+  // 视口变化时重新夹宽，避免缩窗后抽屉溢出视口
+  useEffect(() => {
+    const onResize = () => setDrawerWidth((w) => clampDrawerWidth(w, window.innerWidth))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault()
+    function onMove(ev: MouseEvent) {
+      if (ev.buttons === 0) { stop(); return }   // 漏接 mouseup（如窗外松手）→ 下次移动自终止
+      setDrawerWidth(clampDrawerWidth(window.innerWidth - ev.clientX, window.innerWidth))
+    }
+    function stop() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', stop)
+      window.removeEventListener('blur', stop)
+      document.body.style.userSelect = ''
+    }
+    document.body.style.userSelect = 'none'   // 拖拽时禁选中，体验更顺
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', stop)
+    window.addEventListener('blur', stop)      // 窗口失焦（含窗外松手）兜底终止
+  }
 
   // 标定窗默认：评估窗起点前一年 → 前一日（样本外），并夹进本地数据可用区间
   const [calibRange, setCalibRange] = useState<[Dayjs, Dayjs]>(
@@ -164,8 +228,14 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   }
 
   return (
-    <Drawer width={720} open={open} onClose={onClose}
-      title={<span><ExperimentOutlined /> 标定：{policy?.label ?? ''}（{policy?.kind}）</span>}
+    <>
+      {open && (
+        <div aria-label="拖拽调整标定抽屉宽度" onMouseDown={startResize}
+          style={{ position: 'fixed', top: 0, bottom: 0, right: drawerWidth - 6, width: 6,
+            cursor: 'col-resize', zIndex: 1003, background: 'rgba(0,0,0,0.04)' }} />
+      )}
+      <Drawer width={drawerWidth} open={open} onClose={onClose}
+        title={<span><ExperimentOutlined /> 标定：{policy?.label ?? ''}（{policy?.kind}）</span>}
       extra={
         <Space>
           <Button onClick={onClose}>关闭</Button>
@@ -238,7 +308,8 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
           </Paragraph>
         )}
       </Space>
-    </Drawer>
+      </Drawer>
+    </>
   )
 }
 
