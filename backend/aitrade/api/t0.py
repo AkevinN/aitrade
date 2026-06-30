@@ -23,6 +23,19 @@ from ..config import ALPHA_LAB_PATH
 router = APIRouter(prefix="/api/t0", tags=["t0"])
 
 
+def _daily_bars(daily) -> list[dict]:
+    """把标定窗日线转成可 JSON 的逐日 OHLC（供前端画 K 线、按配置档标买卖腿）。
+
+    Args:
+        daily: 含列 ``d``/``open``/``high``/``low``/``close`` 的日线 DataFrame（时间升序）。
+
+    Returns:
+        ``[{"d": "YYYY-MM-DD", "open", "high", "low", "close"}, ...]``，按时间升序。
+    """
+    return [{"d": r["d"].isoformat(), "open": r["open"], "high": r["high"],
+             "low": r["low"], "close": r["close"]} for r in daily.iter_rows(named=True)]
+
+
 def _compile_tick_policies(cfgs: list) -> tuple[list[tuple[str, TickPolicy]], list[str]]:
     """把声明式档位策略列表编译成 ``[(label, TickPolicy)]`` 并汇总引用的信号名。
 
@@ -210,7 +223,7 @@ async def run_t0_profile(req: T0ProfileRequest) -> dict:
         profile = T0Profiler().profile(
             req.symbol, daily, x_grid_fen=range(1, req.x_max_fen + 1),
             commission_rate=req.commission_rate, stamp_duty=req.stamp_duty)
-        return profile.to_dict()
+        return {**profile.to_dict(), "bars": _daily_bars(daily)}
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -254,7 +267,8 @@ async def run_t0_profile_segmented(req: T0ProfileSegmentedRequest) -> dict:
         segs = profile_by_gap(
             req.symbol, daily, thresh=req.gap_thresh, x_grid_fen=range(1, req.x_max_fen + 1),
             commission_rate=req.commission_rate, stamp_duty=req.stamp_duty)
-        return {"symbol": req.symbol, "thresh": req.gap_thresh, "segments": [s.to_dict() for s in segs]}
+        return {"symbol": req.symbol, "thresh": req.gap_thresh,
+                "segments": [s.to_dict() for s in segs], "bars": _daily_bars(daily)}
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

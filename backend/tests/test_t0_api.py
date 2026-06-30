@@ -207,3 +207,28 @@ def test_profile_segmented_insufficient_days_400(monkeypatch, tmp_path) -> None:
     with TestClient(create_app()) as c:
         r = c.post("/api/t0/profile_segmented", json={"symbol": "AAA.SSE", "start": "2025-01-01", "end": "2025-12-31"})
     assert r.status_code == 400
+
+
+# ---- 画像端点返回逐日 OHLC bars（供前端画 K 线 + 标买卖腿） ----
+
+def test_profile_returns_window_bars(monkeypatch, tmp_path) -> None:
+    """/profile 额外返回标定窗逐日 OHLC bars。"""
+    _patch_profile(monkeypatch, tmp_path, _gap_daily())
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/profile", json={"symbol": "AAA.SSE", "start": "2025-01-01",
+                                            "end": "2025-12-31", "x_max_fen": 15})
+    assert r.status_code == 200
+    bars = r.json()["bars"]
+    assert len(bars) == 7
+    assert set(bars[0]) == {"d", "open", "high", "low", "close"}
+    assert bars[0]["d"] <= bars[-1]["d"]   # 升序
+
+
+def test_profile_segmented_returns_window_bars(monkeypatch, tmp_path) -> None:
+    """/profile_segmented 顶层额外返回整窗逐日 OHLC bars。"""
+    _patch_profile(monkeypatch, tmp_path, _gap_daily())
+    with TestClient(create_app()) as c:
+        r = c.post("/api/t0/profile_segmented", json={"symbol": "AAA.SSE", "start": "2025-01-01", "end": "2025-12-31"})
+    assert r.status_code == 200
+    assert len(r.json()["bars"]) == 7
+    assert "segments" in r.json()
