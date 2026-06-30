@@ -9,7 +9,7 @@ import { useMutation } from '@tanstack/react-query'
 import dayjs, { type Dayjs } from 'dayjs'
 
 import { t0Service } from '../../api/t0'
-import DateRangeSelector from '../../components/DateRangeSelector'
+import DateRangeSelector, { type LocalDateRange } from '../../components/DateRangeSelector'
 import { applyFixedSuggestion, applyGapSegments } from './calibrationApply'
 import type { TickPolicyCfg, T0BandEdgeRow, T0Profile } from '../../types/t0'
 
@@ -17,6 +17,25 @@ const { Text, Paragraph } = Typography
 
 /** 最少样本天数：低于此值的场景标"样本不足"、不回填。 */
 const MIN_DAYS = 5
+
+/**
+ * 标定窗默认值：评估窗起点前一年 → 前一日（walk-forward），并夹进本地数据可用区间。
+ *
+ * @param evalStart - 评估窗起点
+ * @param localRange - 本地数据可用区间（ISO 字符串）；给定时把默认窗夹进该范围，避免默认就落在无数据区
+ * @returns 默认标定窗 `[start, end]`
+ */
+export function defaultCalibWindow(evalStart: Dayjs, localRange?: LocalDateRange | null): [Dayjs, Dayjs] {
+  let s = evalStart.subtract(1, 'year')
+  let e = evalStart.subtract(1, 'day')
+  if (localRange) {
+    const ls = dayjs(localRange.start)
+    const le = dayjs(localRange.end)
+    if (s.isBefore(ls)) s = ls
+    if (e.isAfter(le)) e = le
+  }
+  return [s, e]
+}
 
 /** 带符号着色的"分"数值。 */
 const fen = (v: number): React.ReactNode => (
@@ -60,6 +79,8 @@ export interface CalibrationDrawerProps {
   stampDuty: number
   /** 画像档位网格上限（分） */
   xMaxFen: number
+  /** 本地数据可用区间（约束标定窗预设、夹取默认窗）；与评估区间同源 */
+  localRange?: LocalDateRange | null
   /** 应用建议后回传更新后的策略 */
   onApply: (next: TickPolicyCfg) => void
   /** 关闭抽屉 */
@@ -73,14 +94,14 @@ export interface CalibrationDrawerProps {
  * 须经回测 FillPolicy 网格验证。条件(跳空)策略按高/低/平开分场景，逐规则给建议并可一键回填。
  */
 const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
-  open, policy, evalWindow, symbol, commissionRate, stampDuty, xMaxFen, onApply, onClose,
+  open, policy, evalWindow, symbol, commissionRate, stampDuty, xMaxFen, localRange, onApply, onClose,
 }) => {
   const isCond = policy?.kind === 'conditional'
   const isParamOnly = policy?.kind === 'vol_scaled' || policy?.kind === 'trend_tilt'
 
-  // 标定窗默认：评估窗起点前一年 → 评估窗起点前一日（样本外）
+  // 标定窗默认：评估窗起点前一年 → 前一日（样本外），并夹进本地数据可用区间
   const [calibRange, setCalibRange] = useState<[Dayjs, Dayjs]>(
-    [evalWindow[0].subtract(1, 'year'), evalWindow[0].subtract(1, 'day')])
+    () => defaultCalibWindow(evalWindow[0], localRange))
 
   // 条件策略：分场景阈值取该策略首个跳空规则的阈值绝对值
   const gapThresh = useMemo(() => {
@@ -102,11 +123,11 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   // 避免抽屉常驻挂载导致串用旧建议（旧窗口/旧策略/旧 gap_thresh 的结果误用到当前策略）。
   useEffect(() => {
     if (!open) return
-    setCalibRange([evalWindow[0].subtract(1, 'year'), evalWindow[0].subtract(1, 'day')])
+    setCalibRange(defaultCalibWindow(evalWindow[0], localRange))
     profMut.reset()
     segMut.reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, evalWindow, policy?.kind, policy?.label])
+  }, [open, evalWindow, policy?.kind, policy?.label, localRange?.start, localRange?.end])
 
   const onRun = () => {
     const base = {
@@ -139,8 +160,8 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
       }>
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <div>
-          <Text type="secondary">标定窗（建议早于评估窗，避免样本内调参）</Text>
-          <DateRangeSelector value={calibRange}
+          <Text type="secondary">标定窗（建议早于评估窗，避免样本内调参；按本地可用数据快速选择）</Text>
+          <DateRangeSelector value={calibRange} localRange={localRange}
             onChange={(v) => v && v[0] && v[1] && setCalibRange([v[0], v[1]])} />
         </div>
         {overlap && (

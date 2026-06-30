@@ -14,8 +14,26 @@ vi.mock('../../api/t0', () => ({
   },
 }))
 
-import CalibrationDrawer from './CalibrationDrawer'
+import CalibrationDrawer, { defaultCalibWindow } from './CalibrationDrawer'
 import type { TickPolicyCfg } from '../../types/t0'
+
+describe('defaultCalibWindow', () => {
+  it('无本地区间：评估窗起点前一年 → 前一日', () => {
+    const [s, e] = defaultCalibWindow(dayjs('2024-01-01'), null)
+    expect(s.format('YYYY-MM-DD')).toBe('2023-01-01')
+    expect(e.format('YYYY-MM-DD')).toBe('2023-12-31')
+  })
+  it('默认窗起点早于本地数据起点 → 夹到数据起点', () => {
+    const [s, e] = defaultCalibWindow(dayjs('2024-01-01'), { start: '2023-06-01', end: '2025-12-31' })
+    expect(s.format('YYYY-MM-DD')).toBe('2023-06-01')   // 2023-01-01 被夹到 2023-06-01
+    expect(e.format('YYYY-MM-DD')).toBe('2023-12-31')
+  })
+  it('数据在评估窗内 → 默认窗不被截断', () => {
+    const [s, e] = defaultCalibWindow(dayjs('2024-06-01'), { start: '2020-01-01', end: '2025-12-31' })
+    expect(s.format('YYYY-MM-DD')).toBe('2023-06-01')
+    expect(e.format('YYYY-MM-DD')).toBe('2024-05-31')
+  })
+})
 
 const prof = (sell: number, buy: number) => ({
   symbol: 'X', window: ['2023-01-01', '2023-06-30'], rows: [

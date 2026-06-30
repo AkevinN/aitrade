@@ -365,6 +365,7 @@ const T0Backtest: React.FC = () => {
         commissionRate={commissionRate}
         stampDuty={stampDuty}
         xMaxFen={xMaxFen}
+        localRange={localRange}
         onApply={(next) => setTickPolicies((ps) => ps.map((p, i) => (i === calibIdx ? next : p)))}
         onClose={() => setCalibIdx(null)}
       />
