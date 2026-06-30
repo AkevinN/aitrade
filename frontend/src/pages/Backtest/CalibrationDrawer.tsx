@@ -1,6 +1,6 @@
 // 逐策略标定抽屉：按策略类型画像并给建议档位，一键回填该策略。
 // 条件(跳空)策略→高/低/平开分场景；固定档→全窗一对档；波动/趋势→全窗仅参考。
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Drawer, Button, Space, Typography, Table, Alert, Tag, Statistic, Row, Col, message, Tooltip,
 } from 'antd'
@@ -13,6 +13,7 @@ import DateRangeSelector, { type LocalDateRange } from '../../components/DateRan
 import KLineChart from '../../components/charts/KLineChart'
 import { applyFixedSuggestion, applyGapSegments } from './calibrationApply'
 import { buildLegChart, fixedSuggestionResolver, gapSuggestionResolver, noMarkerResolver } from './t0LegMarkers'
+import type { OHLCBar } from '../../components/charts/types'
 import type { TickPolicyCfg, T0BandEdgeRow, T0Profile } from '../../types/t0'
 
 const { Text, Paragraph } = Typography
@@ -90,16 +91,18 @@ const bandCols = [
     dataIndex: 'day_pnl_fen', key: 'dp', render: (v: number) => fen(v) },
 ]
 
-/** 单份画像的建议档 + 紧凑曲线表（标定窗内）。 */
-const ProfileBlock: React.FC<{ profile: T0Profile }> = ({ profile }) => (
-  <>
-    <Text>建议 卖 <b>{profile.suggested_sell_tick.toFixed(2)}</b> 元 / 买 <b>{profile.suggested_buy_tick.toFixed(2)}</b> 元</Text>
-    <Table<T0BandEdgeRow> size="small" rowKey="x_fen" pagination={false} columns={bandCols}
-      dataSource={profile.rows} style={{ marginTop: 6 }} scroll={{ x: 'max-content' }}
-      rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
-        || r.x_fen === Math.round(profile.suggested_sell_tick * 100)) ? 'ant-table-row-selected' : ''} />
-  </>
-)
+/** 单份画像的建议档 + 紧凑曲线表（标定窗内）。memo：拖拽调宽时 profile 不变则跳过重渲，避免重画表格。 */
+const ProfileBlock = React.memo(function ProfileBlock({ profile }: { profile: T0Profile }) {
+  return (
+    <>
+      <Text>建议 卖 <b>{profile.suggested_sell_tick.toFixed(2)}</b> 元 / 买 <b>{profile.suggested_buy_tick.toFixed(2)}</b> 元</Text>
+      <Table<T0BandEdgeRow> size="small" rowKey="x_fen" pagination={false} columns={bandCols}
+        dataSource={profile.rows} style={{ marginTop: 6 }} scroll={{ x: 'max-content' }}
+        rowClassName={(r) => (r.x_fen === Math.round(profile.suggested_buy_tick * 100)
+          || r.x_fen === Math.round(profile.suggested_sell_tick * 100)) ? 'ant-table-row-selected' : ''} />
+    </>
+  )
+})
 
 export interface CalibrationDrawerProps {
   /** 是否打开 */
@@ -149,15 +152,21 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
 
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault()
+    let raf = 0
+    let next = drawerWidth
     function onMove(ev: MouseEvent) {
       if (ev.buttons === 0) { stop(); return }   // 漏接 mouseup（如窗外松手）→ 下次移动自终止
-      setDrawerWidth(clampDrawerWidth(window.innerWidth - ev.clientX, window.innerWidth))
+      next = clampDrawerWidth(window.innerWidth - ev.clientX, window.innerWidth)
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; setDrawerWidth(next) })  // 每帧最多一次 setState，避免高频重渲
     }
     function stop() {
+      if (raf) cancelAnimationFrame(raf)
+      raf = 0
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', stop)
       window.removeEventListener('blur', stop)
       document.body.style.userSelect = ''
+      setDrawerWidth(next)   // 收尾提交最终宽度
     }
     document.body.style.userSelect = 'none'   // 拖拽时禁选中，体验更顺
     document.addEventListener('mousemove', onMove)
@@ -219,6 +228,12 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
     return profMut.data?.bars ? buildLegChart(profMut.data.bars, fixedSuggestionResolver(profMut.data)) : null
   }, [isCond, isParamOnly, profMut.data, segMut.data])
 
+  // 稳定 hover 明细格式化器：仅在 legChart（数据）变化时换引用；拖拽调宽期间不变 →
+  // KLineChart 的 props 引用稳定，不会因换函数而重建 lightweight-charts 实例（拖拽更丝滑）。
+  const legTooltip = useCallback(
+    (b: OHLCBar) => legChart?.details.get(String(b.time)) ?? '',
+    [legChart])
+
   const canApply = isCond ? !!segMut.data : (policy?.kind === 'fixed' && !!profMut.data)
   const onApplyClick = () => {
     if (!policy) return
@@ -272,8 +287,7 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
               </Text>
             )}
             <KLineChart bars={legChart.bars} markers={legChart.markers} showVolume={false} height={300}
-              emptyText="无 K 线数据"
-              tooltipFormatter={(b) => legChart.details.get(String(b.time)) ?? ''} />
+              emptyText="无 K 线数据" tooltipFormatter={legTooltip} />
           </div>
         )}
 

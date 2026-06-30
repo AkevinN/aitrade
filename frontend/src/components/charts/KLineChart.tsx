@@ -1,7 +1,7 @@
 // 通用 K 线图组件，基于 lightweight-charts v5 实现。
 // 纯展示组件：仅消费纯数据 props（bars/markers/overlays），不含任何回测/决策业务语义。
 // 业务数据 → 图表数据的转换由 chartAdapters 纯函数完成。
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { Empty, Spin } from 'antd'
 import {
   createChart,
@@ -88,7 +88,7 @@ const DEFAULT_COLORS: KLineColorScheme = {
  * @remarks
  * 业务数据 → 图表数据的转换应由 {@link ../charts/chartAdapters} 中的纯函数完成后传入。
  */
-export default function KLineChart({
+function KLineChart({
   bars,
   markers,
   overlays,
@@ -262,3 +262,6 @@ export default function KLineChart({
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
+
+// memo：父组件（如标定抽屉拖拽调宽）频繁重渲时，props 引用不变则跳过，避免重建 lightweight-charts 实例。
+export default memo(KLineChart)
