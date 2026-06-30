@@ -138,6 +138,16 @@ export interface T0ProfileRequest {
   stamp_duty: number
 }
 
+/** 标定窗内单日 OHLC（供前端画 K 线、按配置档标买卖腿）。 */
+export interface T0DailyBar {
+  /** 交易日 YYYY-MM-DD */
+  d: string
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
 /** 单档位逐买卖腿的回归边际收益行。 */
 export interface T0BandEdgeRow {
   /** 偏离开盘价的档位（分） */
@@ -178,6 +188,8 @@ export interface T0SegmentedProfile {
   /** 本次使用的跳空阈值 */
   thresh: number
   segments: GapSegmentProfile[]
+  /** 整窗逐日 OHLC（端点附带，供画 K 线）；旧响应可能缺省 */
+  bars?: T0DailyBar[]
 }
 
 /** 标的做 T 画像（偏离-回归边际曲线 + 建议档位）。 */
@@ -189,4 +201,6 @@ export interface T0Profile {
   suggested_buy_tick: number
   note: string
   calib_mean_range?: number | null
+  /** 标定窗逐日 OHLC（端点附带，供画 K 线）；旧响应可能缺省 */
+  bars?: T0DailyBar[]
 }

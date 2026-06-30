@@ -14,6 +14,25 @@ vi.mock('../../api/t0', () => ({
   },
 }))
 
+// 抽屉内嵌 KLineChart 用 lightweight-charts；jsdom 无 canvas，mock 掉避免初始化报错。
+vi.mock('lightweight-charts', () => ({
+  createChart: () => ({
+    addSeries: () => ({ setData: vi.fn(), createPriceLine: vi.fn(), priceScale: () => ({ applyOptions: vi.fn() }) }),
+    applyOptions: vi.fn(),
+    timeScale: () => ({ fitContent: vi.fn() }),
+    subscribeCrosshairMove: vi.fn(),
+    remove: vi.fn(),
+  }),
+  createSeriesMarkers: vi.fn(),
+  CandlestickSeries: 'CandlestickSeries',
+  HistogramSeries: 'HistogramSeries',
+}))
+
+const BARS = [
+  { d: '2025-01-02', open: 10, high: 10.05, low: 9.95, close: 10.0 },
+  { d: '2025-01-03', open: 10.1, high: 10.2, low: 10.0, close: 10.15 },
+]
+
 import CalibrationDrawer, { defaultCalibWindow } from './CalibrationDrawer'
 import type { TickPolicyCfg } from '../../types/t0'
 
@@ -77,8 +96,8 @@ function renderDrawer(policy: TickPolicyCfg) {
 describe('CalibrationDrawer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mockProfile.mockResolvedValue(prof(0.05, 0.03))
-    mockProfileSegmented.mockResolvedValue(SEG)
+    mockProfile.mockResolvedValue({ ...prof(0.05, 0.03), bars: BARS })
+    mockProfileSegmented.mockResolvedValue({ ...SEG, bars: BARS })
   })
 
   it('默认标定窗早于评估窗：无重叠告警', () => {
@@ -117,6 +136,18 @@ describe('CalibrationDrawer', () => {
     renderDrawer(VOL)
     fireEvent.click(screen.getByText('统计画像'))
     expect(await screen.findByText('仅供参考')).toBeInTheDocument()
+  })
+
+  it('统计画像后渲染「K 线与买卖腿」区', async () => {
+    renderDrawer(FIXED)
+    fireEvent.click(screen.getByText('统计画像'))
+    expect(await screen.findByText('K 线与买卖腿')).toBeInTheDocument()
+  })
+
+  it('波动策略：K 线区标"暂不标买卖腿"', async () => {
+    renderDrawer(VOL)
+    fireEvent.click(screen.getByText('统计画像'))
+    expect(await screen.findByText(/暂不标买卖腿/)).toBeInTheDocument()
   })
 
   it('重开抽屉清空上次结果：应用需对当前策略重新统计才可用', async () => {

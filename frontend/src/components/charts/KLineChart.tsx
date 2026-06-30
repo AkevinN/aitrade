@@ -13,6 +13,7 @@ import {
   type SeriesMarker,
   type CandlestickData,
   type HistogramData,
+  type MouseEventParams,
   type Time,
 } from 'lightweight-charts'
 import type {
@@ -21,6 +22,26 @@ import type {
   ChartOverlay,
   KLineColorScheme,
 } from './types'
+
+/**
+ * 把 lightweight-charts 的 Time 归一成可比对的字符串键。
+ *
+ * 日线传入 `'YYYY-MM-DD'` 字符串后，crosshair 回传的可能是 `{year,month,day}` BusinessDay；
+ * 本函数统一成 `'YYYY-MM-DD'`，使「hover 时间 → 原始 bar」查表稳定。
+ *
+ * @param t - lightweight-charts 时间值（字符串 / 秒级时间戳 / BusinessDay）
+ * @returns 归一化字符串键
+ */
+export function timeKey(t: unknown): string {
+  if (typeof t === 'string') return t
+  if (typeof t === 'number') return String(t)
+  if (t && typeof t === 'object' && 'year' in t) {
+    const d = t as { year: number; month: number; day: number }
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.year}-${p(d.month)}-${p(d.day)}`
+  }
+  return String(t)
+}
 
 /**
  * {@link KLineChart} 组件 props。
@@ -42,6 +63,11 @@ export interface KLineChartProps {
   loading?: boolean
   /** 空数据提示文案 */
   emptyText?: string
+  /**
+   * 可选 hover 明细格式化器：鼠标移到某根 K 线时，浮层显示其返回的多行文本
+   * （`\n` 换行，纯文本无 HTML 注入）。不传则无 hover 浮层（行为不变）。
+   */
+  tooltipFormatter?: (bar: OHLCBar) => string
 }
 
 // A 股默认配色：涨红 / 跌绿（与国际惯例相反），买点红、卖点绿
@@ -71,6 +97,7 @@ export default function KLineChart({
   colors,
   loading = false,
   emptyText = '暂无数据',
+  tooltipFormatter,
 }: KLineChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const hasBars = bars.length > 0
@@ -175,6 +202,29 @@ export default function KLineChart({
       })
     }
 
+    // 5b. 可选 hover 明细浮层：crosshair 移到某根 K 线时显示该根明细
+    let tooltipEl: HTMLDivElement | null = null
+    if (tooltipFormatter) {
+      container.style.position = 'relative'
+      tooltipEl = document.createElement('div')
+      tooltipEl.style.cssText =
+        'position:absolute;display:none;pointer-events:none;z-index:20;background:rgba(255,255,255,0.96);' +
+        'border:1px solid #d9d9d9;border-radius:4px;padding:6px 8px;font-size:12px;line-height:1.6;' +
+        'white-space:pre-line;box-shadow:0 2px 8px rgba(0,0,0,0.12)'
+      container.appendChild(tooltipEl)
+      const barByTime = new Map<string, OHLCBar>(bars.map((b) => [timeKey(b.time), b]))
+      chart.subscribeCrosshairMove((param: MouseEventParams) => {
+        const el = tooltipEl as HTMLDivElement
+        if (param.time == null || param.point == null) { el.style.display = 'none'; return }
+        const bar = barByTime.get(timeKey(param.time))
+        if (!bar) { el.style.display = 'none'; return }
+        el.textContent = tooltipFormatter(bar)
+        el.style.display = 'block'
+        el.style.left = `${Math.min(param.point.x + 12, container.clientWidth - el.clientWidth - 8)}px`
+        el.style.top = `${Math.max(8, param.point.y - 8)}px`
+      })
+    }
+
     chart.timeScale().fitContent()
 
     // 6. ResizeObserver 适配容器宽度
@@ -189,9 +239,10 @@ export default function KLineChart({
     // 7. 卸载清理：释放图表实例，避免内存泄漏（Req 3.7）
     return () => {
       resizeObserver.disconnect()
+      if (tooltipEl && tooltipEl.parentNode) tooltipEl.parentNode.removeChild(tooltipEl)
       chart.remove()
     }
-  }, [bars, markers, overlays, showVolume, height, colors])
+  }, [bars, markers, overlays, showVolume, height, colors, tooltipFormatter])
 
   if (loading) {
     return (

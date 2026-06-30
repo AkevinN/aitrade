@@ -22,12 +22,14 @@ const volumeSeries = {
 }
 const chartRemove = vi.fn()
 const fitContent = vi.fn()
+let crosshairHandler: ((p: unknown) => void) | null = null
 const createChartMock = vi.fn(() => ({
   addSeries: vi.fn((def: unknown) =>
     def === 'CandlestickSeries' ? candleSeries : volumeSeries,
   ),
   applyOptions: vi.fn(),
   timeScale: vi.fn(() => ({ fitContent })),
+  subscribeCrosshairMove: vi.fn((cb: (p: unknown) => void) => { crosshairHandler = cb }),
   remove: chartRemove,
 }))
 const createSeriesMarkersMock = vi.fn()
@@ -50,6 +52,22 @@ const SAMPLE_BARS: OHLCBar[] = [
 describe('KLineChart', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    crosshairHandler = null
+  })
+
+  it('提供 tooltipFormatter：订阅 crosshair 并按 hover 的 bar 渲染明细', () => {
+    const fmt = vi.fn((b: OHLCBar) => `详情 ${b.time} 收${b.close}`)
+    const { container } = render(<KLineChart bars={SAMPLE_BARS} tooltipFormatter={fmt} />)
+    expect(crosshairHandler).toBeTypeOf('function')
+    // 模拟 hover 到第一根（日线时间为字符串）
+    crosshairHandler!({ time: '2025-03-04', point: { x: 10, y: 10 } })
+    expect(fmt).toHaveBeenCalledWith(SAMPLE_BARS[0])
+    expect(container.textContent).toContain('详情 2025-03-04 收10.5')
+  })
+
+  it('不提供 tooltipFormatter：不订阅 crosshair（行为不变）', () => {
+    render(<KLineChart bars={SAMPLE_BARS} />)
+    expect(crosshairHandler).toBeNull()
   })
 
   it('空 bars 渲染 Empty，不初始化图表', () => {

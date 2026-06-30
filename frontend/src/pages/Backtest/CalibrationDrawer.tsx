@@ -10,7 +10,9 @@ import dayjs, { type Dayjs } from 'dayjs'
 
 import { t0Service } from '../../api/t0'
 import DateRangeSelector, { type LocalDateRange } from '../../components/DateRangeSelector'
+import KLineChart from '../../components/charts/KLineChart'
 import { applyFixedSuggestion, applyGapSegments } from './calibrationApply'
+import { buildLegChart } from './t0LegMarkers'
 import type { TickPolicyCfg, T0BandEdgeRow, T0Profile } from '../../types/t0'
 
 const { Text, Paragraph } = Typography
@@ -141,6 +143,12 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
   // walk-forward 违例：标定窗末日不早于评估窗起点
   const overlap = !calibRange[1].isBefore(evalWindow[0])
 
+  // K 线买卖腿：用「当前配置档」把标定窗 K 线标上买卖腿（hover 看每根明细）
+  const profileBars = isCond ? segMut.data?.bars : profMut.data?.bars
+  const legChart = useMemo(
+    () => (profileBars && policy ? buildLegChart(profileBars, policy) : null),
+    [profileBars, policy])
+
   const canApply = isCond ? !!segMut.data : (policy?.kind === 'fixed' && !!profMut.data)
   const onApplyClick = () => {
     if (!policy) return
@@ -173,6 +181,25 @@ const CalibrationDrawer: React.FC<CalibrationDrawerProps> = ({
 
         <Button type="primary" icon={<PlayCircleOutlined />} loading={profMut.isPending || segMut.isPending}
           onClick={onRun}>统计画像</Button>
+
+        {/* K 线 + 买卖腿标记（按当前配置档；hover 看每根明细） */}
+        {legChart && (
+          <div>
+            <Text strong>K 线与买卖腿</Text>
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              按当前配置档标在标定窗 K 线上（▲买腿 / ▼卖腿，hover 看该根明细）
+              {isCond ? '；条件策略按每天所属高/低/平开场景取档' : ''}
+            </Text>
+            {!legChart.supported && (
+              <Text type="warning" style={{ fontSize: 12, display: 'block' }}>
+                该策略档位按历史动态计算（波动/趋势），K 线只展示行情、暂不标买卖腿。
+              </Text>
+            )}
+            <KLineChart bars={legChart.bars} markers={legChart.markers} showVolume={false} height={300}
+              emptyText="无 K 线数据"
+              tooltipFormatter={(b) => legChart.details.get(String(b.time)) ?? ''} />
+          </div>
+        )}
 
         {isParamOnly && (profMut.data) && (
           <Alert type="warning" showIcon message="仅供参考"
